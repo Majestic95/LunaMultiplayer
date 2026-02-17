@@ -19,6 +19,7 @@ namespace Server.Client
         public IPEndPoint Endpoint => Connection.RemoteEndPoint;
 
         public string UniqueIdentifier { get; set; }
+        public string KspVersion { get; set; }
 
         public bool Authenticated { get; set; }
 
