@@ -43,6 +43,10 @@ namespace LmpClient.VesselUtilities
                 if (!forceReload && existingVessel.Parts.Count == vesselProto.protoPartSnapshots.Count &&
                     existingVessel.GetCrewCount() == vesselProto.GetVesselCrew().Count)
                 {
+                    // Always keep the stored flight plan current even when skipping a full reload.
+                    // Without this, maneuver node changes are discarded and the vessel's
+                    // PatchedConicSolver loads stale (empty) data on the next GoOffRails.
+                    existingVessel.protoVessel.flightPlan = vesselProto.flightPlan;
                     return true;
                 }
 
