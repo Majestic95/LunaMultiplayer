@@ -38,6 +38,8 @@ namespace Server.Client
         public int Subspace { get; set; } = int.MinValue; //Leave it as min value. When client connect we force them client side to go to latest subspace
         public float SubspaceRate { get; set; } = 1f;
 
+        public DateTime ConnectionTime { get; } = DateTime.UtcNow;
+
         public Task SendThread { get; }
 
         public ClientStructure(NetConnection playerConnection)
