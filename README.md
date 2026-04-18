@@ -76,9 +76,8 @@ You can check [how many servers are up](../../wiki/Master-server-status) and run
 | Master server | Release | Nightly |
 | ------------  | ------- |-------- |
 [Dagger](https://github.com/gavazquez) | [![Release servers](https://img.shields.io/website-up-down-brightgreen-red/http/servers.lunamultiplayer.com:8701.svg?label=status)](http://servers.lunamultiplayer.com:8701) | [![Nightly servers](https://img.shields.io/website-up-down-brightgreen-red/http/servers.lunamultiplayer.com:8751.svg?label=status)](http://servers.lunamultiplayer.com:8751) |
-Tekbot | [![Release servers](https://img.shields.io/website-up-down-brightgreen-red/http/168.119.90.137:8701.svg?label=status)](http://168.119.90.137:8701) | [![Nightly servers](https://img.shields.io/website-up-down-brightgreen-red/http/168.119.90.137:8751.svg?label=status)](http://168.119.90.137:8751) |
-[Angryjoshi](https://github.com/Angryjoshi) | [![Release servers](https://img.shields.io/website-up-down-brightgreen-red/http/lmp.anschuetznet.de:8701.svg?label=status)](http://lmp.anschuetznet.de:8701) | [![Nightly servers](https://img.shields.io/website-up-down-brightgreen-red/http/lmp.anschuetznet.de:8751.svg?label=status)](http://lmp.anschuetznet.de:8751) |
-[Bloodfallen](https://github.com/Bloodfallen) | [![Release servers](https://img.shields.io/website-up-down-brightgreen-red/http/direct.imexile.moe:8701.svg?label=status)](http://direct.imexile.moe:8701) | [![Nightly servers](https://img.shields.io/website-up-down-brightgreen-red/http/direct.imexile.moe:8703.svg?label=status)](http://direct.imexile.moe:8703)|
+DasSkelett | [![Release servers](https://img.shields.io/website-up-down-brightgreen-red/http/ms.lmp.dasskelett.dev.svg?label=status)](http://ms.lmp.dasskelett.dev) | [![Nightly servers](https://img.shields.io/website-up-down-brightgreen-red/http/ms.lmp.dasskelett.dev.svg?label=status)](http://ms.lmp.dasskelett.dev) |
+Nightshade | [![Release servers](https://img.shields.io/website-up-down-brightgreen-red/http/lmp.nightshade.fun:8701.svg?label=status)](http://lmp.nightshade.fun:8701) | [![Nightly servers](https://img.shields.io/website-up-down-brightgreen-red/http/lmp.nightshade.fun:8751.svg?label=status)](http://lmp.nightshade.fun:8751) |
 
 ---
 ### Status:
