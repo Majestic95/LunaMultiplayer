@@ -90,14 +90,17 @@ namespace Server.Message
             if (LockSystem.LockQuery.ControlLockExists(data.VesselId) && !LockSystem.LockQuery.ControlLockBelongsToPlayer(data.VesselId, client.PlayerName))
                 return;
 
+            // Publish the kill-list entry BEFORE touching the store so any in-flight proto task
+            // (VesselDataUpdater.RawConfigNodeInsertOrUpdate schedules its store write on Task.Run)
+            // observes the flag and aborts instead of resurrecting the vessel we're about to remove.
+            if (data.AddToKillList)
+                VesselContext.RemovedVessels.TryAdd(data.VesselId, 0);
+
             if (VesselStoreSystem.VesselExists(data.VesselId))
             {
                 LunaLog.Debug($"Removing vessel {data.VesselId} from {client.PlayerName}");
                 VesselStoreSystem.RemoveVessel(data.VesselId);
             }
-
-            if (data.AddToKillList)
-                VesselContext.RemovedVessels.TryAdd(data.VesselId, 0);
 
             //Relay the message.
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, data);
