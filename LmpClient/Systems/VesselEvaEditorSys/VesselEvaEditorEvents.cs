@@ -11,13 +11,13 @@ namespace LmpClient.Systems.VesselEvaEditorSys
         public void EVAConstructionModePartAttached(Vessel vessel, Part part)
         {
             if (VesselCommon.IsSpectating) return;
-            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, reason: "EVA construction: part attached");
         }
 
         public void EVAConstructionModePartDetached(Vessel vessel, Part part)
         {
             if (VesselCommon.IsSpectating) return;
-            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, reason: "EVA construction: part detached");
         }
 
         public void VesselCreated(Vessel vessel)
@@ -27,7 +27,7 @@ namespace LmpClient.Systems.VesselEvaEditorSys
                 LockSystem.Singleton.AcquireUpdateLock(vessel.id, true, true);
                 LockSystem.Singleton.AcquireUnloadedUpdateLock(vessel.id, true, true);
 
-                VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
+                VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, reason: "EVA construction: new vessel from detached part");
             }
         }
 
@@ -44,7 +44,7 @@ namespace LmpClient.Systems.VesselEvaEditorSys
         public void OnAttachingPart(Part part)
         {
             if (part.vessel)
-                VesselRemoveSystem.Singleton.MessageSender.SendVesselRemove(part.vessel);
+                VesselRemoveSystem.Singleton.MessageSender.SendVesselRemove(part.vessel, true, "EVA construction: attaching part");
         }
     }
 }

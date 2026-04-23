@@ -48,7 +48,7 @@ namespace LmpClient.Harmony
                     Debug.LogWarning(string.Concat("[LMP - OrbitDriver Warning!]: ", driver.vessel.vesselName, " had a NaN Orbit and was removed."));
                     driver.vessel.Unload();
 
-                    VesselRemoveSystem.Singleton.MessageSender.SendVesselRemove(driver.vessel.id, true);
+                    VesselRemoveSystem.Singleton.MessageSender.SendVesselRemove(driver.vessel.id, true, "Corrupt vessel orbit (NaN)");
                     VesselRemoveSystem.Singleton.KillVessel(driver.vessel.id, true, "Corrupt vessel orbit");
 
                     return;

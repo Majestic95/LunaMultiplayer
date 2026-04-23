@@ -97,12 +97,12 @@ namespace LmpClient.Systems.VesselProtoSys
                 if (ProtoSystemReady)
                 {
                     if (FlightGlobals.ActiveVessel.parts.Count != FlightGlobals.ActiveVessel.protoVessel.protoPartSnapshots.Count)
-                        MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel);
+                        MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, reason: "Part count drift (active vessel)");
 
                     foreach (var vessel in VesselCommon.GetSecondaryVessels())
                     {
                         if (vessel.parts.Count != vessel.protoVessel.protoPartSnapshots.Count)
-                            MessageSender.SendVesselMessage(vessel);
+                            MessageSender.SendVesselMessage(vessel, reason: "Part count drift (secondary vessel)");
                     }
                 }
             }
@@ -176,9 +176,10 @@ namespace LmpClient.Systems.VesselProtoSys
 
         /// <summary>
         /// Sends a delayed vessel definition to the server.
-        /// Call this method if you expect to do a lot of modifications to a vessel and you want to send it only once
+        /// Call this method if you expect to do a lot of modifications to a vessel and you want to send it only once.
+        /// <paramref name="reason"/> is forwarded to the server's craft create/remove audit log.
         /// </summary>
-        public void DelayedSendVesselMessage(Guid vesselId, float delayInSec, bool forceReload = false)
+        public void DelayedSendVesselMessage(Guid vesselId, float delayInSec, bool forceReload = false, string reason = null)
         {
             if (QueuedVesselsToSend.Contains(vesselId)) return;
 
@@ -188,7 +189,7 @@ namespace LmpClient.Systems.VesselProtoSys
                 QueuedVesselsToSend.Remove(vesselId);
 
                 LunaLog.Log($"[LMP]: Sending delayed proto vessel {vesselId}");
-                MessageSender.SendVesselMessage(FlightGlobals.FindVessel(vesselId));
+                MessageSender.SendVesselMessage(FlightGlobals.FindVessel(vesselId), forceReload, reason);
             }, delayInSec);
         }
 
