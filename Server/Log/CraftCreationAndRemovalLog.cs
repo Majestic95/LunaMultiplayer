@@ -1,3 +1,4 @@
+using Server.Events;
 using System;
 using System.IO;
 using System.Text.RegularExpressions;
@@ -11,14 +12,36 @@ namespace Server.Log
     /// The file lives at <c>logs/CraftCreationAndRemoval.txt</c> and is truncated at server start
     /// (via the static constructor) so each server run produces a fresh audit trail.
     ///
-    /// This class deliberately depends only on <see cref="LunaLog.LogFolder"/> and
-    /// <see cref="System.FileHandler"/> (for thread-safe writes) to keep a single responsibility:
-    /// write audit entries. It does NOT extend <see cref="LmpCommon.BaseLogger"/> because we do not
+    /// Writes go through a single <see cref="StreamWriter"/> that is kept open for the server's
+    /// lifetime and disposed on <see cref="ExitEvent.ServerClosing"/>. Keeping the stream open
+    /// avoids an <c>open/write/close</c> round-trip on every vessel create/remove event — the
+    /// previous implementation used <c>File.AppendAllText</c> per event, which created steady
+    /// FileStream/StreamWriter allocations under load.
+    ///
+    /// This class deliberately depends only on <see cref="LunaLog.LogFolder"/> (for the path),
+    /// <see cref="Server.System.FileHandler"/> (for the initial directory bootstrap), and
+    /// <see cref="ExitEvent"/> (for clean shutdown) to keep its single responsibility: write
+    /// audit entries. It does NOT extend <see cref="LmpCommon.BaseLogger"/> because we do not
     /// want these entries echoed to the console or the general <c>lmpserver_*.log</c> file.
     /// </summary>
     public static class CraftCreationAndRemovalLog
     {
         private static readonly string LogFilePath = Path.Combine(LunaLog.LogFolder, "CraftCreationAndRemoval.txt");
+
+        /// <summary>
+        /// Serializes all access to <see cref="_writer"/> and the close hook. <see cref="StreamWriter"/>
+        /// is not thread-safe and log events can arrive from any of the server's message-handler
+        /// tasks at once, so a single write lock is the simplest correct synchronization.
+        /// </summary>
+        private static readonly object WriteLock = new object();
+
+        /// <summary>
+        /// Persistent writer opened in the static constructor and disposed on server shutdown.
+        /// <c>null</c> if the file could not be opened, in which case every subsequent
+        /// <see cref="LogCreated"/>/<see cref="LogRemoved"/> call becomes a no-op (matching the
+        /// advisory semantics of the previous implementation).
+        /// </summary>
+        private static StreamWriter _writer;
 
         static CraftCreationAndRemovalLog()
         {
@@ -27,19 +50,25 @@ namespace Server.Log
                 if (!System.FileHandler.FolderExists(LunaLog.LogFolder))
                     System.FileHandler.FolderCreate(LunaLog.LogFolder);
 
-                // Reset the file on each server start so the audit trail reflects only the current run.
-                var header =
-                    $"# Craft Creation and Removal audit log" + Environment.NewLine +
-                    $"# Server started at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC" + Environment.NewLine +
-                    $"# Format: [Timestamp UTC] Vessel <GUID> (<Vessel Name>) created/removed by player <Player> (<Reason>)" + Environment.NewLine;
+                // FileMode.Create truncates any pre-existing file so each server run gets a fresh
+                // audit trail. FileShare.Read lets operators tail the file live while the server
+                // is running.
+                var stream = new FileStream(LogFilePath, FileMode.Create, FileAccess.Write, FileShare.Read);
+                _writer = new StreamWriter(stream) { NewLine = Environment.NewLine };
 
-                System.FileHandler.WriteToFile(LogFilePath, header);
+                _writer.WriteLine("# Craft Creation and Removal audit log");
+                _writer.WriteLine($"# Server started at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC");
+                _writer.WriteLine("# Format: [Timestamp UTC] Vessel <GUID> (<Vessel Name>) created/removed by player <Player> (<Reason>)");
+                _writer.Flush();
+
+                ExitEvent.ServerClosing += CloseLog;
             }
             catch (Exception e)
             {
                 // If we can't prepare the file (permissions, disk full, etc.) surface it in the
                 // main log but don't crash the server - the audit log is advisory.
                 LunaLog.Error($"Failed to initialize CraftCreationAndRemoval.txt: {e.Message}");
+                _writer = null;
             }
         }
 
@@ -98,15 +127,50 @@ namespace Server.Log
             var safePlayer = string.IsNullOrWhiteSpace(playerName) ? "Unknown" : playerName.Trim();
             var safeReason = string.IsNullOrWhiteSpace(reason) ? "Unknown" : reason.Trim();
 
-            var line = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] Vessel {vesselId} ({safeName}) {action} by player {safePlayer} ({safeReason})" + Environment.NewLine;
+            var line = $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}] Vessel {vesselId} ({safeName}) {action} by player {safePlayer} ({safeReason})";
 
-            try
+            lock (WriteLock)
             {
-                System.FileHandler.AppendToFile(LogFilePath, line);
+                if (_writer == null) return;
+
+                try
+                {
+                    _writer.WriteLine(line);
+                    // Flush per entry so the on-disk file is usable for live troubleshooting
+                    // (e.g. tailing it while chasing a "where did my ship go?" report).
+                    _writer.Flush();
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Error($"Failed to append to CraftCreationAndRemoval.txt: {e.Message}");
+                }
             }
-            catch (Exception e)
+        }
+
+        /// <summary>
+        /// Flush and release the underlying stream. Invoked from <see cref="ExitEvent.ServerClosing"/>
+        /// so a clean shutdown (Ctrl+C on Linux, console-close handler on Windows) doesn't leave
+        /// buffered entries unwritten.
+        /// </summary>
+        private static void CloseLog()
+        {
+            lock (WriteLock)
             {
-                LunaLog.Error($"Failed to append to CraftCreationAndRemoval.txt: {e.Message}");
+                if (_writer == null) return;
+
+                try
+                {
+                    _writer.Flush();
+                    _writer.Dispose();
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Error($"Failed to close CraftCreationAndRemoval.txt: {e.Message}");
+                }
+                finally
+                {
+                    _writer = null;
+                }
             }
         }
     }

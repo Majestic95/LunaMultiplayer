@@ -40,8 +40,15 @@ namespace Server
 
         private static bool IsRestart = false;
 
-        public static void Main()
+        public static void Main(string[] args)
         {
+            // Memory diagnostics are an opt-in operator tool. Gating them on a CLI flag
+            // (rather than just the IntervalSettings entry) keeps the production log clean
+            // by default and means turning diagnostics on for a hosted server is a single
+            // launcher edit, not an XML edit followed by a restart.
+            // Note: We're going to true it for now and return to HasFlag another time.
+            var memoryDiagnosticsEnabled = HasFlag(args, "--memorydiag");
+
             //Verify the .NET runtime before anything else so we can give users a clear,
             //actionable message instead of failing later with a confusing error.
             DotNetRuntimeChecker.EnsureCorrectRuntimeOrExit();
@@ -127,6 +134,12 @@ namespace Server
 
                 TaskContainer.Add(LongRunTaskFactory.StartNew(() => GcSystem.PerformGarbageCollection(CancellationTokenSrc.Token), CancellationTokenSrc.Token));
 
+                if (memoryDiagnosticsEnabled)
+                {
+                    LunaLog.Normal("Memory diagnostics enabled (--memorydiag). [MemDiag] lines will be written to the log.");
+                    TaskContainer.Add(LongRunTaskFactory.StartNew(() => MemoryDiagnosticsLogger.LogMemoryDiagnostics(CancellationTokenSrc.Token), CancellationTokenSrc.Token));
+                }
+
                 while (ServerContext.ServerStarting)
                     Thread.Sleep(500);
 
@@ -182,6 +195,22 @@ namespace Server
         /// Return the number of running instances.
         /// </summary>
         private static int GetRunningInstances() => Process.GetProcessesByName("LunaServer.exe").Length;
+
+        /// <summary>
+        /// Case-insensitive check for a single command-line flag. Kept tiny on purpose: the
+        /// server has historically had no CLI surface and we don't want to grow one accidentally.
+        /// If we ever need more than two or three flags, swap this for a dedicated parser.
+        /// </summary>
+        private static bool HasFlag(string[] args, string flag)
+        {
+            if (args == null) return false;
+            for (var i = 0; i < args.Length; i++)
+            {
+                if (string.Equals(args[i], flag, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
+        }
 
         /// <summary>
         /// Runs the exit logic
