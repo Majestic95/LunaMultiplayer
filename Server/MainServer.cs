@@ -42,6 +42,10 @@ namespace Server
 
         public static async Task Main()
         {
+            //Verify the .NET runtime before anything else so we can give users a clear,
+            //actionable message instead of failing later with a confusing error.
+            DotNetRuntimeChecker.EnsureCorrectRuntimeOrExit();
+
             try
             {
                 // Force culture to en-US to avoid 'System.Net.Sockets.resources' assembly load error.
