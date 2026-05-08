@@ -2,6 +2,7 @@
 using HarmonyLib;
 using KSP.UI.Screens;
 using LmpClient.Base;
+using LmpClient.Diagnostics;
 using LmpClient.Events.Base;
 using LmpClient.Localization;
 using LmpClient.ModuleStore;
@@ -72,6 +73,13 @@ namespace LmpClient
         /// </summary>
         public static bool IsUnityThread => Thread.CurrentThread.ManagedThreadId == _mainThreadId;
 
+        //Diagnostic heartbeat state (see EmitHeartbeat). Wall-clock pacing via
+        //Time.realtimeSinceStartup so we ignore Time.timeScale and pause behavior.
+        private static float _heartbeatLastUpdateAt;
+        private static float _heartbeatLastTickLoggedAt;
+        private const float HeartbeatTickIntervalSec = 1f;
+        private const float HeartbeatStallThresholdSec = 5f;
+
         //Hack gravity fix.
         public static Dictionary<CelestialBody, double> BodiesGees { get; } = new Dictionary<CelestialBody, double>();
 
@@ -83,6 +91,12 @@ namespace LmpClient
         {
             LunaLog.ProcessLogMessages();
             LunaScreenMsg.ProcessScreenMessages();
+
+            //Diagnostic: emit a wall-clock heartbeat so we can tell idle SC time
+            //apart from a hung Unity main thread when reading KSP.log after the fact.
+            //This must run BEFORE the !Enabled return so a stall while disabled is
+            //still observable.
+            EmitHeartbeat();
 
             if (!Enabled) return;
 
@@ -148,6 +162,97 @@ namespace LmpClient
             {
                 HandleException(e, "Main system- update");
             }
+        }
+
+        /// <summary>
+        /// Emits a 1Hz wall-clock heartbeat into KSP.log and a STALL warning whenever
+        /// the gap between two consecutive Update() calls exceeds <see cref="HeartbeatStallThresholdSec"/>.
+        ///
+        /// Purpose: distinguish "Unity main thread is idle" from "Unity main thread is
+        /// hung" when reading KSP.log after the fact. A normal 100s of idle SC time
+        /// produces ~100 heartbeat ticks; a 100s main-thread stall produces no ticks
+        /// across the gap and one resume tick + one STALL line with dt &gt;&gt; 5s.
+        ///
+        /// Pacing uses <see cref="Time.realtimeSinceStartup"/> so it is unaffected by
+        /// <see cref="Time.timeScale"/>, pause, or fixed-timestep changes. The method
+        /// allocates only on the lines it actually writes (no per-frame string work)
+        /// so the overhead on the no-log path is one float read and two compares.
+        /// Diagnostic only — safe to leave enabled in shipping builds; if it becomes
+        /// noise, gate it behind a settings flag rather than removing the call site.
+        /// </summary>
+        private static void EmitHeartbeat()
+        {
+            var now = Time.realtimeSinceStartup;
+
+            //First call after Awake: prime both timers and exit so the first reported
+            //dt is a real frame-to-frame delta rather than "time since process start".
+            if (_heartbeatLastUpdateAt == 0f)
+            {
+                _heartbeatLastUpdateAt = now;
+                _heartbeatLastTickLoggedAt = now;
+                return;
+            }
+
+            var dtSinceLastUpdate = now - _heartbeatLastUpdateAt;
+            _heartbeatLastUpdateAt = now;
+
+            //Stall detector: any single Update gap above the threshold is a smoking
+            //gun for a hung main thread (or a blocking call inside our own code, a
+            //mod's, or stock KSP). We log it as a Warning so it greps cleanly.
+            //Threshold is intentionally loose enough to ignore normal scene loads
+            //(typically 1-3s) while still catching the multi-second freezes the
+            //user is investigating.
+            if (dtSinceLastUpdate >= HeartbeatStallThresholdSec)
+            {
+                LunaLog.LogWarning($"[LMP][HEARTBEAT] STALL: Update gap = {dtSinceLastUpdate:F2}s " +
+                                   $"(scene={HighLogic.LoadedScene} vessels={SafeVesselCount()} " +
+                                   $"frame={Time.frameCount}). Main thread was blocked for that duration.");
+                //Drain the TS profiler immediately on a stall — this is the most
+                //valuable single line in the log because it attributes the just-
+                //finished freeze to a specific instrumented call site (lock-acquire
+                //flood, RefreshTS rebuild, marker refresh, etc.). Emitted right
+                //below the STALL line so the two are visually adjacent.
+                EmitTsProfileLineIfAny();
+                //Reset the tick pacer too so we don't immediately fire a regular tick
+                //right after a stall warning carrying the same timestamp.
+                _heartbeatLastTickLoggedAt = now;
+                return;
+            }
+
+            //Regular 1Hz heartbeat. Logged unconditionally so a "no heartbeat for N
+            //seconds" gap in KSP.log is itself diagnostic evidence — the absence is
+            //the signal.
+            if (now - _heartbeatLastTickLoggedAt >= HeartbeatTickIntervalSec)
+            {
+                _heartbeatLastTickLoggedAt = now;
+                LunaLog.Log($"[LMP][HEARTBEAT] tick t={now:F1}s scene={HighLogic.LoadedScene} " +
+                            $"vessels={SafeVesselCount()} frame={Time.frameCount} dt={dtSinceLastUpdate:F2}s");
+                EmitTsProfileLineIfAny();
+            }
+        }
+
+        /// <summary>
+        /// Drains <see cref="TsLoadProfiler"/> and logs the resulting per-second
+        /// breakdown if any bucket fired. Quiet seconds emit nothing so the
+        /// heartbeat log doesn't get padded with empty profile lines while
+        /// nothing TS-related is happening (e.g. user idling in flight).
+        /// </summary>
+        private static void EmitTsProfileLineIfAny()
+        {
+            var profileLine = TsLoadProfiler.FlushSnapshotOrNull();
+            if (profileLine != null)
+                LunaLog.Log(profileLine);
+        }
+
+        /// <summary>
+        /// Reads <c>FlightGlobals.Vessels.Count</c> behind a try/catch so a transient
+        /// null during scene transitions can't break the diagnostic logger and mask
+        /// the stall it was supposed to surface.
+        /// </summary>
+        private static int SafeVesselCount()
+        {
+            try { return FlightGlobals.Vessels?.Count ?? -1; }
+            catch { return -1; }
         }
 
         #endregion
