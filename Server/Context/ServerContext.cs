@@ -33,9 +33,9 @@ namespace Server.Context
         // Configuration object
         public static NetPeerConfiguration Config { get; } = new NetPeerConfiguration("LMP")
         {
-            SendBufferSize = 1500000, //500kb
-            ReceiveBufferSize = 1500000, //500kb
-            DefaultOutgoingMessageCapacity = 500000, //500kb
+            SendBufferSize = 1500000, //~1.43 MB
+            ReceiveBufferSize = 1500000, //~1.43 MB
+            DefaultOutgoingMessageCapacity = 500000, //~488 KB
             SuppressUnreliableUnorderedAcks = true,
         };
 
