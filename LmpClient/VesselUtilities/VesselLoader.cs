@@ -316,6 +316,132 @@ namespace LmpClient.VesselUtilities
         }
 
         /// <summary>
+        /// Removes null entries from every <see cref="ProtoPartSnapshot.protoModuleCrew"/> list
+        /// on the freshly-loaded protovessel. Stock KSP's <c>ProtoPartSnapshot.LoadCrew</c> adds a
+        /// <c>null</c> placeholder to <c>protoModuleCrew</c> whenever a wire-side <c>crew = NAME</c>
+        /// value cannot be resolved through <c>HighLogic.CurrentGame.CrewRoster</c> — typically
+        /// because the originating client serialised an empty name (logged as
+        /// <c>"[Protocrewmember]: Instance of crewmember  in part X on Y does not exist in the roster"</c>
+        /// with the tell-tale double space) or a kerbal that exists in their roster but not ours
+        /// (e.g. a tourist created on the originator's side that the server never replicated to us
+        /// before the vessel proto arrived).
+        ///
+        /// Those null placeholders sit dormant on the proto until something walks them, at which
+        /// point three different stock KSP code paths NRE in distinct ways:
+        ///
+        ///   1. <c>KSP.UI.Screens.KbApp_VesselCrew.CreateVesselCrewList</c> in the Tracking Station
+        ///      pulls crew via <c>vessel.protoVessel.protoPartSnapshots[*].protoModuleCrew</c> and
+        ///      <see cref="System.Collections.Generic.List{T}.Sort(System.Comparison{T})"/>s the
+        ///      result by <c>KbApp_VesselCrew.CompareSeatIdx</c>, which dereferences <c>r1.seatIdx</c>
+        ///      / <c>r2.seatIdx</c> — Sort then rethrows our NRE as
+        ///      <c>InvalidOperationException: Failed to compare two elements in the array</c>
+        ///      when the user clicks the vessel and stalls the Tracking Station UI permanently.
+        ///   2. On scene transition to FLIGHT, <c>ProtoVessel.LoadObjects</c> →
+        ///      <c>ProtoPartSnapshot.ConfigurePart</c> → <c>Part.RegisterCrew</c> dereferences each
+        ///      <c>protoModuleCrew</c> entry to register seat assignments and NREs out of
+        ///      <c>FlightDriver.Start</c>, leaving the player on a black flight scene.
+        ///   3. The half-instantiated vessel's <c>ModuleCommand.UpdateControlSourceState</c> then
+        ///      NREs every FixedUpdate forever once <c>FixedUpdate</c> resumes, producing the
+        ///      "FixedUpdate NRE storm" pattern documented elsewhere in this file.
+        ///
+        /// All three paths require null entries inside <c>protoModuleCrew</c> as their precondition.
+        /// Removing them here — at the single choke point through which every wire-arrival vessel
+        /// passes — defangs all three crash sites at once. Stock KSP already considers a null
+        /// entry to mean "this seat references a kerbal we don't have", so the local game state
+        /// after the scrub is identical to the state stock KSP would have produced if the wire
+        /// data simply omitted those crew entries to begin with: the seat is empty, the part is
+        /// crewless from this client's perspective, and the originating peer's vessel-update
+        /// stream remains the source of truth for who is actually aboard. We deliberately do not
+        /// invent placeholder kerbals here because that would (a) leak fake names into the local
+        /// roster the next time stock KSP saved it and (b) re-collide with the real kerbals when
+        /// the wire data finally caught up.
+        ///
+        /// IMPORTANT — parallel-list invariant: <see cref="ProtoPartSnapshot"/> carries
+        /// <c>protoModuleCrew</c> (<c>List&lt;ProtoCrewMember&gt;</c>) and
+        /// <c>protoCrewNames</c> (<c>List&lt;string&gt;</c>) as parallel arrays indexed in lockstep.
+        /// Stock <c>KerbalRoster.ValidateAssignments(Game)</c> walks both by the same index <c>i</c>
+        /// (loop bound is <c>protoModuleCrew.Count</c>, lookup is <c>protoCrewNames[i]</c>) and on
+        /// the missing-from-roster branch calls <c>SystemUtilities.ExpungeKerbal(protoModuleCrew[i])</c>.
+        /// If we strip nulls from <c>protoModuleCrew</c> alone the indices shift and a subsequent
+        /// validation pass — which fires on <i>every</i> game / scene load triggered by the
+        /// post-`Game.Save` autosave round-trip — would call <c>ExpungeKerbal</c> on an unrelated,
+        /// real kerbal that now lives at the same index as a still-unresolved name. That would
+        /// silently delete real crew. We therefore remove matched (crew slot, name slot) pairs in
+        /// lockstep, keeping the two-list invariant intact for every downstream stock consumer.
+        ///
+        /// The scrub is wrapped in try/catch — diagnostic / defensive cleanup must never break
+        /// the load path further than the original failure already did.
+        /// </summary>
+        private static void ScrubInvalidProtoCrew(ProtoVessel vesselProto)
+        {
+            if (vesselProto?.protoPartSnapshots == null) return;
+            try
+            {
+                var totalRemoved = 0;
+                var partsAffected = 0;
+                var nameDesyncs = 0;
+                for (var p = 0; p < vesselProto.protoPartSnapshots.Count; p++)
+                {
+                    var snapshot = vesselProto.protoPartSnapshots[p];
+                    var crew = snapshot?.protoModuleCrew;
+                    if (crew == null || crew.Count == 0) continue;
+
+                    var names = snapshot.protoCrewNames;
+                    var removedHere = 0;
+
+                    // Walk back-to-front so RemoveAt does not invalidate indices for entries
+                    // we haven't visited yet.
+                    for (var i = crew.Count - 1; i >= 0; i--)
+                    {
+                        if (crew[i] != null) continue;
+
+                        crew.RemoveAt(i);
+                        if (names != null)
+                        {
+                            if (i < names.Count) names.RemoveAt(i);
+                            else nameDesyncs++;
+                        }
+                        removedHere++;
+                    }
+
+                    if (removedHere > 0)
+                    {
+                        totalRemoved += removedHere;
+                        partsAffected++;
+                    }
+                }
+
+                if (totalRemoved > 0)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: Scrubbed {totalRemoved} null protoModuleCrew entr{(totalRemoved == 1 ? "y" : "ies")} " +
+                        $"(and parallel protoCrewNames slots) across {partsAffected} part(s) on vessel " +
+                        $"{vesselProto.vesselID} ({SafeGetVesselName(vesselProto)}). " +
+                        $"Caused by wire-side crew names that don't resolve in this client's CrewRoster (typical: empty " +
+                        $"crew name or a tourist not yet replicated to us). Without this scrub stock KSP NREs in " +
+                        $"KbApp_VesselCrew.CompareSeatIdx (Tracking Station focus), Part.RegisterCrew (scene→FLIGHT), " +
+                        $"and ModuleCommand.UpdateControlSourceState (every FixedUpdate); without the lockstep " +
+                        $"removal, KerbalRoster.ValidateAssignments would later ExpungeKerbal on a misindexed real kerbal.");
+                }
+
+                if (nameDesyncs > 0)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: ScrubInvalidProtoCrew encountered {nameDesyncs} crew slot(s) on vessel " +
+                        $"{vesselProto.vesselID} where protoModuleCrew was longer than protoCrewNames before the scrub. " +
+                        $"This means the proto already arrived with a broken parallel-list invariant; the live " +
+                        $"protoModuleCrew has been cleaned but stock KerbalRoster.ValidateAssignments will silently " +
+                        $"skip the surplus indices since its loop bound is now the (shorter) crew list.");
+                }
+            }
+            catch (Exception e)
+            {
+                //Diagnostic / defensive cleanup must never break the load path.
+                LunaLog.LogWarning($"[LMP]: ScrubInvalidProtoCrew failed for {vesselProto.vesselID}: {e.Message}");
+            }
+        }
+
+        /// <summary>
         /// Schedules a second sanity walk one Unity frame after <see cref="ProtoVessel.Load"/> so we
         /// observe the vessel after stock KSP has run <c>Vessel.Awake</c>/<c>OnEnable</c>/<c>Start</c>
         /// and every <c>VesselModule.Start</c> on it. The synchronous post-load walk above runs
@@ -377,8 +503,29 @@ namespace LmpClient.VesselUtilities
                 var rootPart = v.rootPart;
                 var protoPartSnapshots = v.protoVessel?.protoPartSnapshots;
                 int nullParts = 0, nullPartInfo = 0, nullVesselRef = 0, wrongVesselRef = 0,
-                    nullModules = 0, moduleCountMismatch = 0, nullCrewSlot = 0,
+                    nullModules = 0, moduleCountMismatch = 0, nullCrewSlot = 0, nullProtoCrewSlot = 0,
                     orphanParent = 0, brokenAttachNode = 0, brokenSrfAttachNode = 0;
+
+                // Walk the ProtoVessel's protoPartSnapshots independently of the live Vessel.parts
+                // list. For unloaded/packed vessels (every vessel in the Tracking Station, every
+                // non-active in-flight vessel) Vessel.parts is empty by design, so the live-parts
+                // null-crew check below cannot see corruption that lives on the proto — yet stock
+                // KSP's KbApp_VesselCrew.CreateVesselCrewList pulls crew via
+                // vessel.protoVessel.protoPartSnapshots[*].protoModuleCrew and crashes on null
+                // entries there even for unloaded vessels. Counting both surfaces makes the
+                // CORRUPT line accurate regardless of load state.
+                if (protoPartSnapshots != null)
+                {
+                    for (var p = 0; p < protoPartSnapshots.Count; p++)
+                    {
+                        var protoCrew = protoPartSnapshots[p]?.protoModuleCrew;
+                        if (protoCrew == null) continue;
+                        for (var c = 0; c < protoCrew.Count; c++)
+                        {
+                            if (protoCrew[c] == null) nullProtoCrewSlot++;
+                        }
+                    }
+                }
                 for (var i = 0; i < v.parts.Count; i++)
                 {
                     var part = v.parts[i];
@@ -432,7 +579,7 @@ namespace LmpClient.VesselUtilities
                 }
 
                 var corrupt = nullParts + nullPartInfo + nullVesselRef + wrongVesselRef +
-                              nullModules + moduleCountMismatch + nullCrewSlot +
+                              nullModules + moduleCountMismatch + nullCrewSlot + nullProtoCrewSlot +
                               nullProtoVessel + nullRootPart +
                               orphanParent + brokenAttachNode + brokenSrfAttachNode + nullVesselModule;
                 if (corrupt > 0)
@@ -441,7 +588,8 @@ namespace LmpClient.VesselUtilities
                                      $"nullParts={nullParts} nullPartInfo={nullPartInfo} " +
                                      $"nullVesselRef={nullVesselRef} wrongVesselRef={wrongVesselRef} " +
                                      $"nullModules={nullModules} moduleCountMismatch={moduleCountMismatch} " +
-                                     $"nullCrewSlot={nullCrewSlot} nullProtoVessel={nullProtoVessel} " +
+                                     $"nullCrewSlot={nullCrewSlot} nullProtoCrewSlot={nullProtoCrewSlot} " +
+                                     $"nullProtoVessel={nullProtoVessel} " +
                                      $"nullRootPart={nullRootPart} orphanParent={orphanParent} " +
                                      $"brokenAttachNode={brokenAttachNode} brokenSrfAttachNode={brokenSrfAttachNode} " +
                                      $"nullVesselModule={nullVesselModule}. " +
@@ -544,6 +692,13 @@ namespace LmpClient.VesselUtilities
                 LunaLog.Log($"[LMP]: Protovessel {vesselProto.vesselID} failed to create a vessel!");
                 return false;
             }
+
+            // Strip null entries from each ProtoPartSnapshot.protoModuleCrew that stock KSP just
+            // appended when wire-side crew names failed to resolve through CrewRoster. Has to run
+            // AFTER vesselProto.Load (which is what populates protoModuleCrew from the wire
+            // ConfigNode) and BEFORE the corruption walks / scene→FLIGHT transition. See the full
+            // rationale on ScrubInvalidProtoCrew itself.
+            ScrubInvalidProtoCrew(vesselProto);
 
             LogPostLoadVesselSanity(vesselProto);
             ScheduleDeferredPostStartSanityWalk(vesselProto);

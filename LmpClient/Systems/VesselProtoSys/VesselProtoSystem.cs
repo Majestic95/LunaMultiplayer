@@ -1,6 +1,7 @@
 ﻿using LmpClient.Base;
 using LmpClient.Events;
 using LmpClient.Extensions;
+using LmpClient.Systems.KerbalSys;
 using LmpClient.Systems.TimeSync;
 using LmpClient.Systems.VesselRemoveSys;
 using LmpClient.Utilities;
@@ -122,6 +123,27 @@ namespace LmpClient.Systems.VesselProtoSys
 
             try
             {
+                // Drain any KerbalProto messages queued since the last KerbalSystem.LoadKerbals
+                // tick BEFORE running vesselProto.Load(...) on any vessel this tick. Background:
+                // KerbalSystem.LoadKerbals runs on its own ~1 s routine and consumes
+                // KerbalsToProcess only during that tick; CheckVesselsToLoad runs on a faster
+                // routine, so on a busy session (or during the burst that immediately follows
+                // initial sync, when KerbalProto messages can still be in flight as VesselProto
+                // messages start arriving) we can land here with named-but-unmerged kerbals
+                // sitting in KerbalsToProcess. Stock KSP's ProtoPartSnapshot ConfigNode ctor
+                // resolves "crew = NAME" against HighLogic.CurrentGame.CrewRoster *as it stands
+                // right now*, so any kerbal that's queued-but-not-merged still produces a null
+                // entry in protoModuleCrew + the "[Protocrewmember]: Instance of crewmember  in
+                // part X on Y does not exist in the roster" warning, exactly as if the kerbal
+                // had never been sent. Co-sending crew with each VesselProto already eliminates
+                // the originating-side gap; this drain eliminates the receiving-side timing
+                // gap so the two together close the loop. Cheap on the steady state -- the
+                // queue is normally empty, this is one TryDequeue/Count check.
+                if (KerbalSystem.Singleton != null && !KerbalSystem.Singleton.KerbalsToProcess.IsEmpty)
+                {
+                    KerbalSystem.Singleton.LoadKerbalsIntoGame();
+                }
+
                 foreach (var keyVal in VesselProtos)
                 {
                     if (keyVal.Value.TryPeek(out var vesselProto) && vesselProto.GameTime <= TimeSyncSystem.UniversalTime)
