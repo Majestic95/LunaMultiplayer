@@ -397,6 +397,17 @@ namespace LmpClient
             NetworkConnection.Disconnect("Quit game");
             NetworkState = ClientState.Disconnected;
             LunaLog.ProcessLogMessages();
+            //Drain the vessel-sync diagnostic's in-memory buffer before the process
+            //ends. With AutoFlush=false the periodic FlushIfDirty in NotifyScene
+            //would already have written most events, but the final batch between
+            //the last CheckVesselsToLoad tick and quit lives only in the StreamWriter
+            //buffer until something forces a flush. The FileStream finalizer would
+            //do it on graceful AppDomain unload, but Unity's shutdown order doesn't
+            //guarantee finalizers run before the process actually exits -- and the
+            //events most worth keeping are the ones that fired in the seconds before
+            //the user decided to quit (often the same seconds they want to send us a
+            //bug report about).
+            VesselSyncDiagnostics.Flush();
         }
 
         public Game.Modes ConvertGameMode(GameMode inputMode)
