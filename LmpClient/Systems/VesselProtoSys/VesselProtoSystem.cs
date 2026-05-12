@@ -25,6 +25,27 @@ namespace LmpClient.Systems.VesselProtoSys
 
         public ConcurrentDictionary<Guid, VesselProtoQueue> VesselProtos { get; } = new ConcurrentDictionary<Guid, VesselProtoQueue>();
 
+        //Per-vessel record of "the value of vessel.parts.Count the last time we
+        //broadcast a Part-count-drift message for this vessel id". Gates
+        //SendVesselDefinition's drift check so we never re-broadcast the same drift
+        //state more than once. Background: SendVesselDefinition fires every 2.5 s and
+        //compares vessel.parts.Count against vessel.protoVessel.protoPartSnapshots.Count.
+        //SendVesselMessage rewrites vessel.protoVessel via vessel.BackupVessel() on
+        //every send, BUT stock KSP's BackupVessel can legitimately produce a snapshot
+        //count that differs from the live parts.Count for several reasons (dynamic
+        //parts, EVA-suit attachment, robotic / breaking-parts states that don't
+        //round-trip 1:1 through serialisation). When that happens the drift check
+        //fires on every 2.5 s tick forever, broadcasting an identical proto and
+        //forcing every receiving client to pay a destructive ProtoVessel.Load on each
+        //arrival -- exactly the ~3 s cadence of full reloads observed in KSP.log when
+        //multiple peer vessels are present. Caching the count we last broadcast lets
+        //us short-circuit when the drift is "stable" (server has the latest data;
+        //nothing new to send) while still firing immediately when parts.Count moves
+        //to a value we have not yet sent (genuine structural change on the
+        //originating side).
+        private static readonly ConcurrentDictionary<Guid, int> LastBroadcastDriftPartCount =
+            new ConcurrentDictionary<Guid, int>();
+
         public bool ProtoSystemReady => Enabled && FlightGlobals.ready && HighLogic.LoadedScene == GameScenes.FLIGHT &&
             FlightGlobals.ActiveVessel != null && !VesselCommon.IsSpectating;
 
@@ -82,6 +103,7 @@ namespace LmpClient.Systems.VesselProtoSys
             VesselProtos.Clear();
             VesselsUnableToLoad.Clear();
             QueuedVesselsToSend.Clear();
+            LastBroadcastDriftPartCount.Clear();
             LocalTopologyTracker.ClearAll();
         }
 
@@ -96,16 +118,15 @@ namespace LmpClient.Systems.VesselProtoSys
         {
             try
             {
-                if (ProtoSystemReady)
-                {
-                    if (FlightGlobals.ActiveVessel.parts.Count != FlightGlobals.ActiveVessel.protoVessel.protoPartSnapshots.Count)
-                        MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, reason: "Part count drift (active vessel)");
+                if (!ProtoSystemReady) return;
 
-                    foreach (var vessel in VesselCommon.GetSecondaryVessels())
-                    {
-                        if (vessel.parts.Count != vessel.protoVessel.protoPartSnapshots.Count)
-                            MessageSender.SendVesselMessage(vessel, reason: "Part count drift (secondary vessel)");
-                    }
+                if (ShouldBroadcastDriftFor(FlightGlobals.ActiveVessel))
+                    MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, reason: "Part count drift (active vessel)");
+
+                foreach (var vessel in VesselCommon.GetSecondaryVessels())
+                {
+                    if (ShouldBroadcastDriftFor(vessel))
+                        MessageSender.SendVesselMessage(vessel, reason: "Part count drift (secondary vessel)");
                 }
             }
             catch (Exception e)
@@ -113,6 +134,37 @@ namespace LmpClient.Systems.VesselProtoSys
                 LunaLog.LogError($"[LMP]: Error in SendVesselDefinition {e}");
             }
 
+        }
+
+        /// <summary>
+        /// Returns true when <paramref name="vessel"/> has a part-count drift we have not
+        /// already broadcast. Combines two short-circuits:
+        /// 1. <c>parts.Count == protoVessel.protoPartSnapshots.Count</c> means the live
+        ///    Vessel and its stored proto agree -- no drift, nothing to send.
+        /// 2. <c>parts.Count == LastBroadcastDriftPartCount[vesselId]</c> means we already
+        ///    broadcast at this exact part count; the server has the latest data and
+        ///    re-sending would just trigger an identical receiving-side reload storm.
+        /// The cache entry is updated when (and only when) we decide a broadcast is
+        /// warranted, so any subsequent change to <c>parts.Count</c> on the originating
+        /// side immediately re-arms the check.
+        /// </summary>
+        private static bool ShouldBroadcastDriftFor(Vessel vessel)
+        {
+            if (vessel == null || vessel.protoVessel?.protoPartSnapshots == null) return false;
+
+            var liveCount = vessel.parts.Count;
+            var protoCount = vessel.protoVessel.protoPartSnapshots.Count;
+            if (liveCount == protoCount) return false;
+
+            //ConcurrentDictionary even though VesselProtoSystem is single-threaded for
+            //the send path: we also clear entries from RemoveVessel which can be
+            //invoked from message-handling threads. The cost difference vs Dictionary
+            //is irrelevant at 2.5 s tick granularity.
+            if (LastBroadcastDriftPartCount.TryGetValue(vessel.id, out var lastSent) && lastSent == liveCount)
+                return false;
+
+            LastBroadcastDriftPartCount[vessel.id] = liveCount;
+            return true;
         }
 
         /// <summary>
@@ -232,6 +284,11 @@ namespace LmpClient.Systems.VesselProtoSys
         public void RemoveVessel(Guid vesselId)
         {
             VesselProtos.TryRemove(vesselId, out _);
+            //Drop the drift cache entry so a vessel re-created with the same id later
+            //in the session (e.g. revert-to-launch from EDITOR, or a re-spawn after a
+            //remote kill+resend) starts from a clean slate and the first legitimate
+            //broadcast after the recreate isn't suppressed.
+            LastBroadcastDriftPartCount.TryRemove(vesselId, out _);
             //A vessel id resurrected in the same session must not inherit a stale
             //"I just mutated locally" record from the previous incarnation, which
             //would suppress the first wire update on the new vessel.
