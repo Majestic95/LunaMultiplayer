@@ -82,6 +82,7 @@ namespace LmpClient.Systems.VesselProtoSys
             VesselProtos.Clear();
             VesselsUnableToLoad.Clear();
             QueuedVesselsToSend.Clear();
+            LocalTopologyTracker.ClearAll();
         }
 
         #endregion
@@ -148,6 +149,16 @@ namespace LmpClient.Systems.VesselProtoSys
                 {
                     if (keyVal.Value.TryPeek(out var vesselProto) && vesselProto.GameTime <= TimeSyncSystem.UniversalTime)
                     {
+                        //Topology-mutation quarantine. If we just locally rewrote this
+                        //vessel's part tree via Couple / Decouple / Undock, refuse to
+                        //apply incoming server protos for it until the cascade has
+                        //settled (~250 ms after the last local mutation, with each
+                        //new mutation re-arming the clock). Leaving the queue head
+                        //peeked-but-not-dequeued retries it on the next Update tick
+                        //in FIFO order so there is no risk of starvation.
+                        if (LocalTopologyTracker.IsQuarantined(keyVal.Key, out _))
+                            continue;
+
                         keyVal.Value.TryDequeue(out _);
 
                         if (VesselRemoveSystem.VesselWillBeKilled(vesselProto.VesselId))
@@ -221,6 +232,10 @@ namespace LmpClient.Systems.VesselProtoSys
         public void RemoveVessel(Guid vesselId)
         {
             VesselProtos.TryRemove(vesselId, out _);
+            //A vessel id resurrected in the same session must not inherit a stale
+            //"I just mutated locally" record from the previous incarnation, which
+            //would suppress the first wire update on the new vessel.
+            LocalTopologyTracker.ClearVessel(vesselId);
         }
 
         #endregion
