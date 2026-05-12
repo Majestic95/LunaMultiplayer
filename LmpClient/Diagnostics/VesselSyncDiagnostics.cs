@@ -7,10 +7,12 @@ using System.Text;
 namespace LmpClient.Diagnostics
 {
     /// <summary>
-    /// Append-only diagnostic trace of every vessel-proto wire event the client
-    /// processes, written to <c>{KspPath}/Logs/LMP/VesselSyncLog.txt</c>. Designed
-    /// to answer four questions after the fact, without re-reading the entire
-    /// KSP.log:
+    /// Per-session diagnostic trace of every vessel-proto wire event the client
+    /// processes, written to <c>{KspPath}/Logs/LMP/VesselSyncLog.txt</c>. The
+    /// file is truncated on every KSP launch — same lifecycle as KSP.log — so
+    /// each file contains exactly one session's worth of events and the post-
+    /// mortem grep target is unambiguous. Designed to answer four questions
+    /// after the fact, without re-reading the entire KSP.log:
     /// <list type="number">
     /// <item>Which vessels did the server actually send me this session?</item>
     /// <item>Of those, which were rejected before they ever became a live
@@ -320,8 +322,12 @@ namespace LmpClient.Diagnostics
                 Directory.CreateDirectory(folder);
                 var path = CommonUtil.CombinePaths(folder, LogFileName);
 
-                var isNew = !File.Exists(path) || new FileInfo(path).Length == 0;
-                var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+                //FileMode.Create: truncate on every KSP launch so the file mirrors
+                //KSP.log's per-session lifecycle. Anyone reporting a bug now has
+                //a one-to-one mapping between their KSP.log and VesselSyncLog.txt
+                //instead of having to find the right session boundary in a file
+                //that grew across many launches.
+                var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read);
                 //AutoFlush=false: every individual WriteLine would otherwise issue a
                 //WriteFile syscall (~10–30 µs on SSD; multiple ms on a slow disk).
                 //The periodic Flush() called from NotifyScene drains the buffer once
@@ -330,27 +336,20 @@ namespace LmpClient.Diagnostics
                 //on idle ticks the dirty-flag gate skips the syscall entirely.
                 _writer = new StreamWriter(stream, Encoding.UTF8) { AutoFlush = false };
 
-                if (isNew)
-                {
-                    _writer.WriteLine("# Luna Multiplayer Vessel Sync Log");
-                    _writer.WriteLine("# Append-only; restart-safe (new sessions are separated by a blank line + banner).");
-                    _writer.WriteLine("# Columns (pipe-delimited):");
-                    _writer.WriteLine("#   timestamp_utc | event | scene | vesselId | vesselName | parts | situation | reason");
-                    _writer.WriteLine("# Events:");
-                    _writer.WriteLine("#   ARRIVED   = wire message received from server (pre-filter)");
-                    _writer.WriteLine("#   DISCARDED = rejected before ProtoVessel.Load (kill-list / malformed / Validate / invalid parts)");
-                    _writer.WriteLine("#   LOADED    = brand-new live Vessel created");
-                    _writer.WriteLine("#   RELOADED  = existing Vessel destructively replaced");
-                    _writer.WriteLine("#   SWAPPED   = cheap proto-pointer swap (SPACECENTER / EDITOR; live Vessel untouched)");
-                    _writer.WriteLine("#   UNCHANGED = existing Vessel already matched the wire structure (no work done)");
-                    _writer.WriteLine("#   FAILED    = ProtoVessel.Load threw or produced a malformed orbit");
-                    _writer.WriteLine("#   REMOVED   = VesselProtoSystem.RemoveVessel ran (player can no longer 'see' it)");
-                    _writer.WriteLine("# To disable: set VesselSyncDiagnosticsEnabled=false in settings.xml.");
-                }
-                else
-                {
-                    _writer.WriteLine();
-                }
+                _writer.WriteLine("# Luna Multiplayer Vessel Sync Log");
+                _writer.WriteLine("# Per-session: this file is truncated on every KSP launch (same lifecycle as KSP.log).");
+                _writer.WriteLine("# Columns (pipe-delimited):");
+                _writer.WriteLine("#   timestamp_utc | event | scene | vesselId | vesselName | parts | situation | reason");
+                _writer.WriteLine("# Events:");
+                _writer.WriteLine("#   ARRIVED   = wire message received from server (pre-filter)");
+                _writer.WriteLine("#   DISCARDED = rejected before ProtoVessel.Load (kill-list / malformed / Validate / invalid parts)");
+                _writer.WriteLine("#   LOADED    = brand-new live Vessel created");
+                _writer.WriteLine("#   RELOADED  = existing Vessel destructively replaced");
+                _writer.WriteLine("#   SWAPPED   = cheap proto-pointer swap (SPACECENTER / EDITOR; live Vessel untouched)");
+                _writer.WriteLine("#   UNCHANGED = existing Vessel already matched the wire structure (no work done)");
+                _writer.WriteLine("#   FAILED    = ProtoVessel.Load threw or produced a malformed orbit");
+                _writer.WriteLine("#   REMOVED   = VesselProtoSystem.RemoveVessel ran (player can no longer 'see' it)");
+                _writer.WriteLine("# To disable: set VesselSyncDiagnosticsEnabled=false in settings.xml.");
                 _writer.WriteLine($"# session_start_utc={DateTime.UtcNow:yyyy-MM-ddTHH:mm:ss.fffZ} ksp_pid={CommonUtil.ProcessId}");
 
                 //Banner is in-buffer only at this point — mark dirty so the next
