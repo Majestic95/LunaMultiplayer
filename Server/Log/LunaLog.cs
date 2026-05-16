@@ -1,4 +1,4 @@
-﻿using LmpCommon;
+using LmpCommon;
 using LmpCommon.Enums;
 using Server.Settings.Structures;
 using Server.System;
@@ -30,6 +30,7 @@ namespace Server.Log
         {
             base.AfterPrint(line);
             FileHandler.AppendToFile(LogFilename, line + Environment.NewLine);
+            LogRingBuffer.Add(LogEntry.Parse(line, DateTime.UtcNow));
         }
 
         #endregion
@@ -80,6 +81,41 @@ namespace Server.Log
         {
             Singleton.ChatMessage(message);
         }
+
+        #endregion
+
+        #region Subsystem-tagged overloads
+
+        // These add a "[Subsystem]: message" prefix so the on-disk format matches
+        // the existing inline convention (e.g. BackupCommand's "[Backup]: ..."
+        // and CleanContractsCommand's "[CleanContracts]: ..."). LogEntry.Parse
+        // splits the prefix back into the structured Subsystem field for the
+        // ring buffer. Not provided for NetworkDebug/VerboseNetworkDebug — those
+        // are transport-level firehoses where subsystem tagging is meaningless.
+
+        public static void Debug(string subsystem, string message) => Singleton.Debug(FormatTagged(subsystem, message));
+        public static void Warning(string subsystem, string message) => Singleton.Warning(FormatTagged(subsystem, message));
+        public static void Info(string subsystem, string message) => Singleton.Info(FormatTagged(subsystem, message));
+        public static void Normal(string subsystem, string message) => Singleton.Normal(FormatTagged(subsystem, message));
+        public static void Error(string subsystem, string message) => Singleton.Error(FormatTagged(subsystem, message));
+        public static void Fatal(string subsystem, string message) => Singleton.Fatal(FormatTagged(subsystem, message));
+        public static void ChatMessage(string subsystem, string message) => Singleton.ChatMessage(FormatTagged(subsystem, message));
+
+        private static string FormatTagged(string subsystem, string message)
+        {
+            return string.IsNullOrEmpty(subsystem) ? message : $"[{subsystem}]: {message}";
+        }
+
+        #endregion
+
+        #region Ring buffer access
+
+        /// <summary>
+        /// Snapshot of recently logged entries, oldest first. Used by the admin
+        /// dashboard (Stage 3.7) and ad-hoc inspection. Bounded by
+        /// <see cref="LogRingBuffer.Capacity"/>.
+        /// </summary>
+        public static LogEntry[] RecentEntries() => LogRingBuffer.Snapshot();
 
         #endregion
     }
