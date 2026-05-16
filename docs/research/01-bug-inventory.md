@@ -404,6 +404,17 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 - **Status:** Likely fixed in master
 - **Sources:** Fix PR [#625](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/625), merged 2026-04-17.
 
+### Discovered during Phase-2 analysis
+
+#### [BUG-051] Client stuck in `CurrentSubspace = -1` limbo after time warp ends
+- **Severity:** High (hard failure — no game time advances, no position updates accepted during the gap)
+- **Status:** Open. Surfaced during the Phase-2 read of TimeSync / Warp; not previously catalogued.
+- **Sources:** No specific upstream issue. 15-second `CheckStuckAtWarp` watchdog at [LmpClient/Systems/Warp/WarpSystem.cs:126-134](../../LmpClient/Systems/Warp/WarpSystem.cs#L126-L134) is the only current mitigation.
+- **Symptoms:** Client drops to `CurrentSubspace = -1` when time warp ends. If the server's subspace-assign broadcast is lost, the `WaitingSubspaceIdFromServer` flag stays true; `CheckWarpStopped` is gated on `!WaitingSubspaceIdFromServer` so it cannot re-fire; the watchdog re-requests after 15s. During the gap the client is in limbo.
+- **Suspected subsystem(s):** Server `WarpSystemReceiver.HandleNewSubspace` (no request idempotency — every retry mints a fresh subspace ID), client `WarpSystem` (edge-triggered handshake).
+- **Notes:** Load-bearing critic observation: any naive client retry creates orphan subspaces at the retry cadence. Server-side dedup must ship before the client can be made more aggressive. Split into BUG-051a (server dedup, ships first) and BUG-051b (client predicate, ships after).
+- **Phase-2 doc:** [`02-analysis/bug-051-stuck-warp-limbo.md`](02-analysis/bug-051-stuck-warp-limbo.md)
+
 ## Top-10 priority list
 
 These are my picks for the first wave of Phase 2 code analysis, ranked by a combination of severity, frequency, and how much they unlock for other work.
