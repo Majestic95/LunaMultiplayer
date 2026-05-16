@@ -155,9 +155,9 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-014] Vessel position interpolation uses stale rotation offset / wrong rigidbody
 - **Severity:** High
-- **Status:** Likely fixed in master
+- **Status:** Fixed in master — verified by Phase-2 audit (2026-05-16). PR [#628](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/628) covers all four `transform.*` setter sites in `LmpClient/Systems/VesselPositionSys/ExtensionMethods/VesselPositioner.cs`; no remaining sites without paired `rb.*` updates.
 - **Sources:** Fix PR [#628](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/628), merged 2026-04-17; commit `1b5fc45b`.
-- **Notes:** Directly addresses observed visual jitter on spectated vessels. Listed here so Phase 2 can verify against fork master.
+- **Notes:** Directly addresses observed visual jitter on spectated vessels. Closed by upstream; no fork-side work needed. Audit findings in [`02-analysis/bug-014-extensionmethods-rb-audit.md`](02-analysis/bug-014-extensionmethods-rb-audit.md).
 
 ### Lock system & ownership handoff
 

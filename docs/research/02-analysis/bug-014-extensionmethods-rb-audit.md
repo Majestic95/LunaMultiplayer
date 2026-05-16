@@ -2,7 +2,7 @@
 
 **Implementation order:** **5th** in the Option C sequence. Can be interleaved earlier — units are small and isolated.
 
-**Status:** **PRE-VALIDATION.** Diagnoses from [03-time-sync-fix-brainstorm.md](../03-time-sync-fix-brainstorm.md#bug-4--warp-at-distance--big-vessel-jitter) — the brainstorm itself flagged that the actual call-site inventory was not done. This Phase-2 doc is a placeholder for the inventory step.
+**Status:** **CLOSED — audit complete, no remaining sites.** Inventory walk against `master` at `25303e7d` (2026-05-16) confirms PR #628's pattern is fully applied across the directory. No fix needed in this fork.
 
 **Inventory entry:** BUG-014 in `01-bug-inventory.md` is listed as "likely fixed in master" via upstream PR [#628](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/628) (merged 2026-04-17, commit `1b5fc45b`). This Phase-2 doc covers only the *remaining* sites PR #628 didn't reach.
 
@@ -12,51 +12,28 @@
 
 Large vessels (space stations) and physics-range-shared craft still jitter visibly in some scenarios after PR #628. The interpolation rotation/rb fix landed for unpacked rigidbodies, but extension methods that set `transform.position` / `transform.rotation` without a matching `part.rb.position` / `part.rb.rotation` create the same snap-back pattern PR #628 described.
 
-## Code locations (preliminary — to be inventoried)
+## Code locations (validated)
 
-- [LmpClient/Systems/VesselPositionSys/ExtensionMethods/](../../../LmpClient/Systems/VesselPositionSys/ExtensionMethods/) — directory; needs full file-by-file walk.
-- [upstream PR #628](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/628) — already-merged fix. Commit message reproduced verbatim from the brainstorm:
+- [LmpClient/Systems/VesselPositionSys/ExtensionMethods/VesselPositioner.cs:71-108](../../../LmpClient/Systems/VesselPositionSys/ExtensionMethods/VesselPositioner.cs#L71-L108) — `SetVesselPositionAndRotation`. The only file in the directory that touches Unity transforms; `VesselProtoUpdater.cs` only mutates `protoVessel.*` fields.
+- [upstream PR #628](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/628) — already-merged fix, present in our master since `541fbcfa`'s upstream merge chain. Commit message reproduced verbatim from the brainstorm:
   > For unpacked (off-rails) parts with rigidbodies, only transform.position and transform.rotation were being set. Unity's physics engine treats this as an external teleport and snaps the rigidbody back toward its last solved position on the next FixedUpdate, causing visible vibration and shaking.
 
-## First action: inventory
+## Inventory findings (1 file, 4 setter sites, all correctly paired)
 
-Before any code change, run the following audit (track output in a follow-up commit, replace this section with findings):
+| Site | Setter | Path | rb pairing |
+|------|--------|------|------------|
+| `VesselPositioner.cs:75` | `vessel.vesselTransform.position` | `!vessel.loaded` | N/A — vessel is unloaded, no Unity physics to fight; vesselTransform is the serialization target. |
+| `VesselPositioner.cs:76` | `vessel.vesselTransform.rotation` | `!vessel.loaded` | N/A — same as above. |
+| `VesselPositioner.cs:84` | `part.partTransform.rotation` | loaded path, every part | Paired at `:99` with `part.rb.rotation = partRotation` under `if (!vessel.packed && part.rb)`. |
+| `VesselPositioner.cs:91` | `part.partTransform.position` | loaded + (`vessel.packed` or `physicalSignificance.FULL`) | Paired at `:101` with `part.rb.position = part.partTransform.position` under `if (!vessel.packed && part.rb && physicalSignificance.FULL)`. |
 
-```
-git log --oneline upstream/master -- LmpClient/Systems/VesselPositionSys/ExtensionMethods/
-# Identify what PR #628 touched.
+The conditionals are internally consistent: for unpacked NON-FULL parts (`physicalSignificance.NONE` / `.COMPOUND`), neither `partTransform.position` nor `part.rb.position` is set — these parts follow their parent, so manual placement is correctly avoided. The pairing at `:99-:101` exactly mirrors AdmiralRadish's PR #628 pattern.
 
-grep -rn "transform\.position\|transform\.rotation" LmpClient/Systems/VesselPositionSys/ExtensionMethods/
-# Catalog every setter site.
+`VesselProtoUpdater.cs` is out of scope (no Unity transform mutations; pure `protoVessel.*` field assignments).
 
-# For each site:
-#  - Is the target a packed (on-rails) part? If yes -> transform.* is the correct path; do not change.
-#  - Is the target unpacked with a rigidbody? If yes -> needs matching rb.position / rb.rotation set.
-#  - Did PR #628 already cover this site? Diff against upstream master.
-```
+## Disposition
 
-Output target: `docs/research/02-analysis/bug-014-rb-audit-inventory.md` (sibling doc) listing each candidate site with disposition (covered / needs fix / not applicable).
-
-## Recommended fix shape (post-inventory)
-
-For each remaining unpacked-rigidbody site:
-
-```csharp
-// Before:
-part.transform.position = newPos;
-part.transform.rotation = newRot;
-
-// After (matching PR #628's pattern):
-part.transform.position = newPos;
-part.transform.rotation = newRot;
-if (part.rb != null)
-{
-    part.rb.position = newPos;
-    part.rb.rotation = newRot;
-}
-```
-
-Each fix is a small atomic commit. Recommend one PR per file or per logical group.
+**No code change needed.** PR #628 fully covers the directory. Closing BUG-014 as fixed-by-upstream.
 
 ## Out of scope / deferred
 

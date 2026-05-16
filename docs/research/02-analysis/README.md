@@ -18,7 +18,7 @@ Validated against `master` at commit `48df64bd` (2026-05-16). Ordered by Option 
 | 2 | [bug-001-solo-subspace-catchup.md](bug-001-solo-subspace-catchup.md) | BUG-001 | Server-authoritative solo-subspace tracking + `SoloSubspaceAdvance` message. ~100 LOC. | First visible-to-players win. CLAUDE.md cursor. Additive message, no proto break. |
 | 3 | [bug-003-004-frozen-vessel-interp-cap.md](bug-003-004-frozen-vessel-interp-cap.md) | BUG-003 + BUG-004 | Symmetric (or finite-asymmetric) `MaxInterpolationDuration` cap. One-line change. | Smallest possible diff. Pure client-side. Highest critic confidence. |
 | 4 | [bug-051-stuck-warp-limbo.md](bug-051-stuck-warp-limbo.md) (5b section) | BUG-051b | Client steady-state predicate (500ms retry while stuck-at-warp). ~30 LOC. | Pairs with 5a. Depends on 5a's dedup safety net. |
-| 5 | [bug-014-extensionmethods-rb-audit.md](bug-014-extensionmethods-rb-audit.md) | BUG-014 remainder | Continue PR #628's pattern across remaining `transform.*`-only setters in `ExtensionMethods/`. Multiple small atomic units. | Small, isolated, interleavable. |
+| 5 | [bug-014-extensionmethods-rb-audit.md](bug-014-extensionmethods-rb-audit.md) | BUG-014 remainder | **CLOSED — audit complete.** No remaining `transform.*`-only setters in `ExtensionMethods/`; PR #628 fully covers the directory. | No code change needed. |
 | 6 | [bug-005-006-cross-subspace-lock.md](bug-005-006-cross-subspace-lock.md) | BUG-005 + BUG-006 | Add `AuthoritativeSubspaceId` per vessel; rekey lock registry; restore the `fbc7a8c`-disabled broadcasts; bump `LMP_PROTOCOL_VERSION`. | Heaviest. Capstone. Protocol break OK on fork. |
 
 ## Naming convention
