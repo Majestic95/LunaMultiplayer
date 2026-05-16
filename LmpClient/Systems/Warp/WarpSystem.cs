@@ -180,7 +180,7 @@ namespace LmpClient.Systems.Warp
             if (Math.Abs(TimeWarp.CurrentRate - 1) >= 0.1f) return;
             if (_currentRequestSeq == 0) return; //should not happen — RequestNewSubspace allocates before sending — but guard anyway
 
-            LunaLog.Log($"[LMP]: stuck-at-warp steady-state retry — resending NewSubspace seq={_currentRequestSeq}");
+            LunaLog.Log($"[fix:BUG-051b] stuck-at-warp steady-state retry — resending NewSubspace seq={_currentRequestSeq}");
             MessageSender.SendNewSubspace(_currentRequestSeq);
             _stoppedWarpingTimeStamp = LunaComputerTime.UtcNow;
         }

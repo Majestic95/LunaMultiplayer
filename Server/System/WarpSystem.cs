@@ -61,7 +61,7 @@ namespace Server.System
                 }
                 catch (Exception e)
                 {
-                    LunaLog.Error($"[WarpSystem]: RefreshSoloStatuses failed: {e}");
+                    LunaLog.Error($"[fix:BUG-001] RefreshSoloStatuses failed: {e}");
                 }
             }
         }
@@ -81,7 +81,7 @@ namespace Server.System
             foreach (var transition in DetectSoloTransitions(subspaces, clientSubspaceIds))
             {
                 transition.Subspace.Solo = transition.NewSolo;
-                LunaLog.Debug($"[WarpSystem]: subspace {transition.Subspace.Id} solo flag -> {transition.NewSolo}");
+                LunaLog.Debug($"[fix:BUG-001] subspace {transition.Subspace.Id} solo flag -> {transition.NewSolo}");
                 WarpSystemSender.SendSubspaceSoloStatus(transition.Subspace.Id, transition.NewSolo);
             }
         }
@@ -161,7 +161,7 @@ namespace Server.System
             //See docs/research/02-analysis/bug-005-006-cross-subspace-lock.md.
             if (VesselStoreSystem.CurrentVessels.Values.Any(v => v.AuthoritativeSubspaceId == subspaceToRemove))
             {
-                LunaLog.Debug($"Refusing to remove subspace '{subspaceToRemove}' — at least one vessel still authoritative there");
+                LunaLog.Debug($"[fix:BUG-005/006] refusing to remove subspace '{subspaceToRemove}' — at least one vessel still authoritative there");
                 return false;
             }
 

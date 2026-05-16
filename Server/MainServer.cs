@@ -87,6 +87,7 @@ namespace Server
                 ServerContext.Day = LunaNetworkTime.Now.Day;
 
                 LunaLog.Normal($"Luna Server version: {LmpVersioning.CurrentVersion} ({AppContext.BaseDirectory})");
+                LunaLog.Normal($"[fork] {ForkBuildInfo.ForkName} — fixes active: {string.Join(" ", ForkBuildInfo.ActiveFixes)}");
 
                 Universe.CheckUniverse();
                 LoadSettingsAndGroups();

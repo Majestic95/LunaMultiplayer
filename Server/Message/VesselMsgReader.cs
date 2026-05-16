@@ -121,7 +121,7 @@ namespace Server.Message
             if (VesselStoreSystem.CurrentVessels.TryGetValue(msgData.VesselId, out var existing)
                 && WarpSystem.IsStrictlyPast(client.Subspace, existing.AuthoritativeSubspaceId))
             {
-                LunaLog.Debug($"Rejecting proto-update for {msgData.VesselId} from {client.PlayerName} " +
+                LunaLog.Debug($"[fix:BUG-005/006] rejecting proto-update for {msgData.VesselId} from {client.PlayerName} " +
                               $"(client subspace {client.Subspace} is past vessel authority subspace {existing.AuthoritativeSubspaceId})");
                 return;
             }

@@ -25,7 +25,7 @@ namespace Server.System
                 && VesselStoreSystem.CurrentVessels.TryGetValue(lockDef.VesselId, out var vessel)
                 && WarpSystem.IsStrictlyPast(requesterSubspace, vessel.AuthoritativeSubspaceId))
             {
-                LunaLog.Debug($"[LockSystem]: refusing {lockDef.Type} lock on {lockDef.VesselId} for {lockDef.PlayerName} " +
+                LunaLog.Debug($"[fix:BUG-005/006] refusing {lockDef.Type} lock on {lockDef.VesselId} for {lockDef.PlayerName} " +
                               $"(requester subspace {requesterSubspace} is past vessel auth subspace {vessel.AuthoritativeSubspaceId})");
                 return false;
             }
