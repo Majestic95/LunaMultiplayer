@@ -1,0 +1,32 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-file-size.sh\"",
+            "statusMessage": "Checking file size limits..."
+          },
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/classify-change.sh\"",
+            "statusMessage": "Classifying change for review routing..."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'Session complete. Remember: update CLAUDE.md if any systems or conventions changed, and DO NOT push to upstream — only origin (Majestic95 fork).'"
+          }
+        ]
+      }
+    ]
+  }
+}
