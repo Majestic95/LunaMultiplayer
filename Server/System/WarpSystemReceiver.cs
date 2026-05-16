@@ -17,6 +17,24 @@ namespace Server.System
             {
                 if (message.PlayerCreator != client.PlayerName) return;
 
+                //If the client supplied a request-seq and we've already minted for it, re-deliver
+                //the original assignment to the requester only. Other clients already saw the
+                //original broadcast; minting again would create an orphan subspace. See BUG-051a.
+                if (WarpRequestCache.TryGet(client.PlayerName, message.RequestSeq, out var cachedId, out var cachedTimeDiff)
+                    && WarpContext.Subspaces.ContainsKey(cachedId))
+                {
+                    LunaLog.Debug($"[WarpSystem]: dedupe hit for {client.PlayerName} seq={message.RequestSeq} -> subspace {cachedId}");
+
+                    var replay = ServerContext.ServerMessageFactory.CreateNewMessageData<WarpNewSubspaceMsgData>();
+                    replay.PlayerCreator = message.PlayerCreator;
+                    replay.SubspaceKey = cachedId;
+                    replay.ServerTimeDifference = cachedTimeDiff;
+                    replay.RequestSeq = message.RequestSeq;
+
+                    MessageQueuer.SendToClient<WarpSrvMsg>(client, replay);
+                    return;
+                }
+
                 LunaLog.Debug($"{client.PlayerName} created the new subspace '{WarpContext.NextSubspaceId}'");
 
                 //Create Subspace
@@ -27,8 +45,14 @@ namespace Server.System
                 msgData.ServerTimeDifference = message.ServerTimeDifference;
                 msgData.PlayerCreator = message.PlayerCreator;
                 msgData.SubspaceKey = WarpContext.NextSubspaceId;
+                msgData.RequestSeq = message.RequestSeq;
 
                 MessageQueuer.SendToAllClients<WarpSrvMsg>(msgData);
+
+                //Cache the (player, seq) -> subspace assignment so a retry returns the same id.
+                //No-op when message.RequestSeq == 0 (pre-fix client).
+                WarpRequestCache.Add(client.PlayerName, message.RequestSeq, WarpContext.NextSubspaceId, message.ServerTimeDifference);
+
                 WarpContext.NextSubspaceId++;
             }
         }
