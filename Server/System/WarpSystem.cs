@@ -1,11 +1,14 @@
 ﻿using LmpCommon.Time;
 using Server.Context;
 using Server.Log;
+using Server.Settings.Structures;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Server.System
 {
@@ -29,6 +32,95 @@ namespace Server.System
             content += $"{WarpContext.LatestSubspace}";
 
             FileHandler.WriteToFile(SubspaceFile, content);
+        }
+
+        /// <summary>
+        /// Long-running task that periodically refreshes each subspace's Solo flag and broadcasts the
+        /// transition to all clients. See BUG-001 (docs/research/02-analysis/bug-001-solo-subspace-catchup.md).
+        /// Cadence is controlled by IntervalSettings.SoloSubspaceCheckMs; 0 disables the loop entirely
+        /// (catch-up snap stays active for everyone).
+        /// </summary>
+        public static async Task PerformSoloSubspaceChecksAsync(CancellationToken token)
+        {
+            while (ServerContext.ServerRunning)
+            {
+                var intervalMs = IntervalSettings.SettingsStore.SoloSubspaceCheckMs;
+                if (intervalMs <= 0)
+                {
+                    try { await Task.Delay(TimeSpan.FromMinutes(1), token); }
+                    catch (TaskCanceledException) { break; }
+                    continue;
+                }
+
+                try { await Task.Delay(intervalMs, token); }
+                catch (TaskCanceledException) { break; }
+
+                try
+                {
+                    RefreshSoloStatuses();
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Error($"[WarpSystem]: RefreshSoloStatuses failed: {e}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// For each known subspace, compute whether exactly one client occupies it; if the flag changed
+        /// since the last check, broadcast a WarpSubspaceSoloStatusMsgData to all clients. The check
+        /// itself is read-only — clients see the transition via the broadcast. Pure for testability:
+        /// the per-subspace count + transition-detect logic is exposed via DetectSoloTransitions so the
+        /// test suite can exercise it without a running server.
+        /// </summary>
+        public static void RefreshSoloStatuses()
+        {
+            var subspaces = WarpContext.Subspaces.Values.ToArray();
+            var clientSubspaceIds = ServerContext.Clients.Values.Select(c => c.Subspace).ToArray();
+
+            foreach (var transition in DetectSoloTransitions(subspaces, clientSubspaceIds))
+            {
+                transition.Subspace.Solo = transition.NewSolo;
+                LunaLog.Debug($"[WarpSystem]: subspace {transition.Subspace.Id} solo flag -> {transition.NewSolo}");
+                WarpSystemSender.SendSubspaceSoloStatus(transition.Subspace.Id, transition.NewSolo);
+            }
+        }
+
+        /// <summary>
+        /// Pure helper: for each input subspace, return the new solo state if it differs from the
+        /// subspace's current Solo flag. Exposed for testability; callers in production go through
+        /// RefreshSoloStatuses which also commits and broadcasts.
+        /// </summary>
+        public static IEnumerable<SoloTransition> DetectSoloTransitions(IReadOnlyCollection<Subspace> subspaces, IReadOnlyCollection<int> clientSubspaceIds)
+        {
+            foreach (var subspace in subspaces)
+            {
+                if (subspace == null) continue;
+
+                var occupants = 0;
+                foreach (var s in clientSubspaceIds)
+                {
+                    if (s == subspace.Id) occupants++;
+                }
+
+                var newSolo = occupants == 1;
+                if (newSolo != subspace.Solo)
+                {
+                    yield return new SoloTransition(subspace, newSolo);
+                }
+            }
+        }
+
+        public readonly struct SoloTransition
+        {
+            public readonly Subspace Subspace;
+            public readonly bool NewSolo;
+
+            public SoloTransition(Subspace subspace, bool newSolo)
+            {
+                Subspace = subspace;
+                NewSolo = newSolo;
+            }
         }
 
         public static bool RemoveSubspace(int subspaceToRemove)

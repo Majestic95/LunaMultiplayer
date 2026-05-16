@@ -150,6 +150,22 @@ namespace LmpClient.Systems.TimeSync
 
             if (Enabled && !CurrentlyWarping && CanSyncTime && !WarpSystem.Singleton.WaitingSubspaceIdFromServer)
             {
+                //BUG-001: if the server has flagged our current subspace as solo (we are the only
+                //occupant), there is no peer to synchronize against — neither the catch-up snap nor
+                //the physics-clock skew has a meaningful target. Run the game at native rate and
+                //skip both branches. See docs/research/02-analysis/bug-001-solo-subspace-catchup.md.
+                //
+                //KNOWN LIMITATION: on the solo->non-solo transition (someone joins our subspace),
+                //the server's Subspaces[id].Time is stale relative to our actual UT. The next
+                //CheckGameTime after we drop out of solo may fire the snap path. Player-initiated
+                //event, bounded reproduction — addressed in a follow-up (see Phase-2 doc).
+                if (WarpSystem.Singleton.IsCurrentSubspaceSolo)
+                {
+                    Time.timeScale = 1;
+                    Profiler.EndSample();
+                    return;
+                }
+
                 var targetTime = WarpSystem.Singleton.CurrentSubspaceTime;
                 var currentError = TimeUtil.SecondsToMilliseconds(CurrentErrorSec);
 

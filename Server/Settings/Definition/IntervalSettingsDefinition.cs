@@ -33,5 +33,11 @@ namespace Server.Settings.Definition
 
         [XmlComment(Value = "Interval to force a garbage collection and reduce the memory usage. Specify this value in minutes. 0 = deactivated.")]
         public int GcMinutesInterval { get; set; } = 15;
+
+        [XmlComment(Value = "Interval in ms at which the server scans subspaces for solo-occupancy transitions and broadcasts " +
+                            "WarpSubspaceSoloStatusMsgData on changes. A solo subspace (exactly one client) suppresses that client's " +
+                            "TimeSync catch-up. Lower values reduce the join/leave reaction lag; 0 disables the check entirely " +
+                            "(catch-up snap remains active for all clients). Default 5000.")]
+        public int SoloSubspaceCheckMs { get; set; } = 5000;
     }
 }

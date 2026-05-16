@@ -56,6 +56,18 @@ namespace LmpClient.Systems.Warp
 
         public ConcurrentDictionary<string, int> ClientSubspaceList { get; } = new ConcurrentDictionary<string, int>();
         public ConcurrentDictionary<int, double> Subspaces { get; } = new ConcurrentDictionary<int, double>();
+
+        /// <summary>
+        /// Subspaces the server has flagged as solo-occupant (exactly one client present). Used by
+        /// TimeSyncSystem.CheckGameTime to suppress the catch-up snap/skew while the local player is
+        /// the sole occupant of their subspace. Updated from WarpSubspaceSoloStatusMsgData broadcasts.
+        /// See BUG-001 (docs/research/02-analysis/bug-001-solo-subspace-catchup.md).
+        /// </summary>
+        public ConcurrentDictionary<int, bool> SoloSubspaces { get; } = new ConcurrentDictionary<int, bool>();
+
+        public bool IsCurrentSubspaceSolo => CurrentSubspace > 0
+            && SoloSubspaces.TryGetValue(CurrentSubspace, out var solo)
+            && solo;
         public int LatestSubspace => Subspaces.Any() ? Subspaces.OrderByDescending(s => s.Value).First().Key : 0;
         private ScreenMessage WarpMessage { get; set; }
         private WarpEvents WarpEvents { get; } = new WarpEvents();
@@ -80,6 +92,7 @@ namespace LmpClient.Systems.Warp
             GameEvents.onLevelWasLoadedGUIReady.Remove(WarpEvents.OnSceneChanged);
             ClientSubspaceList.Clear();
             Subspaces.Clear();
+            SoloSubspaces.Clear();
             SubspaceEntries.Clear();
             _currentSubspace = int.MinValue;
             SkipSubspaceProcess = false;

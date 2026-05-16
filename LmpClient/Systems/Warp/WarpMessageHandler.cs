@@ -64,6 +64,14 @@ namespace LmpClient.Systems.Warp
                         System.ClientSubspaceList[data.PlayerName] = data.Subspace;
                     }
                     break;
+                case WarpMessageType.SubspaceSoloStatus:
+                    {
+                        //Server signaling a solo-occupancy transition for one subspace. Solo subspaces
+                        //skip TimeSync catch-up on the client — see BUG-001.
+                        var data = (WarpSubspaceSoloStatusMsgData)msgData;
+                        System.SoloSubspaces[data.SubspaceId] = data.IsSolo;
+                    }
+                    break;
                 default:
                     {
                         LunaLog.LogError($"[LMP]: Unhandled WARP_MESSAGE type: {msgData.WarpMessageType}");

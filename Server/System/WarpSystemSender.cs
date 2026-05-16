@@ -10,6 +10,18 @@ namespace Server.System
 {
     public class WarpSystemSender
     {
+        /// <summary>
+        /// Broadcasts a solo-occupancy transition for one subspace to all connected clients. See BUG-001.
+        /// </summary>
+        public static void SendSubspaceSoloStatus(int subspaceId, bool isSolo)
+        {
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<WarpSubspaceSoloStatusMsgData>();
+            msgData.SubspaceId = subspaceId;
+            msgData.IsSolo = isSolo;
+
+            MessageQueuer.SendToAllClients<WarpSrvMsg>(msgData);
+        }
+
         public static void SendAllSubspaces(ClientStructure client)
         {
             LunaLog.Debug($"Sending {client.PlayerName} {WarpContext.Subspaces.Count} possible subspaces");
