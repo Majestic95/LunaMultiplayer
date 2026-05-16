@@ -242,18 +242,22 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 
 ## Test Suite
 
-`ServerTest/` (18 tests on `net10.0` via NUnit):
+`ServerTest/` (68 tests on `net10.0` via MSTest):
 - `FileHandlerTest` — disk-IO round-trip
 - `HandshakeSystemValidatorTest` — handshake validation
-- `LockSystemTest` — lock state transitions
+- `LockSystemTest` — lock state transitions + cross-subspace acquire rejection (BUG-005/006)
 - `LunaMathTest` — math utilities
 - `VesselStoreSystemTest` — vessel store invariants
 - `VesselTest` — vessel object behavior
+- `LogTest` — `LogEntry.Parse` + `LogRingBuffer` (Stage 1.2)
+- `WarpRequestCacheTest` — `(player, seq)` dedup cache (BUG-051a)
+- `WarpSoloDetectionTest` — solo-subspace transition logic (BUG-001)
+- `VesselAuthorityTest` — `AuthoritativeSubspaceId` round-trip, `IsStrictlyPast`, `RemoveSubspace` vessel-auth guard (BUG-005/006)
 
 `LmpCommonTest/`:
 - `LunaNetUtilsTest`, `MessageStoreTest`, `SerializationTests`, `TimeTests`
 
-Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing, log-system capture.
+Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing. Client-side fix coverage (BUG-003/004 interp cap, BUG-051b retry, restored `SendUnloadedSecondary*` routines) is blocked on Stage 4.9 (mock-client harness) — those fixes currently rely on review + soak.
 
 ---
 
@@ -270,6 +274,9 @@ Gaps to close as we touch each subsystem: backup archive lifecycle, settings rou
 | Backup model | Two-tier: in-memory flush + archive snapshots | Operational safety without the cost of constant snapshotting |
 | Harmony patches | One file per patched method | Surgical, reviewable, less merge conflict surface |
 | AI attribution | Strip everywhere | Upstream community sensitivity (Fierce-Cat / #588) |
+| Fork-upstream relationship | Fork-master only, no upstream coordination | Strategy shift 2026-05-16: AdmiralRadish's commits are reference material; we adopt/edit/replace case-by-case. Coordination meta-issue deferred indefinitely. |
+| Protocol version | 0.30.0 (bumped from 0.29.1) | Cross-subspace lock keying (BUG-005/006) is a clean break; vanilla 0.29.x peers no longer cross-compatible. |
+| Fork-local vessel metadata | `lmp*`-prefixed top-level ConfigNode fields | KSP vessel loaders ignore unknown fields; `lmp` prefix means our additions round-trip safely through any KSP-side persistence path. |
 
 ---
 
@@ -284,6 +291,11 @@ _Each entry has a date and the context that prompted it. Don't relearn these._
 - **Singletons are heavily referenced but also heavily patched** (2026-05-16): `Funding.Instance` and friends appear ~83 times. Harmony interception is already a pattern (e.g., `ContractPreLoader_Filter.cs`). Per-agency work in Stage 5 means enumerating every read/write site and patching the singleton accessor — wide-but-shallow, not architecturally hard.
 - **Upstream is actively revived by AdmiralRadish** (2026-05-16): 21 commits + 17 merged PRs since April 2026 across docking, coupling, scenario sync, lock handoff. Always `git fetch upstream` and check `upstream/master..HEAD` before touching those areas. We coordinate; we do not duplicate.
 - **PlagueNZ split-progression fork is benchmark only** (2026-05-16): 113 commits ahead of upstream, 33 releases over 6 weeks, alpha-quality, bus factor 1. We compare our ground-up per-agency design against theirs but do not cherry-pick from them — the goal is to learn the architecture deeply, not inherit their decisions.
+- **Fork-master strategy supersedes upstream coordination** (2026-05-16, session 3): all work happens on `master` of our fork. We observe `git log upstream/master --author=AdmiralRadish` for reference but do NOT post coordination issues up front. Decision per-fix: adopt his work verbatim, edit it, or replace it. Upstream PRs deferred until/unless explicitly revisited. The coordination meta-issue at `C:\tmp\luna-coordination-issue.md` is retained on disk but not posted.
+- **Protocol bumped to 0.30.0** (2026-05-16, session 3, commit `d64acf66`): cross-subspace lock keying (BUG-005/006) restored the `SendUnloadedSecondary*` broadcasts that upstream `fbc7a8c` disabled. Mixing a fork 0.30.0 peer with a vanilla 0.29.x peer corrupts vessel state. The `(0,30,0,29)` cross-compat row was removed from `LmpCommon/LmpVersioning.cs`. Future protocol bumps need an equally significant break to justify.
+- **`lmpAuthSubspace` is the canonical fork-metadata field on vessel ConfigNodes** (2026-05-16, session 3): the `lmp*` prefix means KSP's vessel loader silently ignores the unknown field, so our additions round-trip safely. Stored via the existing `MixedCollection<string, string> Fields` on `Server/System/Vessel/Classes/Vessel.cs`. Future fork-local vessel metadata MUST use the same prefix convention.
+- **`Server/ForkBuildInfo.cs` is the registry of fork-applied fixes** (2026-05-16, session 3, commit `d2186e2e`): `ActiveFixes[]` lists every fix in commit-chronological order; `MainServer.Main` emits a `[fork] ...` banner at boot. Every runtime fix-related log line uses `[fix:BUG-XXX]` prefix so operators can `grep -F "[fix:"` to find fork-attributed events. When adding a new fix: append to `ActiveFixes[]` AND prefix the runtime log lines.
+- **LmpClient cannot be built locally without the .NET Framework 4.7.2 dev pack** (2026-05-16, session 3): `dotnet build LmpClient/LmpClient.csproj -c Release` fails with `MSB3644: The reference assemblies for .NETFramework,Version=v4.7.2 were not found.` Client edits ship reviewed-not-compiled — Server + LmpCommonTest builds + manual pattern conformance review. Visual Studio path is the only way to fully compile-verify; defer until/unless someone installs the dev pack.
 
 _Append new entries chronologically. If a note becomes obsolete, prefer striking it through with a date rather than deleting outright, so future-you sees the lesson._
 
@@ -291,13 +303,15 @@ _Append new entries chronologically. If a note becomes obsolete, prefer striking
 
 ## Known Limitations & Future Work
 
-- **Logging:** no in-memory ring buffer yet (Stage 1.2 target), no size-based rotation (only daily + expire). No per-system tagging convention enforced (some files prefix `[Subsystem]:`, most don't).
-- **Admin dashboard:** `Server/Web/WebServer.cs` exists on port 8900 but exposes minimal info. Stage 3.7 will extend this.
-- **Mock-client test harness:** Stage 4. Without it, every regression check is manual or ad-hoc.
+- **Logging:** ring buffer + tagged overloads shipped Stage 1.2. Size-based rotation deferred (daily + expire suffice until dashboard ships); `LogSettings.RingBufferSize` setting deferred (`LogRingBuffer.Capacity` is a `const`).
+- **Admin dashboard:** `Server/Web/WebServer.cs` exists on port 8900 but exposes minimal info. Stage 3.7 will extend this — the ring buffer + `ForkBuildInfo.ActiveFixes` are the data it surfaces.
+- **Mock-client test harness:** Stage 4.9, not started. Without it, client-side regressions for BUG-003/004 / BUG-051b / BUG-005/006 restored broadcasts rely on review + soak.
 - **Per-agency career:** Stage 5, not started. Lives on `feature/per-agency` branch (also not yet created).
 - **Pre-existing build warnings (30):** noise to be tackled in a dedicated pass, not piecemeal.
 - **`GroupSystem` is scaffolding:** name + member list only, no resource fields. Needed for per-agency.
-- **Bug inventory:** see `docs/research/01-bug-inventory.md` for the full 50-bug catalogue and top-10 priority list. BUG-001 (solo-subspace catch-up) is the smallest-scope first fix.
+- **Bug inventory:** see `docs/research/01-bug-inventory.md` for the full 51-bug catalogue (BUG-051 added during Phase-2). Stage 2 closed the top-1 priority plus four others: BUG-001 (solo-subspace), BUG-003/004 (interp cap), BUG-005/006 (cross-subspace lock), BUG-014 (audit-closed via upstream PR #628), BUG-051 (stuck warp). Remaining top-10: BUG-008 (PQS-timing polygon scramble), BUG-010 (disconnect-explode), BUG-013 (localized stateString), BUG-018 (docking destroys ports), BUG-023 (astronaut complex desync), BUG-025 (R&D double-purchase), BUG-033 (backup race), BUG-045 (Breaking Ground deployable science).
+- **BUG-001 rejoin race:** documented known limitation. Solo→non-solo transition may fire one snap because server's `Subspaces[id].Time` is stale relative to the solo player's UT. Follow-up: have the client report its UT delta on rejoin so server can refresh before broadcasting.
+- **Couple handoff covers dock only:** `HandleVesselCouple` sets the merged vessel's `AuthoritativeSubspaceId` to the initiator's. Undock relies on the new child vessel's first proto-update to stamp authority via the standard rule — adequate for typical KSP flows but not as explicit as the dock path.
 
 ---
 
@@ -305,19 +319,25 @@ _Append new entries chronologically. If a note becomes obsolete, prefer striking
 
 Master plan (also tracked in conversation todos for active work):
 
-- **Stage 1 — Foundations (1 week)**
+- **Stage 1 — Foundations** ✅ COMPLETE
   - ✅ 1.1 Backup archives + restore (`f4aed253`)
-  - ⏳ 1.2 Logging upgrade (in-memory ring buffer, per-system tags, rotation polish)
-  - 1.3 Upstream coordination meta-issue (draft at `C:\tmp\luna-coordination-issue.md`; user posts manually)
-- **Stage 2 — First visible stability win (1–2 weeks)**
-  - 2.4 Phase-2 analyses for BUG-001 / BUG-005 / BUG-008 → `docs/research/02-analysis/`
-  - 2.5 Fix BUG-001 (smallest scope)
-  - 2.6 First upstream PR
-- **Stage 3 — Operational tooling (3–4 weeks, parallel)**
-  - 3.7 Admin dashboard v1 (extend `Server/Web/WebServer.cs`)
-  - 3.8 BUG-005, BUG-008
-- **Stage 4 — Mock-client test harness (2–4 weeks)**
-  - 4.9 Protocol harness
+  - ✅ 1.2 Logging upgrade — ring buffer + tagged overloads + parse-back capture (`4e3e6bd2`)
+  - ⏸ 1.3 Upstream coordination meta-issue — **DEFERRED INDEFINITELY** per fork-master strategy
+- **Stage 2 — First visible stability win** ✅ COMPLETE (2026-05-16)
+  - ✅ 2.4 Phase-2 analyses for time/subspace bugs (`48df64bd`, `fc2b793a`)
+  - ✅ 2.5a BUG-051a server-side request dedup (`9732fc7e`)
+  - ✅ 2.5b BUG-001 solo-subspace catch-up (`0f10b2d3`)
+  - ✅ 2.5c BUG-003/004 future-subspace interpolation cap (`cd551859`)
+  - ✅ 2.5d BUG-051b client steady-state retry (`25303e7d`)
+  - ✅ 2.5e BUG-014 audit-closed (`7f1393f4`)
+  - ✅ 2.5f BUG-005/006 cross-subspace lock keying + protocol bump 0.30.0 (`d64acf66`)
+  - ✅ 2.5g Fork-build banner + `[fix:BUG-XXX]` log tags (`d2186e2e`)
+  - ⏸ 2.6 First upstream PR — **DEFERRED** by strategy shift
+- **Stage 3 — Operational tooling (3–4 weeks, parallel)** — NEXT or alternate with Stage 4
+  - ⏳ 3.7 Admin dashboard v1 (extend `Server/Web/WebServer.cs`) — ring buffer + `ForkBuildInfo` are the data sources
+  - 3.8 Phase-2 + fixes for BUG-008 (PQS-timing) and other top-10 remaining (#013/#018/#023/#025/#033/#045)
+- **Stage 4 — Mock-client test harness (2–4 weeks)** — NEXT or alternate with Stage 3
+  - ⏳ 4.9 Protocol harness — unblocks automated tests for the client-side Stage 2 fixes
   - 4.10 Regression tests for shipped fixes
   - 4.11 CI integration
 - **Stage 5 — Per-agency career (2–4 months, separate branch)**
