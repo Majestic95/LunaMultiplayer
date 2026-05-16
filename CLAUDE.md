@@ -67,7 +67,9 @@ luna-multiplayer/
 │   │   ├── LogThread.cs        # Async rollover (daily) + expire pass
 │   │   └── LogExpire.cs        # Deletes logs older than LogSettings.ExpireLogs days
 │   ├── Web/
-│   │   └── WebServer.cs        # uhttpsharp-based HTTP endpoint (port 8900) — admin dashboard surface
+│   │   ├── WebServer.cs        # uhttpsharp-based HTTP endpoint (port 8900) — admin dashboard surface
+│   │   ├── Handlers/           # ServerInformationRestController + JsonGetHandler (Stage 3.7) + ExceptionHandler
+│   │   └── Structures/         # ServerInformation, ForkInformation (Stage 3.7), LogSnapshot (Stage 3.7)
 │   ├── Client/                 # Connected-client state and lifecycle
 │   ├── Upnp/                   # Optional UPnP port mapping
 │   └── Plugin/                 # Server-side mod loader (LMPModInterface)
@@ -224,6 +226,18 @@ Server-side systems (selected, see `Server/System/` for the full list):
 
 Vessel-side ingest lives under `Server/Message/` (proto, position, flight state, part sync, fairings, action groups, eva, decouple/couple). 30+ Harmony patches on the client mirror these.
 
+## Web Dashboard (`Server/Web/`)
+
+uhttpsharp HTTP server on port 8900 (configurable via `WebsiteSettings.Port`). Read-only JSON endpoints — there is no admin write path yet. Disabled by setting `WebsiteSettings.EnableWebsite = false`.
+
+| Route | Payload | Refresh |
+|-------|---------|---------|
+| `GET /` | `ServerInformation` — current players, vessels, subspaces, settings | Polled every `WebsiteSettings.RefreshIntervalMs` (default 5000ms) by `RefreshWebServerInformationAsync` |
+| `GET /fork` | `ForkInformation` — `ForkName` + `ProtocolVersion` + `ActiveFixes[]` (Stage 3.7) | Static — built per request from `ForkBuildInfo` |
+| `GET /log` | `LogSnapshot` — `Capacity` + `Count` + `Entries[]` (oldest-first) from `LogRingBuffer` (Stage 3.7) | Snapshot per request |
+
+Add a new endpoint by registering one more `.With("route", new JsonGetHandler(() => new Payload()))` chain in `WebServer.StartWebServer`. For read-only endpoints prefer `JsonGetHandler` over the `RestHandler<T>` + `IRestController<T>` pair — the latter is REST-shaped and most of its five verbs are MethodNotAllowed boilerplate for us.
+
 ## Settings (`Server/Settings/Definition/`)
 
 12 XML-serialized settings groups:
@@ -242,7 +256,7 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 
 ## Test Suite
 
-`ServerTest/` (68 tests on `net10.0` via MSTest):
+`ServerTest/` (74 tests on `net10.0` via MSTest):
 - `FileHandlerTest` — disk-IO round-trip
 - `HandshakeSystemValidatorTest` — handshake validation
 - `LockSystemTest` — lock state transitions + cross-subspace acquire rejection (BUG-005/006)
@@ -253,6 +267,7 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 - `WarpRequestCacheTest` — `(player, seq)` dedup cache (BUG-051a)
 - `WarpSoloDetectionTest` — solo-subspace transition logic (BUG-001)
 - `VesselAuthorityTest` — `AuthoritativeSubspaceId` round-trip, `IsStrictlyPast`, `RemoveSubspace` vessel-auth guard (BUG-005/006)
+- `WebDashboardTest` — `ForkInformation` + `LogSnapshot` payloads (Stage 3.7)
 
 `LmpCommonTest/`:
 - `LunaNetUtilsTest`, `MessageStoreTest`, `SerializationTests`, `TimeTests`
@@ -304,7 +319,7 @@ _Append new entries chronologically. If a note becomes obsolete, prefer striking
 ## Known Limitations & Future Work
 
 - **Logging:** ring buffer + tagged overloads shipped Stage 1.2. Size-based rotation deferred (daily + expire suffice until dashboard ships); `LogSettings.RingBufferSize` setting deferred (`LogRingBuffer.Capacity` is a `const`).
-- **Admin dashboard:** `Server/Web/WebServer.cs` exists on port 8900 but exposes minimal info. Stage 3.7 will extend this — the ring buffer + `ForkBuildInfo.ActiveFixes` are the data it surfaces.
+- **Admin dashboard:** Stage 3.7 v1 shipped — `GET /fork` exposes `ForkInformation` (fork name + protocol version + `ActiveFixes[]`); `GET /log` exposes a `LogRingBuffer` snapshot. Both are JSON, both via the new `JsonGetHandler`. v1 is read-only; no HTML, no auth, no filtering. v2 might add level/subsystem query filters and a tiny HTML view — defer until an operator actually asks.
 - **Mock-client test harness:** Stage 4.9, not started. Without it, client-side regressions for BUG-003/004 / BUG-051b / BUG-005/006 restored broadcasts rely on review + soak.
 - **Per-agency career:** Stage 5, not started. Lives on `feature/per-agency` branch (also not yet created).
 - **Pre-existing build warnings (30):** noise to be tackled in a dedicated pass, not piecemeal.
@@ -333,8 +348,8 @@ Master plan (also tracked in conversation todos for active work):
   - ✅ 2.5f BUG-005/006 cross-subspace lock keying + protocol bump 0.30.0 (`d64acf66`)
   - ✅ 2.5g Fork-build banner + `[fix:BUG-XXX]` log tags (`d2186e2e`)
   - ⏸ 2.6 First upstream PR — **DEFERRED** by strategy shift
-- **Stage 3 — Operational tooling (3–4 weeks, parallel)** — NEXT or alternate with Stage 4
-  - ⏳ 3.7 Admin dashboard v1 (extend `Server/Web/WebServer.cs`) — ring buffer + `ForkBuildInfo` are the data sources
+- **Stage 3 — Operational tooling (3–4 weeks, parallel)** — IN PROGRESS
+  - ✅ 3.7 Admin dashboard v1 — `/fork` + `/log` JSON endpoints via `JsonGetHandler`; ring buffer + `ForkBuildInfo` wired through. v2 (level/subsystem filters, HTML view) deferred.
   - 3.8 Phase-2 + fixes for BUG-008 (PQS-timing) and other top-10 remaining (#013/#018/#023/#025/#033/#045)
 - **Stage 4 — Mock-client test harness (2–4 weeks)** — NEXT or alternate with Stage 3
   - ⏳ 4.9 Protocol harness — unblocks automated tests for the client-side Stage 2 fixes

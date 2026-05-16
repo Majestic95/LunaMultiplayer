@@ -64,7 +64,10 @@ namespace Server.Web
                         Server.Use(new TcpListenerAdapter(listener));
                         Server.Use(new ExceptionHandler());
                         Server.Use(new CompressionHandler(DeflateCompressor.Default, GZipCompressor.Default));
-                        Server.Use(new HttpRouter().With(string.Empty, new RestHandler<ServerInformation>(new ServerInformationRestController(), JsonResponseProvider.Default)));
+                        Server.Use(new HttpRouter()
+                            .With(string.Empty, new RestHandler<ServerInformation>(new ServerInformationRestController(), JsonResponseProvider.Default))
+                            .With("fork", new JsonGetHandler(() => new ForkInformation()))
+                            .With("log", new JsonGetHandler(() => new LogSnapshot())));
                         Server.Start();
                     }
                     else
