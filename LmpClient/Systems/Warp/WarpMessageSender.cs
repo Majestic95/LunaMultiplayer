@@ -34,13 +34,18 @@ namespace LmpClient.Systems.Warp
         }
 
         /// <summary>
-        /// Sends the new subspace that we jumped into
+        /// Sends the new subspace that we jumped into. <paramref name="requestSeq"/> is the
+        /// client-allocated sequence number for this logical request — retries within the same
+        /// stuck-at-warp cycle reuse the same seq so the server's BUG-051a dedup cache returns the
+        /// original subspace assignment instead of minting a fresh one. Pass 0 to opt out of
+        /// dedup (legacy behavior).
         /// </summary>
-        public void SendNewSubspace()
+        public void SendNewSubspace(uint requestSeq)
         {
             var msgData = NetworkMain.CliMsgFactory.CreateNewMessageData<WarpNewSubspaceMsgData>();
             msgData.ServerTimeDifference = TimeSyncSystem.UniversalTime - TimeSyncSystem.ServerClockSec;
             msgData.PlayerCreator = SettingsSystem.CurrentSettings.PlayerName;
+            msgData.RequestSeq = requestSeq;
             //we don't send the SubspaceKey as it will be given by the server except when warping that we set it to -1
 
             SendMessage(msgData);

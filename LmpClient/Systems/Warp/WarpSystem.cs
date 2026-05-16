@@ -11,6 +11,7 @@ using LmpCommon.Time;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Threading;
 using UniLinq;
 
 namespace LmpClient.Systems.Warp
@@ -20,6 +21,22 @@ namespace LmpClient.Systems.Warp
         #region Fields & properties
 
         private static DateTime _stoppedWarpingTimeStamp;
+
+        /// <summary>
+        /// Process-wide monotonic allocator for <see cref="WarpNewSubspaceMsgData.RequestSeq"/>. Each
+        /// fresh stuck-at-warp cycle (i.e. each transition from non-waiting to waiting) draws a new
+        /// seq via <see cref="Interlocked.Increment(ref int)"/>; retries within the same cycle reuse
+        /// the seq so the server's dedup cache (BUG-051a) returns the original assignment.
+        /// </summary>
+        private static int _requestSeqAllocator;
+        private uint _currentRequestSeq;
+
+        /// <summary>
+        /// How long to wait between retries while stuck-at-warp. Pairs with BUG-051a server-side
+        /// dedup so the tighter cadence cannot mint orphan subspaces.
+        /// See docs/research/02-analysis/bug-051-stuck-warp-limbo.md.
+        /// </summary>
+        private const int SteadyStateRetryRoutineMs = 500;
 
         public bool CurrentlyWarping => CurrentSubspace == -1;
 
@@ -98,6 +115,7 @@ namespace LmpClient.Systems.Warp
             SkipSubspaceProcess = false;
             WaitingSubspaceIdFromServer = false;
             SyncedToLastSubspace = false;
+            _currentRequestSeq = 0;
         }
 
         protected override void OnEnabled()
@@ -109,6 +127,7 @@ namespace LmpClient.Systems.Warp
             {
                 SetupRoutine(new RoutineDefinition(100, RoutineExecution.Update, CheckWarpStopped));
                 SetupRoutine(new RoutineDefinition(1000, RoutineExecution.Update, WarpIfSpectatingToController));
+                SetupRoutine(new RoutineDefinition(SteadyStateRetryRoutineMs, RoutineExecution.Update, CheckSteadyStateRetry));
                 SetupRoutine(new RoutineDefinition(5000, RoutineExecution.Update, CheckStuckAtWarp));
             }
         }
@@ -144,6 +163,26 @@ namespace LmpClient.Systems.Warp
                 LunaLog.LogError("Detected stuck at warping! Requesting subspace ID again!");
                 RequestNewSubspace();
             }
+        }
+
+        /// <summary>
+        /// BUG-051b: tight retry loop while stuck-at-warp. Runs every SteadyStateRetryRoutineMs; if
+        /// the client is in the "warp ended but still waiting for subspace ID" state, resend the
+        /// NewSubspace request using the SAME RequestSeq. Pairs with BUG-051a server-side dedup so
+        /// repeated requests return the cached assignment instead of minting orphan subspaces.
+        /// See docs/research/02-analysis/bug-051-stuck-warp-limbo.md.
+        /// </summary>
+        private void CheckSteadyStateRetry()
+        {
+            if (CurrentSubspace != -1) return;
+            if (!WaitingSubspaceIdFromServer) return;
+            if (TimeWarp.CurrentRateIndex != 0) return;
+            if (Math.Abs(TimeWarp.CurrentRate - 1) >= 0.1f) return;
+            if (_currentRequestSeq == 0) return; //should not happen — RequestNewSubspace allocates before sending — but guard anyway
+
+            LunaLog.Log($"[LMP]: stuck-at-warp steady-state retry — resending NewSubspace seq={_currentRequestSeq}");
+            MessageSender.SendNewSubspace(_currentRequestSeq);
+            _stoppedWarpingTimeStamp = LunaComputerTime.UtcNow;
         }
 
         /// <summary>
@@ -366,12 +405,19 @@ namespace LmpClient.Systems.Warp
         }
 
         /// <summary>
-        /// Task that requests a new subspace to the server.
+        /// Task that requests a new subspace to the server. Allocates a fresh RequestSeq when
+        /// starting a new logical request (transitioning into the waiting state); retries within
+        /// the same stuck cycle (driven by <see cref="CheckSteadyStateRetry"/>) reuse the same seq
+        /// so the server's BUG-051a dedup cache returns the original assignment.
         /// </summary>
         private void RequestNewSubspace()
         {
+            if (!WaitingSubspaceIdFromServer)
+            {
+                _currentRequestSeq = (uint)Interlocked.Increment(ref _requestSeqAllocator);
+            }
             WaitingSubspaceIdFromServer = true;
-            MessageSender.SendNewSubspace();
+            MessageSender.SendNewSubspace(_currentRequestSeq);
             _stoppedWarpingTimeStamp = LunaComputerTime.UtcNow;
         }
 
