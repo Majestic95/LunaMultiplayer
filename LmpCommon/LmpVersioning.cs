@@ -16,10 +16,13 @@ namespace LmpCommon
         /// <summary>
         /// Additional major/minor pairs that may interoperate (both directions). Build/revision is ignored.
         /// Add a row when releasing a version that should still exchange messages with the previous minor line.
+        /// BUG-005/006: the original (0,30,0,29) row was removed when this fork's 0.30.0 introduced a
+        /// hard-protocol-breaking cross-subspace lock keying change. Pairing a fork 0.30.0 client with
+        /// a vanilla 0.29.x server (or vice-versa) is no longer safe — the disabled-then-restored
+        /// SendUnloadedSecondary* broadcasts would mishandle on the other side.
         /// </summary>
         private static readonly (int MajorA, int MinorA, int MajorB, int MinorB)[] CrossCompatibleVersionLines =
         {
-            (0, 30, 0, 29), //  Version 0.30.x is compatible with version 0.29.x
         };
 
         /// <summary>

@@ -38,9 +38,13 @@ namespace Server.System.Vessel
         }
 
         /// <summary>
-        /// Raw updates a vessel in the dictionary and takes care of the locking in case we received another vessel message type
+        /// Raw updates a vessel in the dictionary and takes care of the locking in case we received another vessel message type.
+        /// <paramref name="clientSubspaceId"/> is stamped onto the vessel as its
+        /// <see cref="Classes.Vessel.AuthoritativeSubspaceId"/> (BUG-005/006). The cross-subspace
+        /// rejection itself is performed synchronously by <see cref="Server.Message.VesselMsgReader.HandleVesselProto"/>
+        /// before this call so that the relay is suppressed on rejection; here we only stamp.
         /// </summary>
-        public static void RawConfigNodeInsertOrUpdate(Guid vesselId, string vesselDataInConfigNodeFormat)
+        public static void RawConfigNodeInsertOrUpdate(Guid vesselId, string vesselDataInConfigNodeFormat, int clientSubspaceId)
         {
             _ = Task.Run(() =>
             {
@@ -55,8 +59,24 @@ namespace Server.System.Vessel
                         return;
                     }
                 }
+                //BUG-005/006: stamp the contributing client's subspace as the new authority.
+                //Sentinels (subspaceId <= 0) are not stamped — they leave existing authority in place
+                //so a warping or unidentified client cannot blank a vessel's authority.
+                if (clientSubspaceId > 0)
+                {
+                    vessel.AuthoritativeSubspaceId = clientSubspaceId;
+                }
                 lock (Semaphore.GetOrAdd(vesselId, new object()))
                 {
+                    //Preserve authority across reject-and-replace race: if the existing vessel had
+                    //higher authority and the incoming update arrived legitimately (already past
+                    //the synchronous reject check), keep the more advanced authority.
+                    if (clientSubspaceId <= 0
+                        && VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var existingForAuth)
+                        && existingForAuth.AuthoritativeSubspaceId > 0)
+                    {
+                        vessel.AuthoritativeSubspaceId = existingForAuth.AuthoritativeSubspaceId;
+                    }
                     VesselStoreSystem.CurrentVessels.AddOrUpdate(vesselId, vessel, (key, existingVal) => vessel);
                 }
             });

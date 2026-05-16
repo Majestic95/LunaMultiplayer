@@ -123,6 +123,24 @@ namespace Server.System
             }
         }
 
+        /// <summary>
+        /// Returns true when <paramref name="candidateSubspace"/> runs strictly earlier in time
+        /// than <paramref name="referenceSubspace"/> per the server's recorded
+        /// <see cref="Subspace.Time"/> deltas. Sentinels (-1 warping, 0 no-auth, unknown subspace ids)
+        /// are NOT considered "past" — they're treated as inert. Used by BUG-005/006 vessel-authority
+        /// and lock-acquire checks to reject cross-subspace operations from a past timeline.
+        /// </summary>
+        public static bool IsStrictlyPast(int candidateSubspace, int referenceSubspace)
+        {
+            if (candidateSubspace == referenceSubspace) return false;
+            if (candidateSubspace <= 0 || referenceSubspace <= 0) return false;
+
+            if (!WarpContext.Subspaces.TryGetValue(candidateSubspace, out var cand)) return false;
+            if (!WarpContext.Subspaces.TryGetValue(referenceSubspace, out var refS)) return false;
+
+            return cand.Time < refS.Time;
+        }
+
         public static bool RemoveSubspace(int subspaceToRemove)
         {
             //Do not remove the subspace if there are clients there
@@ -136,6 +154,16 @@ namespace Server.System
             //We are in the latest subspace and we NEVER remove it!
             if (subspaceToRemove == WarpContext.LatestSubspace.Id)
                 return false;
+
+            //BUG-005/006: do not remove a subspace that is still the AuthoritativeSubspaceId for at
+            //least one vessel — pruning would orphan that vessel's lock semantics. The check is
+            //O(n_vessels) per disconnect; acceptable at typical server scales (<<10k vessels).
+            //See docs/research/02-analysis/bug-005-006-cross-subspace-lock.md.
+            if (VesselStoreSystem.CurrentVessels.Values.Any(v => v.AuthoritativeSubspaceId == subspaceToRemove))
+            {
+                LunaLog.Debug($"Refusing to remove subspace '{subspaceToRemove}' — at least one vessel still authoritative there");
+                return false;
+            }
 
             LunaLog.Debug($"Removing abandoned subspace '{subspaceToRemove}'");
             WarpContext.Subspaces.TryRemove(subspaceToRemove, out _);

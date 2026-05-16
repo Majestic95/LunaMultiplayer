@@ -41,7 +41,7 @@ namespace Server.System
 
         public static void SendLockAcquireMessage(ClientStructure client, LockDefinition lockDefinition, bool force)
         {
-            if (LockSystem.AcquireLock(lockDefinition, force, out var repeatedAcquire))
+            if (LockSystem.AcquireLock(lockDefinition, force, out var repeatedAcquire, client.Subspace))
             {
                 var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<LockAcquireMsgData>();
                 msgData.Lock = lockDefinition;

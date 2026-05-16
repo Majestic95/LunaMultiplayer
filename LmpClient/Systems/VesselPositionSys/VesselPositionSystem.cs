@@ -72,7 +72,10 @@ namespace LmpClient.Systems.VesselPositionSys
             //It's important that SECONDARY vessels send their position in the UPDATE as their parameters will NOT be updated on the fixed update if the are packed.
             //https://forum.kerbalspaceprogram.com/index.php?/topic/173885-packed-vessels-position-isnt-reliable-from-fixedupdate/
             SetupRoutine(new RoutineDefinition(SettingsSystem.ServerSettings.SecondaryVesselUpdatesMsInterval, RoutineExecution.LateUpdate, SendSecondaryVesselPositionUpdates));
-            //SetupRoutine(new RoutineDefinition(SettingsSystem.ServerSettings.SecondaryVesselUpdatesMsInterval, RoutineExecution.LateUpdate, SendUnloadedSecondaryVesselPositionUpdates));
+            //BUG-005/006: restored after the server-side AuthoritativeSubspaceId / lock-keying fix.
+            //Was disabled by upstream commit fbc7a8c to suppress the visible cross-subspace
+            //lock symptoms; now safe to re-enable because the server rejects past-subspace acquires.
+            SetupRoutine(new RoutineDefinition(SettingsSystem.ServerSettings.SecondaryVesselUpdatesMsInterval, RoutineExecution.LateUpdate, SendUnloadedSecondaryVesselPositionUpdates));
 
             WarpEvent.onTimeWarpStopped.Add(PositionEvents.WarpStopped);
         }

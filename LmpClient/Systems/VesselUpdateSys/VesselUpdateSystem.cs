@@ -39,7 +39,10 @@ namespace LmpClient.Systems.VesselUpdateSys
             SetupRoutine(new RoutineDefinition(1500, RoutineExecution.Update, SendVesselUpdates));
             SetupRoutine(new RoutineDefinition(1500, RoutineExecution.Update, ProcessVesselUpdates));
             SetupRoutine(new RoutineDefinition(5000, RoutineExecution.Update, SendSecondaryVesselUpdates));
-            //SetupRoutine(new RoutineDefinition(10000, RoutineExecution.Update, SendUnloadedSecondaryVesselUpdates));
+            //BUG-005/006: restored after the server-side AuthoritativeSubspaceId / lock-keying fix.
+            //Was disabled by upstream commit fbc7a8c to suppress the visible cross-subspace
+            //lock symptoms; now safe to re-enable because the server rejects past-subspace acquires.
+            SetupRoutine(new RoutineDefinition(10000, RoutineExecution.Update, SendUnloadedSecondaryVesselUpdates));
         }
 
         protected override void OnDisabled()

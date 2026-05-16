@@ -115,12 +115,23 @@ namespace Server.Message
                 return;
             }
 
+            //BUG-005/006: synchronously reject proto-updates from a client whose subspace is
+            //strictly past the vessel's current AuthoritativeSubspaceId. The store update and
+            //the relay are both suppressed so other clients do not see the rewound state.
+            if (VesselStoreSystem.CurrentVessels.TryGetValue(msgData.VesselId, out var existing)
+                && WarpSystem.IsStrictlyPast(client.Subspace, existing.AuthoritativeSubspaceId))
+            {
+                LunaLog.Debug($"Rejecting proto-update for {msgData.VesselId} from {client.PlayerName} " +
+                              $"(client subspace {client.Subspace} is past vessel authority subspace {existing.AuthoritativeSubspaceId})");
+                return;
+            }
+
             if (!VesselStoreSystem.VesselExists(msgData.VesselId))
             {
                 LunaLog.Debug($"Saving vessel {msgData.VesselId} ({ByteSize.FromBytes(msgData.NumBytes).KiloBytes} KB) from {client.PlayerName}.");
             }
 
-            VesselDataUpdater.RawConfigNodeInsertOrUpdate(msgData.VesselId, Encoding.UTF8.GetString(msgData.Data, 0, msgData.NumBytes));
+            VesselDataUpdater.RawConfigNodeInsertOrUpdate(msgData.VesselId, Encoding.UTF8.GetString(msgData.Data, 0, msgData.NumBytes), client.Subspace);
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, msgData);
         }
 
@@ -162,6 +173,16 @@ namespace Server.Message
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, msgData);
 
             if (VesselContext.RemovedVessels.ContainsKey(msgData.CoupledVesselId)) return;
+
+            //BUG-005/006: initiator-wins handoff. The dominant vessel that survives the couple
+            //inherits the initiating client's subspace as its new AuthoritativeSubspaceId so the
+            //merged vessel's lock semantics follow the player who performed the action.
+            //See docs/research/02-analysis/bug-005-006-cross-subspace-lock.md.
+            if (client.Subspace > 0
+                && VesselStoreSystem.CurrentVessels.TryGetValue(msgData.VesselId, out var dominantVessel))
+            {
+                dominantVessel.AuthoritativeSubspaceId = client.Subspace;
+            }
 
             //Now remove the weak vessel but DO NOT add to the removed vessels as they might undock!!!
             LunaLog.Debug($"Removing weak coupled vessel {msgData.CoupledVesselId}");

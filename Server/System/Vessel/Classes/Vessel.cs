@@ -1,6 +1,7 @@
 ﻿using LunaConfigNode;
 using LunaConfigNode.CfgNode;
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 
@@ -8,6 +9,13 @@ namespace Server.System.Vessel.Classes
 {
     public class Vessel
     {
+        /// <summary>
+        /// Top-level field name LMP uses on the vessel ConfigNode to record the
+        /// AuthoritativeSubspaceId. Prefixed with `lmp` so KSP's vessel loader ignores
+        /// it as an unknown field. See BUG-005/006.
+        /// </summary>
+        public const string AuthSubspaceFieldName = "lmpAuthSubspace";
+
         public MixedCollection<string, string> Fields;
         public MixedCollection<uint, Part> Parts;
         public MixedCollection<string, string> Orbit;
@@ -19,6 +27,25 @@ namespace Server.System.Vessel.Classes
         public readonly ConfigNode Waypoint;
         public readonly ConfigNode CtrlState;
         public readonly ConfigNode VesselModules;
+
+        /// <summary>
+        /// The subspace whose timeline is canonical for this vessel. 0 = no authority yet
+        /// (vessel exists but no proto-update has been received). Stored as the
+        /// `lmpAuthSubspace` top-level field of the vessel ConfigNode and round-tripped
+        /// via <see cref="Fields"/>. See docs/research/02-analysis/bug-005-006-cross-subspace-lock.md.
+        /// </summary>
+        public int AuthoritativeSubspaceId
+        {
+            get => int.TryParse(Fields.GetSingle(AuthSubspaceFieldName)?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : 0;
+            set
+            {
+                var asString = value.ToString(CultureInfo.InvariantCulture);
+                if (Fields.Exists(AuthSubspaceFieldName))
+                    Fields.Update(AuthSubspaceFieldName, asString);
+                else
+                    Fields.Add(new CfgNodeValue<string, string>(AuthSubspaceFieldName, asString));
+            }
+        }
 
         public Vessel(ConfigNode cfgNode)
         {
