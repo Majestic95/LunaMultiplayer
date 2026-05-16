@@ -65,9 +65,16 @@ namespace LmpClient.Systems.VesselPositionSys
 
         #region Interpolation fields
 
-        private double MaxInterpolationDuration => WarpSystem.Singleton.SubspaceIsEqualOrInThePast(Target.SubspaceId) ?
-            TimeSpan.FromMilliseconds(SettingsSystem.ServerSettings.SecondaryVesselUpdatesMsInterval).TotalSeconds * 2
-            : double.MaxValue;
+        //BUG-003/004: cap the interpolation duration on the future-subspace side. The original
+        //behavior was `* 2` for past/equal and `double.MaxValue` for future, which made
+        //NumFrames ~= 50N for a target N seconds ahead — vessel motion was ~1/50N of normal
+        //speed, appearing frozen until a fresher update arrived. Capping the future side at
+        //a finite multiple causes a visible skip to the latest known pose instead of a crawl.
+        //See docs/research/02-analysis/bug-003-004-frozen-vessel-interp-cap.md.
+        private const int MaxFutureInterpolationMultiplier = 10;
+
+        private double MaxInterpolationDuration => TimeSpan.FromMilliseconds(SettingsSystem.ServerSettings.SecondaryVesselUpdatesMsInterval).TotalSeconds
+            * (WarpSystem.Singleton.SubspaceIsEqualOrInThePast(Target.SubspaceId) ? 2 : MaxFutureInterpolationMultiplier);
 
         private int MessageCount => VesselPositionSystem.TargetVesselUpdateQueue.TryGetValue(VesselId, out var queue) ? queue.Count : 0;
         public double TimeDifference { get; private set; }
