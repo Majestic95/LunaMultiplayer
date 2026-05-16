@@ -15,7 +15,7 @@
 | Project | Target | Runtime | Notes |
 |---------|--------|---------|-------|
 | `Server` | `net10.0` | .NET 10 | Dedicated headless server. Authoritative for all game state. |
-| `LmpClient` | `net472` | Mono (KSP's bundled runtime) | KSP plugin DLL, loaded into KSP1. |
+| `LmpClient` | `net472` | Mono (KSP's bundled runtime) | KSP plugin DLL, loaded into KSP1. Builds locally with the .NET 4.7.2 Developer Pack + KSP DLLs in `External/KSPLibraries/` — see "Build & Run → LmpClient". |
 | `LmpCommon` | `netstandard2.0` + `net10.0` + `net472` | Multi-target | Wire protocol, message types, shared utilities. |
 | `LmpMasterServer` | `net10.0` | .NET 10 | Optional public master-server registry. |
 | `LmpUpdater` | `net10.0` | .NET 10 | Self-update tool. |
@@ -124,7 +124,21 @@ Tests:
 
 ### LmpClient (KSP plugin)
 
-Built via Visual Studio or `msbuild` (targets `net472`, requires .NET Framework 4.7.2 dev pack). Outputs a DLL into `External/KSPLibraries/` which is copied to KSP's `GameData/LunaMultiPlayer/Plugins/` per the build scripts.
+Targets `net472` (Mono runtime — KSP's bundled CLR). Builds locally via the same user-installed `.NET 10 SDK` once two prerequisites are in place:
+
+1. **.NET Framework 4.7.2 Developer Pack** — `NDP472-DevPack-ENU.exe` from https://aka.ms/msbuild/developerpacks. Installs the v4.7.2 targeting pack under `C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.7.2\`. `LmpClient/Directory.Build.props` then wires `TargetFrameworkRootPath` so the SDK MSBuild finds it (the SDK's default resolution is unreliable on some .NET 10 SDK builds — passing this explicitly is the workaround).
+2. **KSP/Unity DLLs in `External/KSPLibraries/`** — `Assembly-CSharp.dll`, `System.dll`, `System.Xml.dll`, plus 10 `UnityEngine.*.dll` modules (see `LmpClient.csproj` `<HintPath>` entries for the full list). Two sources:
+   - Extract `External/KSPLibraries/KSPLibraries.7z` — but it's password-encrypted and the password lives in the upstream's AppVeyor secret (rotated 2017 commit `5f7a0026`, never made public). Upstream's current GitHub Actions workflow doesn't build LmpClient either.
+   - **Copy from a local KSP install** (preferred — legally cleaner): `<KSP>/KSP_x64_Data/Managed/<dll>`. The 13 files needed total ~18 MB.
+
+Build:
+```bash
+"/c/Users/austi/.dotnet/dotnet.exe" build LmpClient/LmpClient.csproj -c Release
+```
+
+Outputs `LmpClient/bin/Release/LmpClient.dll` (~3 MB) along with vendored deps. Pre-existing warnings on this project: 4 × MSB3245 (missing `System.Buffers`/`System.Memory`/`System.Numerics.Vectors`/`System.Runtime.CompilerServices.Unsafe` HintPath to a non-existent `External/Nuget/` folder — supplied by KSP's Mono at load time, not a real problem); 2 × NU1701 (CachedQuickLz package compat); 1 × CS0169 (unused field in `Windows/Mod/ModWindow.cs`). These are noise; do not "fix" them in unrelated diffs.
+
+For end-user deployment, the DLL is copied to KSP's `GameData/LunaMultiPlayer/Plugins/` per the existing `Scripts/CopyToKSPDirectory.bat`.
 
 ### Pre-existing build warnings (do not "fix as you go")
 
@@ -310,7 +324,7 @@ _Each entry has a date and the context that prompted it. Don't relearn these._
 - **Protocol bumped to 0.30.0** (2026-05-16, session 3, commit `d64acf66`): cross-subspace lock keying (BUG-005/006) restored the `SendUnloadedSecondary*` broadcasts that upstream `fbc7a8c` disabled. Mixing a fork 0.30.0 peer with a vanilla 0.29.x peer corrupts vessel state. The `(0,30,0,29)` cross-compat row was removed from `LmpCommon/LmpVersioning.cs`. Future protocol bumps need an equally significant break to justify.
 - **`lmpAuthSubspace` is the canonical fork-metadata field on vessel ConfigNodes** (2026-05-16, session 3): the `lmp*` prefix means KSP's vessel loader silently ignores the unknown field, so our additions round-trip safely. Stored via the existing `MixedCollection<string, string> Fields` on `Server/System/Vessel/Classes/Vessel.cs`. Future fork-local vessel metadata MUST use the same prefix convention.
 - **`Server/ForkBuildInfo.cs` is the registry of fork-applied fixes** (2026-05-16, session 3, commit `d2186e2e`): `ActiveFixes[]` lists every fix in commit-chronological order; `MainServer.Main` emits a `[fork] ...` banner at boot. Every runtime fix-related log line uses `[fix:BUG-XXX]` prefix so operators can `grep -F "[fix:"` to find fork-attributed events. When adding a new fix: append to `ActiveFixes[]` AND prefix the runtime log lines.
-- **LmpClient cannot be built locally without the .NET Framework 4.7.2 dev pack** (2026-05-16, session 3): `dotnet build LmpClient/LmpClient.csproj -c Release` fails with `MSB3644: The reference assemblies for .NETFramework,Version=v4.7.2 were not found.` Client edits ship reviewed-not-compiled — Server + LmpCommonTest builds + manual pattern conformance review. Visual Studio path is the only way to fully compile-verify; defer until/unless someone installs the dev pack.
+- ~~**LmpClient cannot be built locally without the .NET Framework 4.7.2 dev pack** (2026-05-16, session 3)~~ — **OBSOLETE 2026-05-16, session 4**: LmpClient now builds locally. Prereqs are documented in the "Build & Run → LmpClient" section: install the .NET Framework 4.7.2 Developer Pack and populate `External/KSPLibraries/` from a local KSP install (`KSP_x64_Data/Managed/`). `LmpClient/Directory.Build.props` wires `TargetFrameworkRootPath` so the SDK MSBuild finds the v4.7.2 targeting pack. Stage 2 client-side fixes that previously shipped "reviewed not compiled" (BUG-003/004 interp cap, BUG-051b retry, BUG-005/006 restored `SendUnloadedSecondary*`) are now compile-verified locally.
 
 _Append new entries chronologically. If a note becomes obsolete, prefer striking it through with a date rather than deleting outright, so future-you sees the lesson._
 
@@ -320,7 +334,7 @@ _Append new entries chronologically. If a note becomes obsolete, prefer striking
 
 - **Logging:** ring buffer + tagged overloads shipped Stage 1.2. Size-based rotation deferred (daily + expire suffice until dashboard ships); `LogSettings.RingBufferSize` setting deferred (`LogRingBuffer.Capacity` is a `const`).
 - **Admin dashboard:** Stage 3.7 v1 shipped — `GET /fork` exposes `ForkInformation` (fork name + protocol version + `ActiveFixes[]`); `GET /log` exposes a `LogRingBuffer` snapshot. Both are JSON, both via the new `JsonGetHandler`. v1 is read-only; no HTML, no auth, no filtering. v2 might add level/subsystem query filters and a tiny HTML view — defer until an operator actually asks.
-- **Mock-client test harness:** Stage 4.9, not started. Without it, client-side regressions for BUG-003/004 / BUG-051b / BUG-005/006 restored broadcasts rely on review + soak.
+- **Mock-client test harness:** Stage 4.9, not started. LmpClient now compiles locally (session 4), so client-side fixes are at least build-verified — but automated regression coverage for BUG-003/004 / BUG-051b / BUG-005/006 restored broadcasts still rides on review + soak until the harness lands.
 - **Per-agency career:** Stage 5, not started. Lives on `feature/per-agency` branch (also not yet created).
 - **Pre-existing build warnings (30):** noise to be tackled in a dedicated pass, not piecemeal.
 - **`GroupSystem` is scaffolding:** name + member list only, no resource fields. Needed for per-agency.

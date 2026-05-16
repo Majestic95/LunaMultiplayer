@@ -1,0 +1,21 @@
+﻿<Project>
+  <!--
+    Fork-local build prop. The .NET 10 SDK MSBuild on some Windows machines does
+    NOT auto-resolve the legacy v4.7.2 reference assemblies even when the
+    Developer Pack is installed — the GetReferenceAssemblyPaths task fails with
+    MSB3644 unless TargetFrameworkRootPath is set explicitly. Setting it
+    conditionally here (only when both the project targets v4.7.x and the
+    standard install path exists) keeps the build reproducible without breaking
+    machines where the SDK's default resolution already works.
+
+    Prereqs that must be on the machine to compile LmpClient locally:
+      1. .NET Framework 4.7.2 Developer Pack — see https://aka.ms/msbuild/developerpacks
+         (this drops the targeting pack at the path used below).
+      2. KSP/Unity DLLs extracted into ../External/KSPLibraries/ — either via
+         the upstream-encrypted KSPLibraries.7z OR copied from a local KSP
+         install (KSP_x64_Data/Managed/). See CLAUDE.md for the full list.
+  -->
+  <PropertyGroup Condition="'$(TargetFrameworkVersion)' == 'v4.7.2' AND '$(TargetFrameworkRootPath)' == '' AND Exists('$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.7.2')">
+    <TargetFrameworkRootPath>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\</TargetFrameworkRootPath>
+  </PropertyGroup>
+</Project>
