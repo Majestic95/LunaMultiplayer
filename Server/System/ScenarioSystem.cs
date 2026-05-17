@@ -7,6 +7,7 @@ using Server.Log;
 using Server.Properties;
 using Server.Server;
 using Server.Settings.Structures;
+using Server.System.Agency;
 using Server.System.Scenario;
 using System.IO;
 using System.Linq;
@@ -68,17 +69,39 @@ namespace Server.System
 
         public static void SendScenarioModules(ClientStructure client)
         {
-            var scenarioDataArray = ScenarioStoreSystem.CurrentScenarios.Keys.Select(s =>
-            {
-                var scenarioConfigNode = ScenarioStoreSystem.GetScenarioInConfigNodeFormat(s);
-                var serializedData = Encoding.UTF8.GetBytes(scenarioConfigNode);
-                return new ScenarioInfo
+            //[Stage 5.17c] Per-player scenario projection: when PerAgencyCareer=true, the
+            //requesting client receives ScenarioModule blobs where Funding/Sci/Rep have
+            //been overwritten with THEIR agency's values (spec §10 Q1 privacy +
+            //§5 read-path projection). Under gate=off (or Sandbox) AgencyScenarioProjector
+            //returns the serialized text unchanged — dual-mode silence preserved.
+            //Projection is read-only — the canonical CurrentScenarios store is never
+            //mutated by this path, so concurrent Share* writers and other clients'
+            //SendScenarioModules calls cannot race a projected snapshot.
+            //
+            //ConcurrentDictionary.Keys is a snapshot view; GetScenarioInConfigNodeFormat
+            //returns null if a concurrent remove slipped between the Keys snapshot and
+            //the lookup. No production code path removes from CurrentScenarios today
+            //(round-1 server-systems review verified), but the .Where filter below is
+            //defensive — without it, a future remover would NRE the receive thread on
+            //Encoding.UTF8.GetBytes(null).
+            var scenarioDataArray = ScenarioStoreSystem.CurrentScenarios.Keys
+                .Select(s => new
                 {
-                    Data = serializedData,
-                    NumBytes = serializedData.Length,
-                    Module = Path.GetFileNameWithoutExtension(s)
-                };
-            }).ToArray();
+                    Module = Path.GetFileNameWithoutExtension(s),
+                    Text = ScenarioStoreSystem.GetScenarioInConfigNodeFormat(s),
+                })
+                .Where(x => x.Text != null)
+                .Select(x =>
+                {
+                    var projected = AgencyScenarioProjector.ProjectForClient(x.Module, x.Text, client);
+                    var serializedData = Encoding.UTF8.GetBytes(projected);
+                    return new ScenarioInfo
+                    {
+                        Data = serializedData,
+                        NumBytes = serializedData.Length,
+                        Module = x.Module,
+                    };
+                }).ToArray();
 
             var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<ScenarioDataMsgData>();
             msgData.ScenariosData = scenarioDataArray;

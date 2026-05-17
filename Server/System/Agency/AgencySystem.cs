@@ -3,6 +3,7 @@ using Server.Settings.Structures;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 
 namespace Server.System.Agency
@@ -139,6 +140,24 @@ namespace Server.System.Agency
             // MainServer ordering). Deduplicate per orphan agency id and report the vessel
             // count. Quiet when no orphans found.
             WarnAboutOrphanedVessels();
+
+            // [Stage 5.17c round-1 upgrade-lens review] Pre-0.31 universe savings-loss
+            // warning. If gate=on AND zero agencies loaded AND there are pre-existing
+            // vessels (signal: this is an in-place upgrade, not a fresh universe) AND
+            // CurrentScenarios holds non-zero career scalars, the next player to connect
+            // will mint a fresh agency seeded from GameplaySettings.Starting* — and the
+            // projector will then overwrite the accumulated funds/sci/rep in the
+            // ScenarioModule payload with the fresh-start values. Silent data loss from
+            // the operator's perspective: KSP shows StartingFunds instead of accumulated
+            // career savings.
+            //
+            // Spec §10 migration sign-off is fresh-start-only (archive + start fresh), so
+            // an operator who follows the guidance never hits this. This warning catches
+            // the operator who didn't read release notes — they see the message and can
+            // stop the server before the first connect, archive Universe/, and start
+            // over without losing data. Stage 5.18d's transferagency / setagencyfunds is
+            // the proper recovery path for an already-mid-loss universe.
+            WarnAboutSavingsLossOnUpgrade();
         }
 
         /// <summary>
@@ -149,6 +168,66 @@ namespace Server.System.Agency
         /// file (per-file isolation skip in <see cref="LoadExistingAgencies"/>) silently locks
         /// the affected player out of their own vessels at next reconnect.
         /// </summary>
+        /// <summary>
+        /// Operator-facing boot diagnostic for the pre-0.31-upgrade savings-loss scenario.
+        /// Fires when (a) per-agency career is on, (b) no agencies loaded at boot,
+        /// (c) vessels exist in the store (signalling an in-place upgrade, not a fresh
+        /// universe), and (d) any of the three career scenarios has a non-zero scalar.
+        /// The next player to register mints a fresh agency seeded from
+        /// <see cref="GameplaySettingsDefinition.StartingFunds"/> et al; the projector
+        /// then overwrites the accumulated value in the wire payload. Operator sees the
+        /// warning, decides whether to stop and archive or accept the loss.
+        /// </summary>
+        private static void WarnAboutSavingsLossOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return;
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Fresh universe; no upgrade scenario to warn about.
+
+            var scalarsPresent = new List<string>();
+            if (TryReadScenarioRootDouble("Funding", "funds", out var funds) && funds != 0d)
+                scalarsPresent.Add($"funds={funds.ToString(CultureInfo.InvariantCulture)}");
+            if (TryReadScenarioRootDouble("ResearchAndDevelopment", "sci", out var sci) && sci != 0d)
+                scalarsPresent.Add($"sci={sci.ToString(CultureInfo.InvariantCulture)}");
+            if (TryReadScenarioRootDouble("Reputation", "rep", out var rep) && rep != 0d)
+                scalarsPresent.Add($"rep={rep.ToString(CultureInfo.InvariantCulture)}");
+
+            if (scalarsPresent.Count == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:per-agency-career] PerAgencyCareer=true on an upgrade universe " +
+                $"({VesselStoreSystem.CurrentVessels.Count} pre-existing vessel(s), zero agencies loaded). " +
+                $"Career scalars accumulated under shared-agency play: [{string.Join(", ", scalarsPresent)}]. " +
+                "The next player to connect will mint a fresh agency seeded from GameplaySettings.Starting* " +
+                "and the scenario projector will overwrite these scalars with the fresh-start values on every send — " +
+                "the accumulated values are NOT inherited. Spec §10 migration is fresh-start-only: stop the server, " +
+                "archive Universe/ before any player connects, and start fresh. If you accept the loss, this warning " +
+                "is informational. Stage 5.18d's transferagency / setagencyfunds will be the recovery path for an " +
+                "already-mid-loss universe.");
+        }
+
+        private static bool TryReadScenarioRootDouble(string scenarioName, string key, out double value)
+        {
+            value = 0d;
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue(scenarioName, out var scenario))
+                return false;
+            // Use the per-scenario writer lock for the same BUG-033 reason BackupScenarios
+            // does — ConfigNode.GetValue iterates the values collection, which would race
+            // an in-flight AddNode/RemoveNode on the same instance from a parallel writer.
+            // At boot there is no concurrent writer (no clients have authenticated yet),
+            // so this is belt-and-braces.
+            string raw;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore(scenarioName))
+            {
+                raw = scenario.GetValue(key)?.Value;
+            }
+            if (string.IsNullOrEmpty(raw))
+                return false;
+            return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
+        }
+
         private static void WarnAboutOrphanedVessels()
         {
             var orphanCounts = new Dictionary<Guid, int>();

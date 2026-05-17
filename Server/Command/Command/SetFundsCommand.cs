@@ -16,6 +16,19 @@ namespace Server.Command.Command
         //Executes the SetFundsCommand
         public override bool Execute(string commandArgs)
         {
+            //[Stage 5.17c] Under PerAgencyCareer=true the projector overwrites the shared
+            //Funding scenario blob with each agency's tracked value before send. setfunds
+            //would write to the shared blob, but every client sees their own agency value
+            //via the projection — the admin's intended update is silently invisible.
+            //Refuse with an explicit error so operators don't experience silent failure.
+            //Stage 5.18d ships the real replacement (setagencyfunds <agencyId> <amount>);
+            //until then operators can edit Universe/Agencies/{guid}.txt directly while
+            //the server is stopped.
+            if (GameplaySettings.SettingsStore.PerAgencyCareer)
+            {
+                LunaLog.Error("setfunds is disabled under PerAgencyCareer=true. Use setagencyfunds <agencyId> <amount> (Stage 5.18d) or edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
+                return false;
+            }
             //Check parameter
             CommandSystemHelperMethods.SplitCommandParamArray(commandArgs, out var parameters);
             if (!CheckParameter(parameters)) return false;

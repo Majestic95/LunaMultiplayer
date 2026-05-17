@@ -16,6 +16,16 @@ namespace Server.Command.Command
         //Executes the SetScienceCommand
         public override bool Execute(string commandArgs)
         {
+            //[Stage 5.17c] Under PerAgencyCareer=true the projector overwrites the shared
+            //ResearchAndDevelopment scenario blob with each agency's tracked value before
+            //send. setscience would write to the shared blob, but every client sees their
+            //own agency value via the projection — the admin's intended update is silently
+            //invisible. Refuse with an explicit error. Stage 5.18d ships setagencyscience.
+            if (GameplaySettings.SettingsStore.PerAgencyCareer)
+            {
+                LunaLog.Error("setscience is disabled under PerAgencyCareer=true. Use setagencyscience <agencyId> <amount> (Stage 5.18d) or edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
+                return false;
+            }
             //Check parameter
             CommandSystemHelperMethods.SplitCommandParamArray(commandArgs, out var parameters);
             if (!CheckParameter(parameters)) return false;
