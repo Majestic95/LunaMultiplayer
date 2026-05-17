@@ -4,6 +4,7 @@ using Server.Server;
 using Server.Settings;
 using Server.Settings.Structures;
 using Server.System;
+using Server.System.Agency;
 using System;
 using System.IO;
 using System.Net;
@@ -63,6 +64,22 @@ namespace MockClientTest.Harness
 
             // Settings: writes defaults to Config/ on first load, then reads them back.
             SettingsHandler.LoadSettings();
+
+            // Bootstrap the Universe child folders the same way MainServer.Main does at
+            // production boot. The Agencies/ child folder (Stage 5) is what specifically
+            // forces this — FileHandler.WriteAtomic does not create parent directories,
+            // so AgencySystem.SaveAgency would silently fail without this call. Idempotent
+            // on a fresh temp dir; the other folders the production server creates
+            // (Vessels, Scenarios, Kerbals, etc.) come along for free and let agency
+            // tests share the harness with future write-path tests in this directory.
+            //
+            // Note: production MainServer.Main also runs the matching loaders
+            // (LoadExistingVessels / LoadExistingScenarios / LoadExistingAgencies /
+            // GroupSystem.LoadGroups) after CheckUniverse. The harness intentionally
+            // skips them — on a fresh temp dir they're no-ops. A future test that
+            // pre-seeds Universe files on disk and expects the in-memory registries
+            // populated at Start must call the loader explicitly in [TestInitialize].
+            Universe.CheckUniverse();
 
             // Pin the loopback port and forbid UPnP / master-server traffic.
             Port = FindFreeUdpPort();
@@ -148,6 +165,14 @@ namespace MockClientTest.Harness
             // R&D scenario before running. Clear here so a follow-on test sees
             // the boot-default empty state, not the prior test's seed.
             ScenarioStoreSystem.CurrentScenarios.Clear();
+            // [Stage 5.16a] Drop any per-agency registry entries a prior test left
+            // behind, AND force the gate back off. Agency tests opt in by setting
+            // PerAgencyCareer=true in their own [TestInitialize] AFTER this reset
+            // runs, so a forgotten test that leaves the flag on cannot leak into
+            // a follow-on non-agency test (which would then start broadcasting
+            // Handshake/State messages it doesn't expect).
+            AgencySystem.Reset();
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
         }
 
         private static int FindFreeUdpPort()

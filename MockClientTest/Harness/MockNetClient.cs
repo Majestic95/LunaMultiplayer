@@ -3,7 +3,7 @@ using LmpCommon.Message.Interface;
 using LmpCommon.Time;
 using Server.Context;
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -20,11 +20,27 @@ namespace MockClientTest.Harness
     /// messages via <see cref="SendMessage{T}"/> / <see cref="WaitForReply{TData}"/>,
     /// then dispose. Multiple mock clients can coexist in the same test as
     /// long as each gets its own instance.
+    ///
+    /// **Inbox model.** The receive loop appends every deserialized message to
+    /// <see cref="_received"/>; <see cref="WaitForReply{TData}"/> scans the list
+    /// and removes only the first match. Messages on unrelated channels are
+    /// preserved so a follow-up wait of a different type still finds them — the
+    /// LMP wire spans many Lidgren channels (Handshake=1, Vessel=8, Warp=11,
+    /// Agency=22, ...) and per-channel order is the only guarantee, so any two
+    /// messages from different channels can arrive in either order. The first
+    /// motivating case is Stage 5.16a (HandshakeReply ch 1 vs AgencyHandshake
+    /// ch 22), but the property is general.
+    ///
+    /// **Dispose invariant.** <see cref="Dispose"/> assumes no <see cref="WaitForReply{TData}"/>
+    /// is in flight on another thread. The existing tests honour this via
+    /// <c>using</c> blocks that run wait + assert + dispose on the same thread.
     /// </summary>
     public sealed class MockNetClient : IDisposable
     {
         private readonly NetClient _client;
-        private readonly BlockingCollection<IMessageBase> _inbox = new BlockingCollection<IMessageBase>(boundedCapacity: 1024);
+        private readonly List<IMessageBase> _received = new List<IMessageBase>();
+        private readonly object _receivedLock = new object();
+        private readonly ManualResetEventSlim _newMessage = new ManualResetEventSlim(initialState: false);
         private readonly CancellationTokenSource _cts = new CancellationTokenSource();
         private Task _receiveTask;
         private bool _disposed;
@@ -82,26 +98,36 @@ namespace MockClientTest.Harness
         }
 
         /// <summary>
-        /// Drains the inbox until a message whose <c>Data</c> is of type
-        /// <typeparamref name="TData"/> arrives, then returns that data.
-        /// Returns null on timeout. Other inbound messages are dropped on
-        /// the floor — the harness is not (yet) a stateful replay log.
+        /// Scans the received-message buffer for the first message whose
+        /// <c>Data</c> is of type <typeparamref name="TData"/>. Returns that
+        /// data and removes the matched entry; messages of other types stay in
+        /// the buffer for a later call. Blocks up to <paramref name="timeout"/>
+        /// waiting for an arrival; returns null on timeout.
         /// </summary>
         public TData WaitForReply<TData>(TimeSpan timeout) where TData : class, IMessageData
         {
             var deadline = DateTime.UtcNow + timeout;
-            while (DateTime.UtcNow < deadline)
+            while (true)
             {
-                var remaining = deadline - DateTime.UtcNow;
-                if (remaining <= TimeSpan.Zero) break;
-                if (_inbox.TryTake(out var msg, remaining))
+                lock (_receivedLock)
                 {
-                    if (msg.Data is TData typed)
-                        return typed;
-                    // Not the type we want — discard and keep waiting.
+                    for (var i = 0; i < _received.Count; i++)
+                    {
+                        if (_received[i].Data is TData typed)
+                        {
+                            _received.RemoveAt(i);
+                            return typed;
+                        }
+                    }
+                    _newMessage.Reset();
                 }
+
+                var remaining = deadline - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero)
+                    return null;
+
+                _newMessage.Wait(remaining);
             }
-            return null;
         }
 
         private void ReceiveLoop()
@@ -130,7 +156,13 @@ namespace MockClientTest.Harness
                         {
                             var deserialized = ServerContext.ServerMessageFactory.Deserialize(msg, LunaNetworkTime.UtcNow.Ticks);
                             if (deserialized != null)
-                                _inbox.Add(deserialized);
+                            {
+                                lock (_receivedLock)
+                                {
+                                    _received.Add(deserialized);
+                                }
+                                _newMessage.Set();
+                            }
                         }
                         catch
                         {
@@ -156,9 +188,12 @@ namespace MockClientTest.Harness
 
             try { _cts.Cancel(); } catch { }
             try { _client.Disconnect("test done"); } catch { }
+            // Unblock any WaitForReply still parked on the event so the
+            // receive task can exit cleanly before we Dispose the event.
+            try { _newMessage.Set(); } catch { }
             try { _receiveTask?.Wait(TimeSpan.FromSeconds(1)); } catch { }
             try { _client.Shutdown("test done"); } catch { }
-            _inbox.Dispose();
+            _newMessage.Dispose();
             _cts.Dispose();
         }
     }

@@ -250,7 +250,10 @@ namespace Server.System.Agency
 
         /// <summary>
         /// Test-only helper. Clears the in-memory registries + lock anchors so successive
-        /// tests don't carry state across. Never call from production code.
+        /// tests don't carry state across. Called from <c>ServerTest</c> (<c>AgencySystemTest</c>)
+        /// and <c>MockClientTest</c> (<c>ServerHarness.ResetPerTestState</c>); both assemblies
+        /// have <see cref="System.Runtime.CompilerServices.InternalsVisibleToAttribute"/> on
+        /// the Server assembly. Never call from production code.
         /// </summary>
         internal static void Reset()
         {

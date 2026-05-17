@@ -19,3 +19,4 @@ using System.Runtime.InteropServices;
 [assembly: AssemblyInformationalVersion("0.30.0-compiled")]
 
 [assembly: InternalsVisibleTo("ServerTest")]
+[assembly: InternalsVisibleTo("MockClientTest")]
