@@ -287,7 +287,10 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 `LmpCommonTest/`:
 - `LunaNetUtilsTest`, `MessageStoreTest`, `SerializationTests`, `TimeTests`
 
-Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing. Client-side fix coverage (BUG-003/004 interp cap, BUG-051b retry, restored `SendUnloadedSecondary*` routines) is blocked on Stage 4.9 (mock-client harness) — those fixes currently rely on review + soak.
+`MockClientTest/` (1 test on `net10.0` via MSTest, Stage 4.9 v1):
+- `HandshakeSmokeTest` — proves the in-process harness wires up: `ServerHarness.Start` brings up a real Server on a free localhost port, `MockNetClient` connects via Lidgren and completes the LMP handshake, server registers the `ClientStructure`. Design + future work in `docs/research/04-mock-client-harness-design.md`.
+
+Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing. Client-side regression coverage for BUG-003/004 (interp cap), BUG-051b (retry), and BUG-005/006 (restored `SendUnloadedSecondary*` routines) is still review + soak — those need either harness extensions (server-observable assertions) or a dedicated `LmpClientTest` (net472) project for client-internal logic.
 
 ---
 
@@ -335,7 +338,7 @@ _Append new entries chronologically. If a note becomes obsolete, prefer striking
 
 - **Logging:** ring buffer + tagged overloads shipped Stage 1.2. Size-based rotation deferred (daily + expire suffice until dashboard ships); `LogSettings.RingBufferSize` setting deferred (`LogRingBuffer.Capacity` is a `const`).
 - **Admin dashboard:** Stage 3.7 v1 shipped — `GET /fork` exposes `ForkInformation` (fork name + protocol version + `ActiveFixes[]`); `GET /log` exposes a `LogRingBuffer` snapshot. Both are JSON, both via the new `JsonGetHandler`. v1 is read-only; no HTML, no auth, no filtering. v2 might add level/subsystem query filters and a tiny HTML view — defer until an operator actually asks.
-- **Mock-client test harness:** Stage 4.9, not started. LmpClient now compiles locally (session 4), so client-side fixes are at least build-verified — but automated regression coverage for BUG-003/004 / BUG-051b / BUG-005/006 restored broadcasts still rides on review + soak until the harness lands.
+- **Mock-client test harness:** Stage 4.9 v1 shipped (session 4). `MockClientTest` brings the real Server up in-process on a free UDP port; `MockNetClient` completes the LMP handshake against it. Per-fix regression tests (Stage 4.10) and CI integration (Stage 4.11) are still pending.
 - **Per-agency career:** Stage 5, not started. Lives on `feature/per-agency` branch (also not yet created).
 - **Pre-existing build warnings (30):** noise to be tackled in a dedicated pass, not piecemeal.
 - **`GroupSystem` is scaffolding:** name + member list only, no resource fields. Needed for per-agency.
@@ -366,9 +369,9 @@ Master plan (also tracked in conversation todos for active work):
 - **Stage 3 — Operational tooling (3–4 weeks, parallel)** — IN PROGRESS
   - ✅ 3.7 Admin dashboard v1 — `/fork` + `/log` JSON endpoints via `JsonGetHandler`; ring buffer + `ForkBuildInfo` wired through. v2 (level/subsystem filters, HTML view) deferred.
   - 3.8 Phase-2 + fixes for BUG-008 (PQS-timing) and other top-10 remaining (#013/#018/#023/#025/#033/#045)
-- **Stage 4 — Mock-client test harness (2–4 weeks)** — NEXT or alternate with Stage 3
-  - ⏳ 4.9 Protocol harness — unblocks automated tests for the client-side Stage 2 fixes
-  - 4.10 Regression tests for shipped fixes
+- **Stage 4 — Mock-client test harness (2–4 weeks)** — IN PROGRESS
+  - ✅ 4.9 Protocol harness v1 — `MockClientTest` project with `ServerHarness` (real Server in-process on a free localhost UDP port) + `MockNetClient` (Lidgren peer speaking the LMP wire protocol via the production factories). `HandshakeSmokeTest` proves the wiring end-to-end. Design at `docs/research/04-mock-client-harness-design.md`. Future: per-fix regression tests stack on top.
+  - 4.10 Regression tests for shipped fixes (BUG-051a dedup, BUG-001 solo detection, BUG-005/006 past-subspace rejection — all server-observable via the harness; BUG-003/004 + BUG-051b are client-internal and need a separate `LmpClientTest` net472 project)
   - 4.11 CI integration
 - **Stage 5 — Per-agency career (2–4 months, separate branch)**
   - 5.12 Create `feature/per-agency`
