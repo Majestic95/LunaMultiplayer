@@ -6,8 +6,6 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 
-// ReSharper disable InconsistentlySynchronizedField
-
 namespace Server.System
 {
     /// <summary>
@@ -25,13 +23,19 @@ namespace Server.System
         /// root-level key-value pairs, which is what ProtoScenarioModule expects.
         /// Wrapping in braces would nest everything in an unnamed child node,
         /// causing node.GetValue("name") to return null on the client.
+        ///
+        /// [fix:BUG-033] Serialized under the per-scenario writer lock for the same
+        /// reason BackupScenarios is — without it, the ToString iterator races against
+        /// concurrent AddNode/RemoveNode/ReplaceNode in a ScenarioDataUpdater writer
+        /// and either throws InvalidOperationException or returns a corrupt string.
+        /// Called from ScenarioSystem.SendScenarioModules on every client handshake.
         /// </summary>
         public static string GetScenarioInConfigNodeFormat(string scenarioName)
         {
             if (!CurrentScenarios.TryGetValue(scenarioName, out var scenario))
                 return null;
 
-            return scenario.ToString();
+            return SerializeUnderWriterLock(scenarioName, scenario);
         }
 
         /// <summary>

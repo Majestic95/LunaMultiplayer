@@ -18,9 +18,20 @@ namespace ServerTest
     /// <see cref="ScenarioDataUpdater.GetSemaphore"/> and routes backup-side
     /// serialization through <see cref="ScenarioStoreSystem.SerializeUnderWriterLock"/>.
     ///
-    /// This test exercises the lock contract directly (no disk, no network). If
-    /// someone removes the lock from <c>SerializeUnderWriterLock</c> the test will
-    /// start flaking within milliseconds — which is the warning signal.
+    /// Two tests pin the two halves of the contract:
+    /// <list type="bullet">
+    /// <item><see cref="SerializeUnderWriterLock_DoesNotRaceConcurrentMutation"/> —
+    /// positive test: with the SUT's lock acquisition in place, the reader and a
+    /// writer (modeling production writers) cooperate via mutual exclusion and no
+    /// exception fires.</item>
+    /// <item><see cref="UnprotectedToString_DemonstratesRaceUnderConcurrentMutation"/> —
+    /// negative control: calling <c>scenario.ToString()</c> directly (no lock,
+    /// modeling the pre-fix code path) races the writer and is expected to throw.
+    /// If this test ever stops failing, either LunaConfigNode became thread-safe
+    /// (unlikely) or the test setup no longer produces enough contention — the
+    /// positive test's coverage becomes unreliable in that case and both tests
+    /// should be revisited.</item>
+    /// </list>
     /// </summary>
     [TestClass]
     public class ScenarioStoreBackupRaceTest
@@ -36,6 +47,12 @@ namespace ServerTest
             Exception writerException = null;
             Exception readerException = null;
 
+            // Writer takes the per-scenario lock — this models EVERY production
+            // ScenarioDataUpdater.Write*DataToFile writer. Mutual exclusion requires
+            // both sides to take the same monitor; if the SUT (SerializeUnderWriterLock)
+            // drops its lock, the reader's ToString runs concurrent with the writer's
+            // in-lock mutation and the race fires. See the negative control test below
+            // for the demonstration.
             var writer = new Thread(() =>
             {
                 try
@@ -46,10 +63,6 @@ namespace ServerTest
                     {
                         lock (ScenarioDataUpdater.GetSemaphore(ScenarioName))
                         {
-                            // Cycle: add a new child, and once we've accumulated more
-                            // than 100 also evict the oldest. Keeps tree size bounded
-                            // while continuously perturbing the children list that
-                            // ToString iterates.
                             var child = new ConfigNode("") { Name = $"Child_{counter++}" };
                             scenario.AddNode(child);
                             addedNodes.Enqueue(child);
@@ -74,8 +87,6 @@ namespace ServerTest
                     while (!Volatile.Read(ref stop))
                     {
                         var serialized = ScenarioStoreSystem.SerializeUnderWriterLock(ScenarioName, scenario);
-                        // Force the consumer to actually read the result, so the JIT
-                        // cannot elide the work as dead code.
                         if (serialized == null)
                             throw new InvalidOperationException("SerializeUnderWriterLock returned null");
                     }
@@ -89,8 +100,6 @@ namespace ServerTest
             writer.Start();
             reader.Start();
 
-            // 500ms is long enough that an unprotected ToString would throw thousands
-            // of times. Short enough that the test stays well under MSTest defaults.
             Thread.Sleep(500);
 
             Volatile.Write(ref stop, true);
@@ -99,6 +108,80 @@ namespace ServerTest
 
             Assert.IsNull(writerException, $"Writer thread threw: {writerException}");
             Assert.IsNull(readerException, $"Reader thread threw — BUG-033 regression: {readerException}");
+        }
+
+        [TestMethod]
+        public void UnprotectedToString_DemonstratesRaceUnderConcurrentMutation()
+        {
+            // Negative control. Models the pre-fix code path: reader calls
+            // scenario.ToString() with no lock. Writer takes the per-scenario lock
+            // (same as production writers). Reader's iterator races the writer's
+            // in-lock mutation and is expected to throw InvalidOperationException
+            // (or an internal NRE if LunaConfigNode's children collection re-enters
+            // a transient null state during AddNode). If this assertion ever stops
+            // firing, the bug is no longer reproducible by this harness — see the
+            // class-level summary for the implication.
+            var scenario = BuildPopulatedScenario(initialChildren: 50);
+
+            var stop = false;
+            Exception readerException = null;
+
+            var writer = new Thread(() =>
+            {
+                var addedNodes = new Queue<ConfigNode>();
+                var counter = 0;
+                while (!Volatile.Read(ref stop))
+                {
+                    lock (ScenarioDataUpdater.GetSemaphore(ScenarioName + "_unprotected"))
+                    {
+                        var child = new ConfigNode("") { Name = $"Child_{counter++}" };
+                        scenario.AddNode(child);
+                        addedNodes.Enqueue(child);
+                        if (addedNodes.Count > 100)
+                        {
+                            var oldest = addedNodes.Dequeue();
+                            scenario.RemoveNode(oldest);
+                        }
+                    }
+                }
+            });
+
+            var reader = new Thread(() =>
+            {
+                try
+                {
+                    while (!Volatile.Read(ref stop) && readerException == null)
+                    {
+                        // No lock — this is the buggy serialization path.
+                        var _ = scenario.ToString();
+                    }
+                }
+                catch (Exception e)
+                {
+                    readerException = e;
+                }
+            });
+
+            writer.Start();
+            reader.Start();
+
+            // Give the race up to 2 seconds to fire. In practice it fires within
+            // tens of ms on this workstation; the headroom is for slow CI runners.
+            var deadline = DateTime.UtcNow.AddSeconds(2);
+            while (readerException == null && DateTime.UtcNow < deadline)
+            {
+                Thread.Sleep(20);
+            }
+
+            Volatile.Write(ref stop, true);
+            writer.Join(TimeSpan.FromSeconds(5));
+            reader.Join(TimeSpan.FromSeconds(5));
+
+            Assert.IsNotNull(
+                readerException,
+                "Expected unprotected ToString to race the writer and throw within 2s. " +
+                "If this assertion fails, the BUG-033 race is no longer reproducible by " +
+                "this harness — revisit the positive test's coverage assumptions.");
         }
 
         [TestMethod]
