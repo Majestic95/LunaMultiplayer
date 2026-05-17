@@ -34,53 +34,89 @@ namespace Server.Message
                     HandleVesselRemove(client, messageData);
                     break;
                 case VesselMessageType.Position:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     if (client.Subspace == WarpContext.LatestSubspace.Id)
                         VesselDataUpdater.WritePositionDataToFile(messageData);
                     break;
                 case VesselMessageType.Flightstate:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     VesselDataUpdater.WriteFlightstateDataToFile(messageData);
                     break;
                 case VesselMessageType.Update:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteUpdateDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Resource:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteResourceDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncField:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WritePartSyncFieldDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncUiField:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WritePartSyncUiFieldDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncCall:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.ActionGroup:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteActionGroupDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Fairing:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteFairingDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Decouple:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Couple:
                     HandleVesselCouple(client, messageData);
                     break;
                 case VesselMessageType.Undock:
+                    if (RejectIfPastSubspace(client, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 default:
                     throw new NotImplementedException("Vessel message type not implemented");
             }
+        }
+
+        /// <summary>
+        /// BUG-005/006 widening: returns true (caller must drop the message) when the sending
+        /// client is in a subspace strictly past the message's target vessel's recorded
+        /// AuthoritativeSubspaceId. <see cref="HandleVesselProto"/> already enforces this for
+        /// proto-updates; the per-message-type relay paths above need the same gate because
+        /// the lock-acquire-time check in <see cref="LockSystem.AcquireLock"/> doesn't survive
+        /// a subspace change made after the lock was acquired (a client holding an
+        /// UnloadedUpdate lock that then warps to a past subspace would otherwise broadcast
+        /// stale state into the future-subspace's timeline).
+        ///
+        /// Vessels not yet in the store (first-time-seen ids) fall through to the legitimate
+        /// insert/relay path — the auth check needs an existing record to compare against.
+        /// </summary>
+        private static bool RejectIfPastSubspace(ClientStructure client, VesselBaseMsgData data)
+        {
+            if (!VesselStoreSystem.CurrentVessels.TryGetValue(data.VesselId, out var existing))
+                return false;
+            if (!WarpSystem.IsStrictlyPast(client.Subspace, existing.AuthoritativeSubspaceId))
+                return false;
+
+            LunaLog.Debug($"[fix:BUG-005/006] rejecting {data.VesselMessageType} for {data.VesselId} from {client.PlayerName} " +
+                          $"(client subspace {client.Subspace} is past vessel authority subspace {existing.AuthoritativeSubspaceId})");
+            return true;
         }
 
         private static void HandleVesselRemove(ClientStructure client, VesselBaseMsgData message)

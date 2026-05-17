@@ -87,6 +87,58 @@ namespace MockClientTest
         }
 
         [TestMethod]
+        public void PastSubspacePositionUpdate_IsRejected_AndNotRelayed()
+        {
+            // BUG-005/006 widening (retro-review M5): position / update / flightstate /
+            // resource / partSync* / actionGroup / fairing / decouple / undock relays
+            // now share the same IsStrictlyPast guard that HandleVesselProto already
+            // had. Without this, a client holding an UnloadedUpdate lock that then
+            // warps to a past subspace could corrupt the future-subspace vessel's
+            // pose by broadcasting stale position updates.
+            const string pastPlayer = "h-005-pos-p";
+            const string futurePlayer = "h-005-pos-f";
+
+            SeedSubspace(1, time: 100d);
+            SeedSubspace(2, time: 1000d);
+
+            var vesselId = Guid.NewGuid();
+            var vessel = new Server.System.Vessel.Classes.Vessel(SampleVesselText.Value);
+            vessel.AuthoritativeSubspaceId = 2;
+            Assert.IsTrue(VesselStoreSystem.CurrentVessels.TryAdd(vesselId, vessel));
+
+            using (var pastClient = new MockNetClient())
+            using (var futureClient = new MockNetClient())
+            {
+                Assert.IsTrue(pastClient.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
+                Handshake(pastClient, pastPlayer);
+                ServerContext.Clients.Values.Single(c => c.PlayerName == pastPlayer).Subspace = 1;
+
+                Assert.IsTrue(futureClient.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
+                Handshake(futureClient, futurePlayer);
+                ServerContext.Clients.Values.Single(c => c.PlayerName == futurePlayer).Subspace = 2;
+
+                // VesselPositionMsgData with default body/orbit fields — the reject path
+                // fires before any state interpretation, so the payload only needs to
+                // identify the vessel.
+                var pos = ServerContext.ClientMessageFactory.CreateNewMessageData<VesselPositionMsgData>();
+                pos.VesselId = vesselId;
+                pos.BodyIndex = 1;
+                pos.BodyName = "Kerbin";
+                pos.SubspaceId = 1;
+                pastClient.SendMessage<VesselCliMsg>(pos);
+
+                var leaked = futureClient.WaitForReply<VesselPositionMsgData>(TimeSpan.FromMilliseconds(800));
+                Assert.IsNull(leaked, "Past-subspace position update was relayed to the future-subspace client.");
+
+                // Vessel reference should be unchanged — position relay does not mutate
+                // VesselStoreSystem on its own, but we assert anyway to pin behaviour.
+                Assert.IsTrue(VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var afterReject));
+                Assert.AreSame(vessel, afterReject);
+                Assert.AreEqual(2, afterReject.AuthoritativeSubspaceId);
+            }
+        }
+
+        [TestMethod]
         public void FutureSubspaceProto_IsAccepted_AndRelayed()
         {
             // Positive control: same wiring, opposite direction. A client in subspace 2
