@@ -17,5 +17,6 @@
         Decouple = 12,
         Couple = 13,
         Undock = 14,
+        Pinned = 15,
     }
 }

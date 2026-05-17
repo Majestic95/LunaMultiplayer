@@ -505,6 +505,10 @@
     <Compile Include="Systems\VesselProtoSys\VesselProtoMessageHandler.cs" />
     <Compile Include="Systems\VesselProtoSys\VesselProtoMessageSender.cs" />
     <Compile Include="Systems\VesselProtoSys\VesselProtoSystem.cs" />
+    <Compile Include="Systems\VesselPinnedSys\VesselPinnedEvents.cs" />
+    <Compile Include="Systems\VesselPinnedSys\VesselPinnedMessageHandler.cs" />
+    <Compile Include="Systems\VesselPinnedSys\VesselPinnedMessageSender.cs" />
+    <Compile Include="Systems\VesselPinnedSys\VesselPinnedSystem.cs" />
     <Compile Include="Systems\VesselRemoveSys\VesselRemoveEvents.cs" />
     <Compile Include="Systems\VesselRemoveSys\VesselRemoveMessageHandler.cs" />
     <Compile Include="Systems\VesselRemoveSys\VesselRemoveMessageSender.cs" />

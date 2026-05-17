@@ -35,6 +35,7 @@ using LmpClient.Systems.VesselFlightStateSys;
 using LmpClient.Systems.VesselPartSyncCallSys;
 using LmpClient.Systems.VesselPartSyncFieldSys;
 using LmpClient.Systems.VesselPartSyncUiFieldSys;
+using LmpClient.Systems.VesselPinnedSys;
 using LmpClient.Systems.VesselPositionSys;
 using LmpClient.Systems.VesselProtoSys;
 using LmpClient.Systems.VesselRemoveSys;
@@ -213,6 +214,9 @@ namespace LmpClient.Network
                             break;
                         case VesselMessageType.Undock:
                             VesselUndockSystem.Singleton.EnqueueMessage(msg);
+                            break;
+                        case VesselMessageType.Pinned:
+                            VesselPinnedSystem.Singleton.EnqueueMessage(msg);
                             break;
                     }
                     break;

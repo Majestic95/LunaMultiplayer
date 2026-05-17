@@ -34,6 +34,7 @@ namespace LmpCommon.Message.Client
             [(ushort)VesselMessageType.Decouple] = typeof(VesselDecoupleMsgData),
             [(ushort)VesselMessageType.Couple] = typeof(VesselCoupleMsgData),
             [(ushort)VesselMessageType.Undock] = typeof(VesselUndockMsgData),
+            [(ushort)VesselMessageType.Pinned] = typeof(VesselPinnedMsgData),
         };
 
         public override ClientMessageType MessageType => ClientMessageType.Vessel;

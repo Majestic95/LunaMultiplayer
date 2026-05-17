@@ -33,10 +33,11 @@ namespace LmpCommon.Message.Server
             [(ushort)VesselMessageType.Decouple] = typeof(VesselDecoupleMsgData),
             [(ushort)VesselMessageType.Couple] = typeof(VesselCoupleMsgData),
             [(ushort)VesselMessageType.Undock] = typeof(VesselUndockMsgData),
+            [(ushort)VesselMessageType.Pinned] = typeof(VesselPinnedMsgData),
         };
 
         public override ServerMessageType MessageType => ServerMessageType.Vessel;
-        protected override int DefaultChannel => IsUnreliableMessage() ? 0 : 8;
+        protected override int DefaultChannel => IsUnreliableMessage() ? 0 : IsPinnedMessage() ? 14 : 8;
         public override NetDeliveryMethod NetDeliveryMethod => IsUnreliableMessage() ?
             NetDeliveryMethod.UnreliableSequenced : NetDeliveryMethod.ReliableOrdered;
 
@@ -45,5 +46,12 @@ namespace LmpCommon.Message.Server
             return Data.SubType == (ushort)VesselMessageType.Position || Data.SubType == (ushort)VesselMessageType.Flightstate
                    || Data.SubType == (ushort)VesselMessageType.Update || Data.SubType == (ushort)VesselMessageType.Resource;
         }
+
+        //BUG-010: pin must arrive at the client BEFORE the lock-release storm so the
+        //downstream SetImmortalStateBasedOnLock flip is suppressed in time. Lidgren's
+        //reliable-ordered guarantee is per-channel; LockSrvMsg rides channel 14, so the
+        //Pinned subtype rides the same channel to share its ordering queue. All other
+        //vessel-subsystem messages stay on the default vessel channel 8.
+        private bool IsPinnedMessage() => Data.SubType == (ushort)VesselMessageType.Pinned;
     }
 }

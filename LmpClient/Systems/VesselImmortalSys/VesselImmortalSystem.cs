@@ -3,6 +3,7 @@ using LmpClient.Events;
 using LmpClient.Extensions;
 using LmpClient.Systems.Lock;
 using LmpClient.Systems.SettingsSys;
+using LmpClient.Systems.VesselPinnedSys;
 
 namespace LmpClient.Systems.VesselImmortalSys
 {
@@ -69,11 +70,21 @@ namespace LmpClient.Systems.VesselImmortalSys
         #region public methods
 
         /// <summary>
-        /// Sets the immortal state based on the lock you have on that vessel
+        /// Sets the immortal state based on the lock you have on that vessel.
+        /// BUG-010: if the vessel is currently pinned (its pilot just disconnected and
+        /// nobody has stepped in yet), hold it immortal regardless of lock derivation —
+        /// the lock-release storm that follows a disconnect would otherwise flip a
+        /// floatplane-on-water mortal mid-physics-frame and KSP kraken it.
         /// </summary>
         public void SetImmortalStateBasedOnLock(Vessel vessel)
         {
             if (vessel == null) return;
+
+            if (VesselPinnedSystem.Singleton != null && VesselPinnedSystem.Singleton.IsPinned(vessel.id))
+            {
+                vessel.SetImmortal(true);
+                return;
+            }
 
             var isOurs = LockSystem.LockQuery.ControlLockBelongsToPlayer(vessel.id, SettingsSystem.CurrentSettings.PlayerName) ||
                          LockSystem.LockQuery.UpdateLockBelongsToPlayer(vessel.id, SettingsSystem.CurrentSettings.PlayerName) ||
