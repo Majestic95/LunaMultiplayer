@@ -43,8 +43,18 @@ namespace Server.System.Vessel
         /// <see cref="Classes.Vessel.AuthoritativeSubspaceId"/> (BUG-005/006). The cross-subspace
         /// rejection itself is performed synchronously by <see cref="Server.Message.VesselMsgReader.HandleVesselProto"/>
         /// before this call so that the relay is suppressed on rejection; here we only stamp.
+        ///
+        /// <paramref name="senderOwningAgencyId"/> is the agency the proto sender belongs to under
+        /// per-agency career mode (Stage 5.16b). <see cref="Guid.Empty"/> when the gate is off or
+        /// the sender has no agency — no stamp in that case. When non-empty, the stamp follows
+        /// "first owner wins": if an existing stored vessel already carries a non-empty
+        /// <see cref="Classes.Vessel.OwningAgencyId"/>, the existing value is preserved and the
+        /// sender's id is ignored. This implements the spec §10 Q3 rule that ownership transfer
+        /// is admin-only (Stage 5.18d <c>transferagency</c>) and not implicit on re-proto. The
+        /// incoming proto's own <see cref="Classes.Vessel.OwningAgencyId"/> (if any) is also
+        /// ignored — server-side knowledge of (existing or sender's) agency is authoritative.
         /// </summary>
-        public static void RawConfigNodeInsertOrUpdate(Guid vesselId, string vesselDataInConfigNodeFormat, int clientSubspaceId)
+        public static void RawConfigNodeInsertOrUpdate(Guid vesselId, string vesselDataInConfigNodeFormat, int clientSubspaceId, Guid senderOwningAgencyId)
         {
             _ = Task.Run(() =>
             {
@@ -81,11 +91,36 @@ namespace Server.System.Vessel
                         // semaphore — the previous version read CurrentVessels outside the
                         // lock, so a racing update could change the existing entry's auth
                         // between our TryGetValue and the AddOrUpdate write.
+                        VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var existingStored);
                         if (clientSubspaceId <= 0
-                            && VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var existingForAuth)
-                            && existingForAuth.AuthoritativeSubspaceId > 0)
+                            && existingStored != null
+                            && existingStored.AuthoritativeSubspaceId > 0)
                         {
-                            vessel.AuthoritativeSubspaceId = existingForAuth.AuthoritativeSubspaceId;
+                            vessel.AuthoritativeSubspaceId = existingStored.AuthoritativeSubspaceId;
+                        }
+                        //[Stage 5.16b] OwningAgency: first-owner-wins. Existing value is preserved across
+                        //subsequent protos (transfer is admin-only per spec §10 Q3); otherwise stamp the
+                        //proto sender's agency when the gate is on. Same per-vessel semaphore as the
+                        //AuthSubspace preserve branch — the existing-read must be inside the lock to
+                        //avoid a TOCTOU between TryGetValue and AddOrUpdate.
+                        //
+                        //Fall-through (no existing owner, no sender agency) scrubs the wire-supplied
+                        //OwningAgencyId to Guid.Empty. The server is authoritative here, so a wire
+                        //payload with a spoofed lmpOwningAgency cannot land in the store — important
+                        //because Stage 5.17a's LockSystem cross-agency rejection will gate on this
+                        //field, and there is no inbound equivalent of RejectIfPastSubspace to catch a
+                        //bogus value at the protocol boundary.
+                        if (existingStored != null && existingStored.OwningAgencyId != Guid.Empty)
+                        {
+                            vessel.OwningAgencyId = existingStored.OwningAgencyId;
+                        }
+                        else if (senderOwningAgencyId != Guid.Empty)
+                        {
+                            vessel.OwningAgencyId = senderOwningAgencyId;
+                        }
+                        else
+                        {
+                            vessel.OwningAgencyId = Guid.Empty;
                         }
                         VesselStoreSystem.CurrentVessels.AddOrUpdate(vesselId, vessel, (key, existingVal) => vessel);
                     }

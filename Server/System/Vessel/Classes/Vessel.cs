@@ -16,6 +16,15 @@ namespace Server.System.Vessel.Classes
         /// </summary>
         public const string AuthSubspaceFieldName = "lmpAuthSubspace";
 
+        /// <summary>
+        /// Top-level field name LMP uses on the vessel ConfigNode to record the
+        /// owning AgencyId under per-agency career mode. Same `lmp`-prefix rationale
+        /// as <see cref="AuthSubspaceFieldName"/> — KSP's vessel loader ignores the
+        /// unknown field, so our addition round-trips through any KSP-side
+        /// persistence path. Stage 5.16b (spec §12 step 7).
+        /// </summary>
+        public const string OwningAgencyFieldName = "lmpOwningAgency";
+
         public MixedCollection<string, string> Fields;
         public MixedCollection<uint, Part> Parts;
         public MixedCollection<string, string> Orbit;
@@ -44,6 +53,36 @@ namespace Server.System.Vessel.Classes
                     Fields.Update(AuthSubspaceFieldName, asString);
                 else
                     Fields.Add(new CfgNodeValue<string, string>(AuthSubspaceFieldName, asString));
+            }
+        }
+
+        /// <summary>
+        /// The agency that owns this vessel under per-agency career mode.
+        /// <see cref="Guid.Empty"/> = unassigned (vessel pre-dates per-agency, or the gate
+        /// is off, or admin de-assigned). Stored as the "N" format Guid string on the
+        /// <see cref="OwningAgencyFieldName"/> top-level field so the on-disk form is
+        /// the same 32-char hex used by <c>Universe/Agencies/{guid}.txt</c> filenames.
+        /// See spec §10 Q3 (unassigned-sentinel handling) + §12 step 7 (this field).
+        ///
+        /// **Sentinel convention.** Stage 5.16b treats <see cref="Guid.Empty"/> as the
+        /// "Unassigned" agency directly — no <see cref="Server.System.Agency.AgencyState"/>
+        /// object is created for it. Stage 5.17a's <see cref="Server.System.LockSystem"/>
+        /// cross-agency rejection will special-case <see cref="Guid.Empty"/> as "any agency
+        /// may interact." Future admin de-assignment (Stage 5.18d) writes the all-zero
+        /// 32-char hex string back into this field rather than removing it; the setter
+        /// matches that shape so the on-disk form is symmetric with
+        /// <see cref="AuthoritativeSubspaceId"/>=0.
+        /// </summary>
+        public Guid OwningAgencyId
+        {
+            get => Guid.TryParseExact(Fields.GetSingle(OwningAgencyFieldName)?.Value, "N", out var v) ? v : Guid.Empty;
+            set
+            {
+                var asString = value.ToString("N", CultureInfo.InvariantCulture);
+                if (Fields.Exists(OwningAgencyFieldName))
+                    Fields.Update(OwningAgencyFieldName, asString);
+                else
+                    Fields.Add(new CfgNodeValue<string, string>(OwningAgencyFieldName, asString));
             }
         }
 

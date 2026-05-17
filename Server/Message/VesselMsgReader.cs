@@ -8,7 +8,9 @@ using Server.Context;
 using Server.Log;
 using Server.Message.Base;
 using Server.Server;
+using Server.Settings.Structures;
 using Server.System;
+using Server.System.Agency;
 using Server.System.Vessel;
 using System;
 using System.Linq;
@@ -167,7 +169,21 @@ namespace Server.Message
                 LunaLog.Debug($"Saving vessel {msgData.VesselId} ({ByteSize.FromBytes(msgData.NumBytes).KiloBytes} KB) from {client.PlayerName}.");
             }
 
-            VesselDataUpdater.RawConfigNodeInsertOrUpdate(msgData.VesselId, Encoding.UTF8.GetString(msgData.Data, 0, msgData.NumBytes), client.Subspace);
+            //[Stage 5.16b] Resolve the sender's agency on the receive thread (synchronously),
+            //not inside the fire-and-forget Task.Run body of RawConfigNodeInsertOrUpdate.
+            //AgencyByPlayerName mutates under Stage 5.18d's `transferagency` admin command;
+            //snapshotting here pins the sender's agency at proto-receipt time, which is the
+            //right semantics ("the player owning this proto belongs to agency X at the moment
+            //the wire bytes arrived"). Guid.Empty means "don't stamp" (gate off, or sender
+            //has no agency yet — only possible if RegisterAgency hasn't run for them).
+            var senderAgencyId = Guid.Empty;
+            if (GameplaySettings.SettingsStore.PerAgencyCareer
+                && AgencySystem.AgencyByPlayerName.TryGetValue(client.PlayerName, out var resolved))
+            {
+                senderAgencyId = resolved;
+            }
+
+            VesselDataUpdater.RawConfigNodeInsertOrUpdate(msgData.VesselId, Encoding.UTF8.GetString(msgData.Data, 0, msgData.NumBytes), client.Subspace, senderAgencyId);
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, msgData);
         }
 

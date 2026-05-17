@@ -89,6 +89,14 @@ namespace MockClientTest.Harness
             GeneralSettings.SettingsStore.ServerName = "harness-server";
             // Don't broadcast to or register with the LMP master servers.
             MasterServerSettings.SettingsStore.RegisterWithMasterServer = false;
+            // Disable mod-control allowlist filtering. Production MainServer.Main calls
+            // ModFileSystem.LoadModFile when this setting is on, but the harness skips
+            // Main, so ModFileSystem.ModControl stays null. With the gate on, the proto-
+            // ingest path in VesselDataUpdater dereferences ModControl.AllowedParts and
+            // NREs inside the fire-and-forget Task.Run — silently before Stage 5.16b
+            // started asserting on post-ingest store contents. Disabling here is simpler
+            // than wiring the loader; tests don't need allowlist filtering.
+            GeneralSettings.SettingsStore.ModControl = false;
 
             ServerContext.ServerClock.Restart();
             ServerContext.Day = DateTime.UtcNow.Day;
