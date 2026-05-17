@@ -157,21 +157,28 @@ namespace Lidgren.Network
 
 			var storedMessage = srm.Message;
 
-			// on each destore; reduce recyclingcount so that when all instances are destored, the outgoing message can be recycled
-			Interlocked.Decrement(ref storedMessage.m_recyclingCount);
-#if DEBUG
+			// Fork fix: null-check BEFORE dereference. Original code decremented
+			// storedMessage.m_recyclingCount first and only null-checked after, so a
+			// late ACK arriving for an already-recycled message during peer shutdown
+			// (e.g., a test harness tearing down NetServer + NetClient concurrently)
+			// dropped a NullReferenceException out of NetPeer.NetworkLoop and killed
+			// the host process. Now the empty-slot case clears defensively and returns.
 			if (storedMessage == null)
+			{
+#if DEBUG
 				throw new NetException("m_storedMessages[" + storeIndex + "].Message is null; sent " + m_storedMessages[storeIndex].NumSent + " times, last time " + (NetTime.Now - m_storedMessages[storeIndex].LastSent) + " seconds ago");
 #else
-			if (storedMessage != null)
-			{
+				m_storedMessages[storeIndex] = new NetStoredReliableMessage();
+				return;
 #endif
+			}
+
+			// on each destore; reduce recyclingcount so that when all instances are destored, the outgoing message can be recycled
+			Interlocked.Decrement(ref storedMessage.m_recyclingCount);
+
 			if (storedMessage.m_recyclingCount <= 0)
 				m_connection.m_peer.Recycle(storedMessage);
 
-#if !DEBUG
-			}
-#endif
 			m_storedMessages[storeIndex] = new NetStoredReliableMessage();
 		}
 

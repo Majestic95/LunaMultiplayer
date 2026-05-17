@@ -414,6 +414,14 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 - **Symptoms (historical):** Client drops to `CurrentSubspace = -1` when time warp ends. If the server's subspace-assign broadcast is lost, the `WaitingSubspaceIdFromServer` flag stays true; `CheckWarpStopped` is gated on `!WaitingSubspaceIdFromServer` so it cannot re-fire; the watchdog re-requests after 15s. During the gap the client is in limbo.
 - **Phase-2 doc:** [`02-analysis/bug-051-stuck-warp-limbo.md`](02-analysis/bug-051-stuck-warp-limbo.md)
 
+#### [BUG-052] Lidgren `NetReliableSenderChannel.DestoreMessage` NREs on late ACK during peer shutdown
+- **Severity:** Medium (intermittent host-process crash; only observable during teardown / disconnect, but enough to abort the Stage 4.9 mock-client harness with no useful diagnostic)
+- **Status:** Fixed on fork (session 5). Surgical null-guard at the top of `DestoreMessage` clears the empty slot defensively and returns; preserves the `#if DEBUG` throw for development builds.
+- **Sources:** Discovered while running the Stage 4.10 BUG-051a regression test (intermittent — only fires when an ACK arrives during `NetPeer.ExecutePeerShutdown`).
+- **Symptoms:** Test host process crashes with `Unhandled exception. System.NullReferenceException` originating from `NetReliableSenderChannel.DestoreMessage` → `Interlocked.Decrement(ref storedMessage.m_recyclingCount)`.
+- **Root cause:** The original code decremented `storedMessage.m_recyclingCount` BEFORE the null check (which was on the next line). When an in-flight ACK arrived for a message whose slot had already been cleared (e.g., the test runner shutting down NetServer + NetClient concurrently), `storedMessage` was null and the dereference NRE'd. The `#if DEBUG` arm that was supposed to throw a descriptive NetException sat *after* the dereference — unreachable.
+- **Fix:** Move the null check above the dereference; in `!DEBUG` builds the empty-slot case clears `m_storedMessages[storeIndex]` and returns.
+
 ## Top-10 priority list
 
 These are my picks for the first wave of Phase 2 code analysis, ranked by a combination of severity, frequency, and how much they unlock for other work. **Status as of 2026-05-16 session 5** is annotated inline so the picklist doubles as a quick gap view.

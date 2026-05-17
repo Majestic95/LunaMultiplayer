@@ -138,10 +138,11 @@ namespace MockClientTest.Harness
         public static void ResetPerTestState()
         {
             ServerContext.Clients.Clear();
-            // WarpContext lives in Server.System.WarpContext — reset via reflection to
-            // avoid leaking dependencies. If WarpSystem.Reset doesn't cover the case
-            // a future test needs, add the explicit dictionary clear here.
+            // WarpSystem.Reset clears Subspaces and reloads Subspace.txt (which creates
+            // subspace 0 with NextSubspaceId=1 on first run). Do NOT override NextSubspaceId
+            // here — that races with LoadSavedSubspace and causes silent TryAdd no-ops.
             WarpSystem.Reset();
+            WarpRequestCache.Clear();
         }
 
         private static int FindFreeUdpPort()
