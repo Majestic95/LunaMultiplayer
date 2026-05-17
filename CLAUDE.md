@@ -244,13 +244,14 @@ Vessel-side ingest lives under `Server/Message/` (proto, position, flight state,
 
 uhttpsharp HTTP server on port 8900 (configurable via `WebsiteSettings.Port`). Read-only JSON endpoints — there is no admin write path yet. Disabled by setting `WebsiteSettings.EnableWebsite = false`.
 
-| Route | Payload | Refresh |
-|-------|---------|---------|
-| `GET /` | `ServerInformation` — current players, vessels, subspaces, settings | Polled every `WebsiteSettings.RefreshIntervalMs` (default 5000ms) by `RefreshWebServerInformationAsync` |
-| `GET /fork` | `ForkInformation` — `ForkName` + `ProtocolVersion` + `ActiveFixes[]` (Stage 3.7) | Static — built per request from `ForkBuildInfo` |
-| `GET /log` | `LogSnapshot` — `Capacity` + `Count` + `Entries[]` (oldest-first) from `LogRingBuffer` (Stage 3.7) | Snapshot per request |
+| Route | Content-Type | Payload | Refresh |
+|-------|--------------|---------|---------|
+| `GET /` | `application/json` | `ServerInformation` — current players, vessels, subspaces, settings | Polled every `WebsiteSettings.RefreshIntervalMs` (default 5000ms) by `RefreshWebServerInformationAsync` |
+| `GET /fork` | `application/json` | `ForkInformation` — `ForkName` + `ProtocolVersion` + `ActiveFixes[]` (Stage 3.7) | Static — built per request from `ForkBuildInfo` |
+| `GET /log` | `text/plain` | Human-readable log dump: `# fork / # protocol / # fixes / # ring` header followed by `LogRingBuffer` entries oldest-first. Operator-friendly in a browser tab. Formatter at `Server/Web/Formatting/LogTextFormatter.cs`. | Snapshot per request |
+| `GET /logjson` | `application/json` | `LogSnapshot` — `Capacity` + `Count` + `Entries[]` for tooling that wants the structured fields | Snapshot per request |
 
-Add a new endpoint by registering one more `.With("route", new JsonGetHandler(() => new Payload()))` chain in `WebServer.StartWebServer`. For read-only endpoints prefer `JsonGetHandler` over the `RestHandler<T>` + `IRestController<T>` pair — the latter is REST-shaped and most of its five verbs are MethodNotAllowed boilerplate for us.
+Add a new JSON endpoint by registering one more `.With("route", new JsonGetHandler(() => new Payload()))` chain in `WebServer.StartWebServer`. For plain-text endpoints use `TextGetHandler` with a `Func<string>` factory. Prefer either over the `RestHandler<T>` + `IRestController<T>` pair for read-only routes — the REST pair is five per-endpoint methods, mostly `MethodNotAllowed` boilerplate.
 
 ## Settings (`Server/Settings/Definition/`)
 

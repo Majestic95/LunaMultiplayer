@@ -3,6 +3,7 @@ using Server.Context;
 using Server.Events;
 using Server.Log;
 using Server.Settings.Structures;
+using Server.Web.Formatting;
 using Server.Web.Handlers;
 using Server.Web.Structures;
 using System;
@@ -67,7 +68,8 @@ namespace Server.Web
                         Server.Use(new HttpRouter()
                             .With(string.Empty, new RestHandler<ServerInformation>(new ServerInformationRestController(), JsonResponseProvider.Default))
                             .With("fork", new JsonGetHandler(() => new ForkInformation()))
-                            .With("log", new JsonGetHandler(() => new LogSnapshot())));
+                            .With("log", new TextGetHandler(LogTextFormatter.Format))
+                            .With("logjson", new JsonGetHandler(() => new LogSnapshot())));
                         Server.Start();
                     }
                     else
