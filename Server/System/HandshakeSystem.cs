@@ -7,6 +7,7 @@ using Server.Context;
 using Server.Log;
 using Server.Plugin;
 using Server.Server;
+using Server.System.Agency;
 
 namespace Server.System
 {
@@ -34,6 +35,14 @@ namespace Server.System
                 client.KspVersion = string.IsNullOrWhiteSpace(data.KspVersion) ? "Unknown" : data.KspVersion;
                 client.LmpVersion = $"{data.MajorVersion}.{data.MinorVersion}.{data.BuildVersion}";
                 client.Authenticated = true;
+
+                // [Stage 5.15a] Register-or-load this player's per-agency career BEFORE
+                // the plugin handler fires, so a plugin's OnClientAuthenticated callback
+                // can rely on AgencySystem.AgencyByPlayerName[client.PlayerName] being
+                // populated. No-op when GameplaySettings.PerAgencyCareer is false — the
+                // shared-agency path (Share* systems) remains the authority and AgencySystem
+                // stays invisible to plugins.
+                AgencySystem.OnPlayerAuthenticated(client.PlayerName);
 
                 LmpPluginHandler.FireOnClientAuthenticated(client);
 

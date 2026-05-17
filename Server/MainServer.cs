@@ -11,6 +11,7 @@ using Server.Server;
 using Server.Settings;
 using Server.Settings.Structures;
 using Server.System;
+using Server.System.Agency;
 using Server.Upnp;
 using Server.Utilities;
 using Server.Web;
@@ -94,6 +95,10 @@ namespace Server
                 VesselStoreSystem.LoadExistingVessels();
                 var scenariosCreated = ScenarioSystem.GenerateDefaultScenarios();
                 ScenarioStoreSystem.LoadExistingScenarios(scenariosCreated);
+                // [Stage 5.15a] No-op when PerAgencyCareer is false. Sits after settings
+                // load (so the gate is readable) and after the other "load existing X"
+                // calls so per-agency state can later cross-reference vessel/scenario state.
+                AgencySystem.LoadExistingAgencies();
                 LmpPluginHandler.LoadPlugins();
                 WarpSystem.Reset();
                 TimeSystem.Reset();
