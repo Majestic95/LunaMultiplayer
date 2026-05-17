@@ -16,6 +16,22 @@ namespace LmpCommon.Message.Data.Agency
     /// (public name + owner) flow through <see cref="AgencyHandshakeMsgData"/> /
     /// future <c>AgencyVisibilityMsgData</c>, not through this private-state envelope.
     ///
+    /// **Channel ordering (Stage 5.18a client author note).** Ships on Lidgren channel
+    /// 22 (same as <see cref="AgencyHandshakeMsgData"/>). Lidgren's reliable-ordered
+    /// guarantee applies WITHIN this channel, so when the server sends Handshake then
+    /// State (as <c>HandshakeSystem</c> does on auth), the client MAY assume the
+    /// Handshake has arrived by the time State is being processed and that
+    /// <see cref="AgencyId"/> matches the prior Handshake's <c>AssignedAgencyId</c>.
+    /// Defensive client code may still verify, but the wire contract guarantees order
+    /// on this channel.
+    ///
+    /// **Defensive client filtering (Stage 5.18a hardening).** The Stage 5.18a client
+    /// mirror SHOULD discard any inbound State whose <see cref="AgencyId"/> does not
+    /// match the local player's assigned agency. The server never legitimately ships
+    /// another agency's State to a non-owner (spec §10 Q1); a State arriving for a
+    /// different agency indicates either a server bug or wire corruption — drop, don't
+    /// cache.
+    ///
     /// Field set today mirrors <c>Server/System/Agency/AgencyState.cs</c> scalar
     /// surface from Stage 5.14c. Tech tree / facilities / kerbals / contracts /
     /// strategies / world-firsts join when their underlying data model lands.

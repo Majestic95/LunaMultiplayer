@@ -72,6 +72,28 @@ namespace Server.System.Vessel.Classes
         /// 32-char hex string back into this field rather than removing it; the setter
         /// matches that shape so the on-disk form is symmetric with
         /// <see cref="AuthoritativeSubspaceId"/>=0.
+        ///
+        /// **First-owner-wins on new vessels; preserve-Empty on pre-existing.** The
+        /// server-side stamp logic in
+        /// <see cref="Server.System.Vessel.VesselDataUpdater.RawConfigNodeInsertOrUpdate"/>
+        /// stamps the sender's agency only on a vessel id that does not yet exist in
+        /// <see cref="Server.System.VesselStoreSystem.CurrentVessels"/>. Existing vessels
+        /// (including pre-0.31 vessels loaded with no <c>lmpOwningAgency</c> field, whose
+        /// getter returns <see cref="Guid.Empty"/>) preserve their stored value across
+        /// re-protos. This honours spec §10 Q3's "operator transfers via admin command"
+        /// rule — re-protos from other players never silently re-stamp ownership.
+        ///
+        /// **Stage 5.18a client mirror — relay-vs-store contract.** The relayed proto
+        /// bytes shipped to other clients (see
+        /// <see cref="Server.Message.VesselMsgReader.HandleVesselProto"/>) carry the
+        /// ORIGINAL wire bytes including whatever <c>lmpOwningAgency</c> the sender
+        /// supplied — the server-stored copy is scrubbed but the relay bytes are not.
+        /// Stage 5.18a client mirrors MUST treat the relayed value as advisory and
+        /// re-derive ownership from <c>VesselSync</c> replies (which DO serialise from
+        /// the server's authoritative store via <c>GetVesselInConfigNodeFormat</c>) or
+        /// from Stage 5.18c's <c>AgencyVisibilityMsgData</c>. Server-side LockSystem
+        /// rejection (Stage 5.17a) reads from the authoritative store, so cross-agency
+        /// lock decisions are always safe regardless of the relay payload.
         /// </summary>
         public Guid OwningAgencyId
         {

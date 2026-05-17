@@ -1,9 +1,12 @@
 using LmpCommon.Message.Data.Agency;
 using LmpCommon.Message.Interface;
+using LmpCommon.Message.Server;
 using LmpCommon.Message.Types;
 using Server.Client;
+using Server.Context;
 using Server.Log;
 using Server.Message.Base;
+using Server.Server;
 using Server.Settings.Structures;
 using Server.System.Agency;
 using System;
@@ -36,14 +39,32 @@ namespace Server.Message
 
         public override void HandleMessage(ClientStructure client, IClientMessageBase message)
         {
-            // Dual-mode gate. Even though the wire surface exists, the receive path is
-            // a no-op when per-agency is off — the client should not have sent this in
-            // the first place (it wouldn't have an AgencySystem to populate from), but
-            // we don't crash if it does.
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
-                return;
-
             var data = (AgencyBaseMsgData)message.Data;
+
+            // Dual-mode gate. With PerAgencyCareer=false the agency wire surface is
+            // intentionally silent (spec §11). A well-behaved 0.31.0 client knows the gate
+            // state via SettingsMsgData (Stage 5.18a wire extension, deferred) and would
+            // never send a CreateRequest in this mode. But: a buggy / mid-upgrade client
+            // that ships CreateRequest under gate=off would hang waiting for a reply that
+            // never comes — silent timeout is the worst error UX. So for CreateRequest
+            // specifically, ship a single targeted Success=false reply so the client can
+            // surface the misconfiguration in its UI. This is the one intentional deviation
+            // from dual-mode silence; it is unicast (no broadcast / no other-client leak)
+            // and only triggers when a non-conforming client speaks first. Round-5
+            // consumer-lens review.
+            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            {
+                if (data.AgencyMessageType == AgencyMessageType.CreateRequest)
+                {
+                    var request = (AgencyCreateRequestMsgData)data;
+                    SendGateOffRejection(client, request.DisplayName ?? string.Empty);
+                }
+                // Other subtypes (Handshake / CreateReply / State arriving inbound) are
+                // server-→-client and a buggy client sending them already broke protocol;
+                // we don't owe them a reply.
+                return;
+            }
+
             switch (data.AgencyMessageType)
             {
                 case AgencyMessageType.CreateRequest:
@@ -61,6 +82,25 @@ namespace Server.Message
                     LunaLog.Warning($"[fix:per-agency-career] Unknown AgencyMessageType {data.AgencyMessageType} from {client.PlayerName}; dropping");
                     break;
             }
+        }
+
+        /// <summary>
+        /// Targeted "gate is off" reply for a buggy client that shipped CreateRequest
+        /// despite PerAgencyCareer=false. Built inline rather than going through
+        /// <see cref="AgencySystemSender.SendCreateReplyTo"/> (which is gated and would no-op)
+        /// because this is intentionally the one path that crosses the dual-mode-silence
+        /// boundary — only on a unicast reply to a non-conforming peer, never on broadcast.
+        /// </summary>
+        private static void SendGateOffRejection(ClientStructure client, string attemptedDisplayName)
+        {
+            var reply = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyCreateReplyMsgData>();
+            reply.AgencyId = Guid.Empty;
+            reply.DisplayName = attemptedDisplayName;
+            reply.Success = false;
+            reply.Reason = "Per-agency career disabled on this server (PerAgencyCareer=false)";
+            MessageQueuer.SendToClient<AgencySrvMsg>(client, reply);
+
+            LunaLog.Warning($"[fix:per-agency-career] {client.PlayerName} sent CreateRequest with gate off; replying with Success=false");
         }
 
         private static void HandleCreateRequest(ClientStructure client, AgencyCreateRequestMsgData msg)

@@ -30,6 +30,14 @@ namespace LmpCommon.Message.Client
         public override string ClassName { get; } = nameof(AgencyCliMsg);
 
         /// <inheritdoc />
+        /// <remarks>
+        /// **Wire-protocol invariant — never reorder or renumber existing entries.** The
+        /// ushort keys are the on-wire subtype bytes; a reordering would silently break
+        /// every connected 0.31.0 server. New entries APPEND to the end of
+        /// <see cref="AgencyMessageType"/> + this dictionary. Must stay in lockstep with
+        /// <see cref="LmpCommon.Message.Server.AgencySrvMsg"/> per the BUG-010 wire-
+        /// symmetry rule — missing-on-one-side causes silent receive-drop.
+        /// </remarks>
         protected override Dictionary<ushort, Type> SubTypeDictionary { get; } = new Dictionary<ushort, Type>
         {
             [(ushort)AgencyMessageType.Handshake] = typeof(AgencyHandshakeMsgData),

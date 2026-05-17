@@ -11,6 +11,21 @@ namespace LmpCommon.Message.Data.Agency
     /// <c>AgencySystem.SaveAgency</c>, and broadcast the update; on failure it returns
     /// the rejection reason and the previous DisplayName so the client can resync its
     /// local view.
+    ///
+    /// **Failure semantics.** <see cref="AgencyId"/> is <see cref="System.Guid.Empty"/>
+    /// if and only if <see cref="Success"/> is false. Clients SHOULD check
+    /// <see cref="Success"/> first; checking <c>AgencyId != Guid.Empty</c> is sound
+    /// today (RegisterAgency mints via <c>Guid.NewGuid</c> which is collision-free
+    /// versus Empty) but is an implicit contract. Reasons the server may reject:
+    /// validation failure (empty / too long / illegal characters) or the gate-off
+    /// case <c>"Per-agency career disabled on this server (PerAgencyCareer=false)"</c>
+    /// (added round-5 to close the silent-no-reply UX gap for buggy clients shipping
+    /// CreateRequest under gate=off).
+    ///
+    /// **Same-agency-id invariant.** On success, <see cref="AgencyId"/> equals the
+    /// <see cref="AgencyHandshakeMsgData.AssignedAgencyId"/> previously sent to this
+    /// client. CreateRequest is a rename-on-connect, not a mint — see the
+    /// <see cref="AgencyCreateRequestMsgData"/> XML for the full contract.
     /// </summary>
     public class AgencyCreateReplyMsgData : AgencyBaseMsgData
     {

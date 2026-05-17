@@ -61,6 +61,58 @@ namespace MockClientTest
         }
 
         [TestMethod]
+        public void PreExistingUnassignedVessel_KeepsEmpty_OnProtoFromAgencyMember()
+        {
+            // Round-5 upgrade-lens regression: an operator upgrading a pre-0.31 universe
+            // in-place (despite the spec's "fresh-start" recommendation) ends up with
+            // existing vessels that have NO lmpOwningAgency on disk. Vessel constructor
+            // reads them with OwningAgencyId == Guid.Empty (the spec §10 Q3 "Unassigned
+            // sentinel"). When an authenticated player sends the first proto for one of
+            // those vessels under gate=on, the server MUST preserve the Empty sentinel
+            // rather than first-proto-wins-stamping the sender's agency. Q3 says transfer
+            // is admin-only via Stage 5.18d transferagency.
+            //
+            // Pre-fix this test would fail: stored.OwningAgencyId would be the player's
+            // agency rather than Guid.Empty.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+
+            const string playerName = "h-016b-pre";
+            SeedSubspace(1, time: 100d);
+
+            var vesselId = Guid.NewGuid();
+
+            // Plant a pre-0.31 vessel: load the sample text directly into CurrentVessels.
+            // The sample fixture has no lmpOwningAgency field, so OwningAgencyId is Empty.
+            var preExisting = new Server.System.Vessel.Classes.Vessel(SampleVesselText.Value);
+            Assert.AreEqual(Guid.Empty, preExisting.OwningAgencyId,
+                "Test setup: fixture must lack the lmpOwningAgency field — pre-0.31 vessel.");
+            Assert.IsTrue(VesselStoreSystem.CurrentVessels.TryAdd(vesselId, preExisting),
+                "Test setup: vessel must not already be in the store.");
+
+            using (var client = new MockNetClient())
+            {
+                Assert.IsTrue(client.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
+                var assignedAgencyId = HandshakeAndGetAgencyId(client, playerName);
+                SetClientSubspace(playerName, 1);
+
+                // Send a proto for the SAME pre-existing vesselId. Under the new rule,
+                // the existing-vessel-preserve branch fires regardless of whether the
+                // existing OwningAgencyId is Empty or non-Empty — Empty IS the Q3 sentinel.
+                SendProto(client, vesselId, SampleVesselText.Value);
+
+                var stored = WaitForVesselAuthStamp(vesselId, expectedAuthSubspace: 1,
+                    TimeSpan.FromSeconds(3));
+                Assert.IsNotNull(stored, "Proto was never processed (AuthSubspace did not flip to 1).");
+                Assert.AreEqual(Guid.Empty, stored.OwningAgencyId,
+                    $"Pre-existing vessel with Empty OwningAgencyId (Unassigned sentinel per spec §10 Q3) " +
+                    $"must NOT be stamped with the proto sender's agency. Got {stored.OwningAgencyId:N} " +
+                    $"instead — first-proto-wins regression contradicts the admin-only-transfer rule.");
+                Assert.AreNotEqual(assignedAgencyId, stored.OwningAgencyId,
+                    "Sender's agency leaked onto a pre-existing Unassigned vessel.");
+            }
+        }
+
+        [TestMethod]
         public void ExistingOwner_NotOverwritten_OnProtoFromDifferentAgency()
         {
             // First-owner-wins: once a vessel has an lmpOwningAgency, a re-proto from a player

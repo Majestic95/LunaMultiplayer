@@ -98,33 +98,36 @@ namespace Server.System.Vessel
                         {
                             vessel.AuthoritativeSubspaceId = existingStored.AuthoritativeSubspaceId;
                         }
-                        //[Stage 5.16b] OwningAgency: first-owner-wins. Existing value is preserved across
-                        //subsequent protos (transfer is admin-only per spec §10 Q3); otherwise stamp the
-                        //proto sender's agency when the gate is on. Same per-vessel semaphore as the
-                        //AuthSubspace preserve branch — the existing-read must be inside the lock to
-                        //avoid a TOCTOU between TryGetValue and AddOrUpdate.
+                        //[Stage 5.16b] OwningAgency stamp under per-agency career mode.
                         //
-                        //Dual-mode silence (spec §11): the entire stamp block is gated on PerAgencyCareer.
-                        //With the gate off, the field is left untouched — i.e. NOT written, NOT scrubbed.
-                        //Pre-0.31 vessels stay clean; new vessels get no lmpOwningAgency field on disk.
-                        //Round-2 review caught the prior version's terminal scrub-to-Empty branch as a
-                        //dual-mode-silence violation: it wrote the all-zero 32-char hex to every freshly
-                        //ingested vessel under PerAgencyCareer=false, leaking the field onto the wire (via
-                        //GetVesselInConfigNodeFormat sync replies) and onto disk (via BackupVessels).
+                        //Existing vessels: ownership is sticky. Whatever OwningAgencyId is stored
+                        //wins, INCLUDING Guid.Empty (which is the spec §10 Q3 "Unassigned sentinel"
+                        //for pre-0.31 vessels imported into a per-agency universe). The previous
+                        //version of this branch only preserved NON-Empty existing values and fell
+                        //through to "stamp the sender" when existing==Empty — which silently mass-
+                        //assigned every pre-existing vessel to whoever happened to send the first
+                        //proto, contradicting Q3's "operator transfers via admin command" rule.
+                        //Round-5 upgrade-lens review caught the bug; see the Vessel.cs OwningAgencyId
+                        //XML for the matching doc-side commitment.
                         //
-                        //Wire-payload scrub (server-authoritative on incoming protos): when the gate IS
-                        //on, the wire-supplied OwningAgencyId is replaced with the server's authoritative
-                        //value (existing owner if any, else sender's agency, else Guid.Empty). A
-                        //misbehaving client cannot spoof ownership — important because Stage 5.17a's
-                        //LockSystem cross-agency rejection will gate on this field with real consequences,
-                        //and there is no inbound equivalent of RejectIfPastSubspace to catch a bogus value
-                        //at the protocol boundary. The gate-on scrub fall-through to Empty is for the
-                        //case where the server cannot attribute the proto to any agency (sender just
-                        //connected mid-flight and hasn't registered yet — should be impossible given the
-                        //auth-then-OnPlayerAuthenticated ordering, but defensive).
+                        //New vessels: first proto under gate-on stamps the sender's agency. New
+                        //vessels with a sender that has no agency (theoretical — auth path always
+                        //registers) fall through to Empty.
+                        //
+                        //Dual-mode silence (spec §11): the entire stamp block is gated on
+                        //PerAgencyCareer. With the gate off, the field is left untouched — not
+                        //written, not scrubbed. Pre-0.31 vessels stay clean; new vessels get no
+                        //lmpOwningAgency field on disk.
+                        //
+                        //Wire-payload authority: under gate=on the wire-supplied OwningAgencyId is
+                        //fully replaced with the server's authoritative computation — a client
+                        //cannot spoof ownership at ingest time. The relayed bytes shipped to other
+                        //clients (one statement below in VesselMsgReader) still carry the wire-
+                        //supplied value; see the relay-bytes contract note there for the Stage
+                        //5.18a client-mirror obligations.
                         if (GameplaySettings.SettingsStore.PerAgencyCareer)
                         {
-                            if (existingStored != null && existingStored.OwningAgencyId != Guid.Empty)
+                            if (existingStored != null)
                             {
                                 vessel.OwningAgencyId = existingStored.OwningAgencyId;
                             }

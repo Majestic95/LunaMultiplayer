@@ -66,6 +66,21 @@ namespace Server.System
                     }
                 }
             }
+
+            // [Stage 5.16b — round-5 upgrade-lens review] When per-agency career is on,
+            // report how many freshly-loaded vessels carry no lmpOwningAgency (spec §10 Q3
+            // "Unassigned sentinel"). Operators upgrading a pre-0.31 universe in place
+            // (despite the spec's "fresh-start" recommendation) need to know how many
+            // vessels require admin transferagency (Stage 5.18d). Quiet when zero so the
+            // common gate-off and fresh-universe boots emit nothing.
+            if (Settings.Structures.GameplaySettings.SettingsStore.PerAgencyCareer)
+            {
+                var unassigned = CurrentVessels.Values.Count(v => v.OwningAgencyId == Guid.Empty);
+                if (unassigned > 0)
+                {
+                    Log.LunaLog.Normal($"[fix:per-agency-career] {unassigned} pre-existing vessel(s) loaded with no agency assignment (Unassigned sentinel per spec §10 Q3). Use transferagency (Stage 5.18d) to assign owners.");
+                }
+            }
         }
 
         /// <summary>

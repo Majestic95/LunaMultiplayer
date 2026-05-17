@@ -14,6 +14,22 @@ namespace LmpCommon.Message.Data.Agency
     ///
     /// Only public fields leak across agencies — no funds / science / reputation in the
     /// summary entries, per spec §10 Q1 (<c>PrivateAgencyResources = true</c>).
+    ///
+    /// **Cross-channel ordering (Stage 5.18a client author note).** This message ships on
+    /// Lidgren channel 22 alongside <see cref="AgencyStateMsgData"/>; the LMP handshake
+    /// reply ships on channel 1, <see cref="LmpCommon.Message.Data.PlayerConnection.PlayerConnectionJoinMsgData"/>
+    /// ships on channel 17. Lidgren's reliable-ordered guarantee is PER-CHANNEL only —
+    /// cross-channel arrival order is undefined. A client handler for this message MUST
+    /// NOT depend on state populated by handlers on channels 1 or 17 (no peer list, no
+    /// post-LMP-handshake transition state). The local player's identity is the value the
+    /// client itself sent in its own <c>HandshakeRequest</c>, available locally — not the
+    /// inbound <c>PlayerConnectionJoin</c>.
+    ///
+    /// **OtherAgencies is a one-shot snapshot** at this player's connect time. Agencies
+    /// that come online AFTER will NOT be delivered via this message; Stage 5.18c's
+    /// <c>AgencyVisibilityMsgData</c> will fill that gap. Until then, vessels owned by
+    /// late-joining agencies render with an unknown-agency label on already-connected
+    /// clients — expected behaviour.
     /// </summary>
     public class AgencyHandshakeMsgData : AgencyBaseMsgData
     {
