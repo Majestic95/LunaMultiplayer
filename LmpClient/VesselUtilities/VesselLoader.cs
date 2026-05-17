@@ -6,20 +6,122 @@ using Object = UnityEngine.Object;
 
 namespace LmpClient.VesselUtilities
 {
+    /// <summary>
+    /// What <see cref="VesselLoader.LoadVessel"/> actually did. Returned in place of a
+    /// plain bool so callers (notably <c>VesselProtoSystem.CheckVesselsToLoad</c>) can
+    /// distinguish "we destructively reloaded the live Vessel and any reload-event
+    /// listeners should fire" from "the incoming proto matched the existing structure
+    /// so we early-returned and nothing actually changed". The previous collapse to a
+    /// single bool caused <c>[LMP]: Vessel ... reloaded</c> + the
+    /// <c>VesselReloadEvent.onLmpVesselReloaded</c> fire to happen on every wire-side
+    /// drift broadcast even when no destruction occurred, which (a) was misleading in
+    /// KSP.log and (b) ran any future subscriber's reload work on a no-op.
+    /// </summary>
+    public enum VesselLoadOutcome
+    {
+        /// <summary>Validate() failed, Load() threw, or the proto produced a malformed orbit.</summary>
+        Failed,
+        /// <summary>No prior <see cref="Vessel"/> for this id; a brand-new one was created.</summary>
+        FreshlyLoaded,
+        /// <summary>An existing <see cref="Vessel"/> was destroyed and a replacement was created.</summary>
+        Reloaded,
+        /// <summary>An existing <see cref="Vessel"/> already matched the incoming structure — nothing was done.</summary>
+        UnchangedEarlyOut,
+    }
+
     public class VesselLoader
     {
         /// <summary>
-        /// Loads/Reloads a vessel into game
+        /// Loads/Reloads a vessel into game. See <see cref="VesselLoadOutcome"/> for the
+        /// four possible outcomes; callers should only fire reload/load events on
+        /// <see cref="VesselLoadOutcome.FreshlyLoaded"/> / <see cref="VesselLoadOutcome.Reloaded"/>.
         /// </summary>
-        public static bool LoadVessel(ProtoVessel vesselProto, bool forceReload)
+        public static VesselLoadOutcome LoadVessel(ProtoVessel vesselProto, bool forceReload)
         {
             try
             {
-                return vesselProto.Validate(true) && LoadVesselIntoGame(vesselProto, forceReload);
+                if (!vesselProto.Validate(true)) return VesselLoadOutcome.Failed;
+                return LoadVesselIntoGame(vesselProto, forceReload);
             }
             catch (Exception e)
             {
                 LunaLog.LogError($"[LMP]: Error loading vessel: {e}");
+                return VesselLoadOutcome.Failed;
+            }
+        }
+
+        /// <summary>
+        /// Cheap in-place proto swap for scenes where peer vessels are not physically
+        /// visible (currently SPACECENTER and EDITOR). Updates the existing
+        /// <see cref="Vessel"/>'s <c>protoVessel</c> backreference, replaces the entry
+        /// in <c>flightState.protoVessels</c>, and points the new proto's
+        /// <c>vesselRef</c> at the surviving <see cref="Vessel"/>. Does NOT destroy or
+        /// re-instantiate any <see cref="UnityEngine.GameObject"/>, does NOT call
+        /// <c>vesselProto.Load</c>, and does NOT trigger stock KSP's persistentId
+        /// collision rewrite — which is what makes this a multi-frame-saving shortcut
+        /// versus the full <see cref="LoadVessel"/> path. Safe only for unloaded /
+        /// packed vessels, which is the steady state of every <see cref="Vessel"/> in
+        /// FlightGlobals while the player is in SPACECENTER or EDITOR; in FLIGHT or
+        /// TRACKSTATION the in-world vessel may be loaded and rendered, so callers
+        /// MUST keep using the destructive <see cref="LoadVessel"/> there.
+        /// Ported from upstream Release/0_29_2 commit 346ef48a (Drew Banyai).
+        /// </summary>
+        /// <returns>True when the swap was performed; false when the inputs were unusable.</returns>
+        public static bool UpdateProtoInPlace(Vessel existingVessel, ProtoVessel newProto)
+        {
+            if (existingVessel == null || newProto == null) return false;
+            if (HighLogic.CurrentGame?.flightState == null) return false;
+
+            try
+            {
+                // Safety-net: verify newProto can serialise before we commit it to
+                // flightState.protoVessels. Without this, a malformed wire-side proto
+                // (e.g. a null resource definition left by a server mod, or a broken
+                // DiscoveryInfo) would silently sit in flightState and then crash
+                // GamePersistence.SaveGame() on the next autosave / scene transition
+                // — freezing the UI on menu close. The destructive LoadVessel path
+                // already runs this check; UpdateProtoInPlace must match that
+                // discipline since it ALSO writes into flightState.protoVessels.
+                try
+                {
+                    newProto.Save(new ConfigNode());
+                }
+                catch (Exception saveEx)
+                {
+                    LunaLog.LogWarning($"[LMP]: UpdateProtoInPlace refusing to swap unsaveable proto for " +
+                                       $"{existingVessel.id}; falling back to destructive load. Error: {saveEx.Message}");
+                    return false;
+                }
+
+                var protoVessels = HighLogic.CurrentGame.flightState.protoVessels;
+                var vesselId = existingVessel.id;
+
+                // Replace the old entry in flightState.protoVessels with newProto so any
+                // subsequent save / scene-transition rebuild uses current wire data
+                // instead of the now-stale proto we are about to detach.
+                var replaced = false;
+                if (protoVessels != null)
+                {
+                    for (var i = 0; i < protoVessels.Count; i++)
+                    {
+                        if (protoVessels[i] != null && protoVessels[i].vesselID == vesselId)
+                        {
+                            protoVessels[i] = newProto;
+                            replaced = true;
+                            break;
+                        }
+                    }
+                    if (!replaced) protoVessels.Add(newProto);
+                }
+
+                existingVessel.protoVessel = newProto;
+                newProto.vesselRef = existingVessel;
+                return true;
+            }
+            catch (Exception e)
+            {
+                // Falls back to the caller's normal destructive path on next wire update.
+                LunaLog.LogWarning($"[LMP]: UpdateProtoInPlace failed for {existingVessel.id}: {e.Message}");
                 return false;
             }
         }
@@ -27,19 +129,23 @@ namespace LmpClient.VesselUtilities
         #region Private methods
 
         /// <summary>
-        /// Loads the vessel proto into the current game
+        /// Loads the vessel proto into the current game. Returns the outcome so the
+        /// caller can distinguish a real destructive reload from an unchanged early-out
+        /// (the latter previously masqueraded as a successful reload in logs / events).
         /// </summary>
-        private static bool LoadVesselIntoGame(ProtoVessel vesselProto, bool forceReload)
+        private static VesselLoadOutcome LoadVesselIntoGame(ProtoVessel vesselProto, bool forceReload)
         {
             if (HighLogic.CurrentGame?.flightState == null)
-                return false;
+                return VesselLoadOutcome.Failed;
 
             var reloadingOwnVessel = FlightGlobals.ActiveVessel && vesselProto.vesselID == FlightGlobals.ActiveVessel.id;
+            var hadExistingVessel = false;
 
             //In case the vessel exists, silently remove them from unity and recreate it again
             var existingVessel = FlightGlobals.FindVessel(vesselProto.vesselID);
             if (existingVessel != null)
             {
+                hadExistingVessel = true;
                 if (!forceReload && existingVessel.Parts.Count == vesselProto.protoPartSnapshots.Count &&
                     existingVessel.GetCrewCount() == vesselProto.GetVesselCrew().Count)
                 {
@@ -47,7 +153,7 @@ namespace LmpClient.VesselUtilities
                     // Without this, maneuver node changes are discarded and the vessel's
                     // PatchedConicSolver loads stale (empty) data on the next GoOffRails.
                     existingVessel.protoVessel.flightPlan = vesselProto.flightPlan;
-                    return true;
+                    return VesselLoadOutcome.UnchangedEarlyOut;
                 }
 
                 LunaLog.Log($"[LMP]: Reloading vessel {vesselProto.vesselID}");
@@ -92,13 +198,13 @@ namespace LmpClient.VesselUtilities
                     Object.Destroy(vesselProto.vesselRef.gameObject);
                 }
                 HighLogic.CurrentGame.flightState.protoVessels.Remove(vesselProto);
-                return false;
+                return VesselLoadOutcome.Failed;
             }
 
             if (vesselProto.vesselRef == null)
             {
                 LunaLog.Log($"[LMP]: Protovessel {vesselProto.vesselID} failed to create a vessel!");
-                return false;
+                return VesselLoadOutcome.Failed;
             }
 
             // Verify that every part module loaded successfully.  When the server has a mod that the
@@ -131,7 +237,7 @@ namespace LmpClient.VesselUtilities
                         if (p?.gameObject != null) Object.Destroy(p.gameObject);
                     Object.Destroy(vesselProto.vesselRef.gameObject);
                     HighLogic.CurrentGame.flightState.protoVessels.Remove(vesselProto);
-                    return false;
+                    return VesselLoadOutcome.Failed;
                 }
             }
 
@@ -150,7 +256,7 @@ namespace LmpClient.VesselUtilities
                     Object.Destroy(part.gameObject);
                 Object.Destroy(vesselProto.vesselRef.gameObject);
                 HighLogic.CurrentGame.flightState.protoVessels.Remove(vesselProto);
-                return false;
+                return VesselLoadOutcome.Failed;
             }
 
             VesselPositionSystem.Singleton.ForceUpdateVesselPosition(vesselProto.vesselRef.id);
@@ -174,7 +280,7 @@ namespace LmpClient.VesselUtilities
             if (double.IsNaN(vesselProto.vesselRef.orbitDriver.pos.x))
             {
                 LunaLog.Log($"[LMP]: Protovessel {vesselProto.vesselID} has an invalid orbit");
-                return false;
+                return VesselLoadOutcome.Failed;
             }
 
             if (reloadingOwnVessel)
@@ -199,7 +305,9 @@ namespace LmpClient.VesselUtilities
                 }
             }
 
-            return true;
+            // Only the destructive-reload branch and the brand-new-vessel branch reach
+            // here; the structure-matches early-out returned UnchangedEarlyOut above.
+            return hadExistingVessel ? VesselLoadOutcome.Reloaded : VesselLoadOutcome.FreshlyLoaded;
         }
 
         #endregion

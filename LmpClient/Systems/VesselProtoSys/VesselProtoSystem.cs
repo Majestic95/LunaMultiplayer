@@ -28,6 +28,24 @@ namespace LmpClient.Systems.VesselProtoSys
         /// </summary>
         private static readonly Dictionary<Guid, string> ManeuverSignatures = new Dictionary<Guid, string>();
 
+        /// <summary>
+        /// Maximum number of expensive ProtoVessel.Load calls (fresh load or destructive
+        /// reload) executed in a single CheckVesselsToLoad tick. The drain loop previously
+        /// processed every queue whose head was ready in the same frame, so a burst of N
+        /// peer-side broadcasts produced an N x ProtoVessel.Load spike — visible as
+        /// 200-1000 ms of unaccounted single-frame work when three or more vessels needed
+        /// reloading simultaneously. Capping the per-frame budget spreads the same total
+        /// work across multiple frames; queues whose heads we skip stay peeked (not
+        /// dequeued) so they are retried next tick in FIFO order with no starvation.
+        /// Cheap proto-swap operations in SPACECENTER / EDITOR do NOT count against this
+        /// budget — only stock-KSP ProtoVessel.Load calls do, because they are the actual
+        /// cost driver. 2 is conservative: enough headroom to catch up after a brief
+        /// network burst without letting any single frame eat two full destructive
+        /// reloads back-to-back from a dead start.
+        /// Ported from upstream Release/0_29_2 commit 346ef48a (Drew Banyai).
+        /// </summary>
+        private const int MaxExpensiveReloadsPerTick = 2;
+
         public readonly HashSet<Guid> VesselsUnableToLoad = new HashSet<Guid>();
 
         public ConcurrentDictionary<Guid, VesselProtoQueue> VesselProtos { get; } = new ConcurrentDictionary<Guid, VesselProtoQueue>();
@@ -178,6 +196,24 @@ namespace LmpClient.Systems.VesselProtoSys
         }
 
         /// <summary>
+        /// Returns true for scenes where peer vessels exist in FlightGlobals strictly as
+        /// data carriers (unloaded / packed) and the player cannot see or interact with
+        /// them in-world. In those scenes a wire-side structural update can be applied
+        /// with a cheap proto-swap (<see cref="VesselLoader.UpdateProtoInPlace"/>) instead
+        /// of the full destructive <see cref="VesselLoader.LoadVessel"/> path; the latter
+        /// would still create a brand-new <see cref="Vessel"/> <see cref="UnityEngine.GameObject"/>,
+        /// run every <c>VesselModule.Awake</c>, and pay stock KSP's per-part persistentId
+        /// collision walk for no visible benefit while the player is in the VAB / SPH or
+        /// the Space Center scene. In FLIGHT (the in-world vessel may be loaded and
+        /// rendered) and TRACKSTATION (the UI binds against the live <see cref="Vessel"/>'s
+        /// vesselModules / crew portraits) we keep the destructive path so the
+        /// player-visible state stays in lockstep with the wire.
+        /// Ported from upstream Release/0_29_2 commit 346ef48a (Drew Banyai).
+        /// </summary>
+        private static bool IsProtoSwapEligibleScene(GameScenes scene)
+            => scene == GameScenes.SPACECENTER || scene == GameScenes.EDITOR;
+
+        /// <summary>
         /// Check vessels that must be loaded
         /// </summary>
         public void CheckVesselsToLoad()
@@ -186,51 +222,107 @@ namespace LmpClient.Systems.VesselProtoSys
 
             try
             {
+                var protoSwapEligible = IsProtoSwapEligibleScene(HighLogic.LoadedScene);
+                var expensiveReloadsRemaining = MaxExpensiveReloadsPerTick;
+
                 foreach (var keyVal in VesselProtos)
                 {
-                    if (keyVal.Value.TryPeek(out var vesselProto) && vesselProto.GameTime <= TimeSyncSystem.UniversalTime)
+                    if (!keyVal.Value.TryPeek(out var vesselProto)) continue;
+                    if (vesselProto.GameTime > TimeSyncSystem.UniversalTime) continue;
+
+                    // Probe FlightGlobals BEFORE dequeuing so we can decide whether this
+                    // tick will be cheap (proto-swap) or expensive (ProtoVessel.Load) and
+                    // rate-limit only the latter. When we're over budget on the expensive
+                    // path we leave the head peeked-but-not-dequeued so the very next
+                    // CheckVesselsToLoad tick retries it in FIFO order — there is no risk
+                    // of starvation because TryPeek is non-mutating.
+                    var existingVessel = FlightGlobals.FindVessel(vesselProto.VesselId);
+                    var willUseProtoSwap = protoSwapEligible && existingVessel != null && !vesselProto.ForceReload;
+
+                    if (!willUseProtoSwap && expensiveReloadsRemaining <= 0)
+                        continue;
+
+                    keyVal.Value.TryDequeue(out _);
+
+                    if (VesselRemoveSystem.VesselWillBeKilled(vesselProto.VesselId))
                     {
-                        keyVal.Value.TryDequeue(out _);
-
-                        if (VesselRemoveSystem.VesselWillBeKilled(vesselProto.VesselId))
-                            continue;
-
-                        var forceReload = vesselProto.ForceReload;
-                        var protoVessel = vesselProto.CreateProtoVessel();
+                        // Recycle on the kill-list path too, otherwise the proto buffer
+                        // leaks back to the pool only on the success branches below.
                         keyVal.Value.Recycle(vesselProto);
+                        continue;
+                    }
 
-                        var verboseErrors = !VesselsUnableToLoad.Contains(vesselProto.VesselId);
-                        if (protoVessel == null || !protoVessel.Validate(verboseErrors) || protoVessel.HasInvalidParts(verboseErrors))
-                        {
-                            VesselsUnableToLoad.Add(vesselProto.VesselId);
+                    var forceReload = vesselProto.ForceReload;
+                    var protoVessel = vesselProto.CreateProtoVessel();
+                    var vesselId = vesselProto.VesselId;
+                    keyVal.Value.Recycle(vesselProto);
+
+                    var verboseErrors = !VesselsUnableToLoad.Contains(vesselId);
+                    if (protoVessel == null || !protoVessel.Validate(verboseErrors) || protoVessel.HasInvalidParts(verboseErrors))
+                    {
+                        VesselsUnableToLoad.Add(vesselId);
+                        continue;
+                    }
+
+                    VesselsUnableToLoad.Remove(vesselId);
+
+                    if (willUseProtoSwap)
+                    {
+                        // SPACECENTER / EDITOR fast path: pointer-swap protoVessel without
+                        // destroying the live Vessel. No reload event fires here — the live
+                        // Vessel was never touched, so any listener that did real work on
+                        // reload would be running on a no-op. The flightState ProtoVessel
+                        // list (source-of-truth for save / scene transition) is updated to
+                        // the fresh proto. Fall through to the destructive path on failure
+                        // so we don't silently drop a wire update.
+                        if (VesselLoader.UpdateProtoInPlace(existingVessel, protoVessel))
                             continue;
-                        }
+                    }
 
-                        VesselsUnableToLoad.Remove(vesselProto.VesselId);
+                    // Expensive path — count against the per-tick budget pre-emptively.
+                    // We refund the slot below if LoadVesselIntoGame's UnchangedEarlyOut
+                    // fired, because that branch returns before ProtoVessel.Load is
+                    // called and the cost was just a counts comparison + flightPlan
+                    // copy. Failed and Reloaded both run the destructive Load and pay
+                    // the full cost; FreshlyLoaded also pays full Load + part
+                    // instantiation. Refunding the cheap early-out matters because the
+                    // steady-state hot path is exactly drift-broadcast → already-matched
+                    // → early-out; without the refund, two such broadcasts per tick
+                    // would starve a third genuinely-expensive reload to the next tick.
+                    expensiveReloadsRemaining--;
 
-                        var existingVessel = FlightGlobals.FindVessel(vesselProto.VesselId);
-                        if (existingVessel == null)
-                        {
-                            if (VesselLoader.LoadVessel(protoVessel, forceReload))
+                    var outcome = VesselLoader.LoadVessel(protoVessel, forceReload);
+                    switch (outcome)
+                    {
+                        case VesselLoadOutcome.FreshlyLoaded:
+                            LunaLog.Log($"[LMP]: Vessel {protoVessel.vesselID} loaded");
+                            //BUG-008 Phase A: defer the load event until PQS terrain has stabilised
+                            //and the vessel has been snapped onto the high-LOD surface. AlignAndThen
+                            //fires the callback synchronously when no realignment is required (most
+                            //loads) — only the cold-PQS case takes the coroutine path. See
+                            //docs/research/02-analysis/bug-008-pqs-spawn-altitude.md.
                             {
-                                LunaLog.Log($"[LMP]: Vessel {protoVessel.vesselID} loaded");
-                                //BUG-008 Phase A: defer the load event until PQS terrain has stabilised
-                                //and the vessel has been snapped onto the high-LOD surface. AlignAndThen
-                                //fires the callback synchronously when no realignment is required (most
-                                //loads) — only the cold-PQS case takes the coroutine path. See
-                                //docs/research/02-analysis/bug-008-pqs-spawn-altitude.md.
                                 var loadedVessel = protoVessel.vesselRef;
                                 PqsAlignmentRoutine.AlignAndThen(loadedVessel, () => VesselLoadEvent.onLmpVesselLoaded.Fire(loadedVessel));
                             }
-                        }
-                        else
-                        {
-                            if (VesselLoader.LoadVessel(protoVessel, forceReload))
-                            {
-                                LunaLog.Log($"[LMP]: Vessel {protoVessel.vesselID} reloaded");
-                                VesselReloadEvent.onLmpVesselReloaded.Fire(protoVessel.vesselRef);
-                            }
-                        }
+                            break;
+                        case VesselLoadOutcome.Reloaded:
+                            LunaLog.Log($"[LMP]: Vessel {protoVessel.vesselID} reloaded");
+                            VesselReloadEvent.onLmpVesselReloaded.Fire(protoVessel.vesselRef);
+                            break;
+                        case VesselLoadOutcome.UnchangedEarlyOut:
+                            // Stock-matched early-out from LoadVesselIntoGame. Deliberately
+                            // silent in KSP.log: no "reloaded" line and no VesselReloadEvent
+                            // fire because nothing actually changed. Previously the bool
+                            // collapse caused us to log + fire on every drift broadcast even
+                            // when part/crew counts already matched, which polluted KSP.log
+                            // and ran any future subscriber's reload work on a no-op.
+                            // Refund the budget slot — see the pre-emptive-charge comment
+                            // above for why this isn't symmetric with Failed.
+                            expensiveReloadsRemaining++;
+                            break;
+                        case VesselLoadOutcome.Failed:
+                            break;
                     }
                 }
             }

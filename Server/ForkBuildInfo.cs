@@ -25,6 +25,7 @@ namespace Server
             "BUG-013",     // Reaction-wheel stateString locale-normalisation
             "BUG-008-A",   // Client-side PQS-aware spawn-altitude re-alignment (Phase A)
             "BUG-045",     // Breaking Ground deployable science vessels now sent to server (ported from upstream Release/0_29_2)
+            "vessel-load-budget", // Per-tick proto-reload budget + VesselLoadOutcome enum + SPACECENTER/EDITOR fast path (ported from upstream Release/0_29_2)
         };
     }
 }
