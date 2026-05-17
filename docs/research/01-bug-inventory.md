@@ -103,11 +103,11 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-008] Polygons scramble and craft teleport underground on spawn
 - **Severity:** Critical
-- **Status:** Open
+- **Status:** Open — Phase-2 analysis done (session 5). Two-phase fix proposed: Phase A is a client-side PQS-aware re-positioning routine in `VesselLoader.LoadVesselIntoGame` after `vesselProto.Load`; Phase B is a server-side proto-field addition (deferred). Phase-2 doc: [`02-analysis/bug-008-pqs-spawn-altitude.md`](02-analysis/bug-008-pqs-spawn-altitude.md). On success retires [BUG-009] and the on-runway variant of [BUG-021] as well.
 - **Sources:** [#279](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/279)
 - **Evidence of frequency:** 2 reactions, 5 comments, reproduced across hosts; described in similar terms in [#401](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/401) ("kerbal gets sucked into the mun").
 - **Symptoms:** "Whenever I spawn I get shot under the ground and every polygon in render range is randomly scrambled … the vehicle just stops in place and a bunch of parts vanish all at once before it explodes."
-- **Suspected subsystem(s):** Vessel spawn flow (SafetyBubble / VesselProtoSystem) interacting with PQS terrain readiness — the DMP-era "PQSAltitude" problem listed in DMP #373.
+- **Suspected subsystem(s):** Vessel spawn flow (`VesselLoader` → KSP `ProtoVessel.Load`) interacting with PQS terrain readiness — the DMP-era "PQSAltitude" problem listed in DMP #373. Confirmed by Phase-2 code-walk: no PQS-aware post-load step exists today.
 - **Notes:** DMP #373 explicitly names this as needing `vessel.PQSAltitude` because "PQSTerrain does not seem to spawn accurately enough for our needs." LMP inherited the same incorrect spawn-altitude logic.
 
 #### [BUG-009] Vessel explodes / terrain shakes for no apparent reason on the runway
@@ -146,12 +146,12 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-013] Localized stateString in `ModuleReactionWheel` causes server-wide NRE spam
 - **Severity:** Critical (one localized player can take the whole server unplayable until their vessel is manually edited out)
-- **Status:** Open (the underlying language-localization bleed-through is a KSP behaviour, but LMP must round-trip the file safely; the [#656](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/656) reader fix may help but the issue text itself is still open)
+- **Status:** Fixed on fork — commit `c5ab8fa5`. Defensive server-side sanitiser at the proto-vessel ingest boundary: `Server/System/Vessel/VesselSanitizer.cs` walks `vessel.Parts`, finds every `ModuleReactionWheel{V2,}` module, and rewrites `stateString` to `"Running"` when the current value isn't in the whitelist `{"Running","Disabled","Broken"}`. Hooked into `VesselDataUpdater.RawConfigNodeInsertOrUpdate` so neither the universe-on-disk copy nor any downstream relay carries the bad payload. Logged once per affected vessel with `[fix:BUG-013]`; idempotent on clean vessels.
 - **Sources:** [#598](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/598)
 - **Evidence of frequency:** 1 reaction, 4 comments. Concrete repro: Russian KSP client + reaction wheels → `stateString = Работает` ends up in the vessel file → ~3 NREs/ms across the whole server.
-- **Symptoms:** Same NRE spam family as [BUG-011]; only workaround is to grep the universe folder for the offending vessel and patch the string back to `Running`.
+- **Symptoms (historical):** Same NRE spam family as [BUG-011]; only workaround was to grep the universe folder for the offending vessel and patch the string back to `Running` manually.
 - **Suspected subsystem(s):** Vessel proto serializer (which is round-tripping a stateString that KSP itself does not expect to be localized).
-- **Notes:** Even if the reader fix resolves the truncation, the actual non-English stateString is going to break consumers downstream. Worth a defensive sanitize.
+- **Notes:** Wider implications: KSP localises more than just the reaction-wheel stateString. If another field exhibits the same NRE family, extend `VesselSanitizer` with a new whitelist + module-name guard — the helper is designed to grow.
 
 #### [BUG-014] Vessel position interpolation uses stale rotation offset / wrong rigidbody
 - **Severity:** High
@@ -430,7 +430,7 @@ These are my picks for the first wave of Phase 2 code analysis, ranked by a comb
 2. ~~**[BUG-005] Vessels disappear or duplicate at random**~~ — ✅ FIXED ON FORK (`d64acf66`, BUG-005/006 capstone + protocol bump 0.30.0).
 3. **[BUG-008] Polygons-scrambled / craft-underground on spawn** — OPEN. Known PQS-timing class from DMP days; fixing it would also retire a chunk of [BUG-009] and [BUG-021] symptoms. Phase-2 doc next.
 4. ~~**[BUG-018] Docking destroys ports and kicks players**~~ — ✅ FIXED IN MASTER via upstream PRs [#660](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/660) + [#687](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/687) (commit `4c124f11`). Adopted verbatim.
-5. **[BUG-013] Localized stateString NRE spam** — OPEN. Single misbehaving player can take the whole server unplayable; the defensive sanitize is small and high-value. Picked next.
+5. ~~**[BUG-013] Localized stateString NRE spam**~~ — ✅ FIXED ON FORK (`c5ab8fa5`). Defensive `VesselSanitizer` rewrites localised reaction-wheel `stateString` back to canonical English on ingest.
 6. **[BUG-010] Disconnect destroys craft within rendering distance of another player** — OPEN. Silent progress destruction in a very common play pattern; root cause likely the same missing ownership-handoff machinery as the now-closed [BUG-018].
 7. **[BUG-025] R&D node researchable multiple times in shared career** — OPEN. Clean repro, easy to triage, and shared career is one of the few KSP draws that depends on this being right.
 8. **[BUG-045] Breaking Ground deployable science vanishes on reconnect** — OPEN. Highest reaction count in the open tracker (22), one of the few bug families with a clear hypothesis (missing game-event hook) and no upstream PR in flight.

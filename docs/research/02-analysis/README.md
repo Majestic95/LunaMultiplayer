@@ -21,6 +21,14 @@ Validated against `master` at commit `48df64bd` (2026-05-16). Ordered by Option 
 | 5 | [bug-014-extensionmethods-rb-audit.md](bug-014-extensionmethods-rb-audit.md) | BUG-014 remainder | **CLOSED — audit complete.** No remaining `transform.*`-only setters in `ExtensionMethods/`; PR #628 fully covers the directory. | No code change needed. |
 | 6 | [bug-005-006-cross-subspace-lock.md](bug-005-006-cross-subspace-lock.md) | BUG-005 + BUG-006 | Add `AuthoritativeSubspaceId` per vessel; rekey lock registry; restore the `fbc7a8c`-disabled broadcasts; bump `LMP_PROTOCOL_VERSION`. | Heaviest. Capstone. Protocol break OK on fork. |
 
+## Second batch — post-Stage-2 picklist
+
+Picked from the remaining top-10 after Stage 2 cleared the time/subspace family.
+
+| # | File | Inventory IDs | Scope | Status |
+|---|------|---------------|-------|--------|
+| 7 | [bug-008-pqs-spawn-altitude.md](bug-008-pqs-spawn-altitude.md) | BUG-008 (+ retires BUG-009 / BUG-021 on-runway variant on success) | PQS-aware re-positioning in `VesselLoader` after `vesselProto.Load`. Phase A is client-only / ~200 LOC; Phase B is a server proto-field addition (deferred). | Phase-2 doc shipped session 5; no code yet. |
+
 ## Naming convention
 
 `bug-NNN-short-name.md` where `NNN` is the BUG-id from [`01-bug-inventory.md`](../01-bug-inventory.md). When one fix addresses multiple bugs, the filename combines the IDs (`bug-003-004-...`).

@@ -271,7 +271,7 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 
 ## Test Suite
 
-`ServerTest/` (74 tests on `net10.0` via MSTest):
+`ServerTest/` (83 tests on `net10.0` via MSTest):
 - `FileHandlerTest` — disk-IO round-trip
 - `HandshakeSystemValidatorTest` — handshake validation
 - `LockSystemTest` — lock state transitions + cross-subspace acquire rejection (BUG-005/006)
@@ -283,12 +283,14 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 - `WarpSoloDetectionTest` — solo-subspace transition logic (BUG-001)
 - `VesselAuthorityTest` — `AuthoritativeSubspaceId` round-trip, `IsStrictlyPast`, `RemoveSubspace` vessel-auth guard (BUG-005/006)
 - `WebDashboardTest` — `ForkInformation` + `LogSnapshot` payloads (Stage 3.7)
+- `VesselSanitizerTest` — `ModuleReactionWheel` `stateString` locale-normalisation (BUG-013, session 5)
 
 `LmpCommonTest/`:
 - `LunaNetUtilsTest`, `MessageStoreTest`, `SerializationTests`, `TimeTests`
 
-`MockClientTest/` (1 test on `net10.0` via MSTest, Stage 4.9 v1):
+`MockClientTest/` (3 tests on `net10.0` via MSTest, Stage 4.9 v1 + 4.10 first wave):
 - `HandshakeSmokeTest` — proves the in-process harness wires up: `ServerHarness.Start` brings up a real Server on a free localhost port, `MockNetClient` connects via Lidgren and completes the LMP handshake, server registers the `ClientStructure`. Design + future work in `docs/research/04-mock-client-harness-design.md`.
+- `Bug051aDedupTest` — end-to-end BUG-051a coverage: duplicate `WarpNewSubspaceMsgData` with same `RequestSeq` returns the same subspace (no orphan); `RequestSeq=0` sentinel always mints (pre-fix client backward-compat).
 
 Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing. Client-side regression coverage for BUG-003/004 (interp cap), BUG-051b (retry), and BUG-005/006 (restored `SendUnloadedSecondary*` routines) is still review + soak — those need either harness extensions (server-observable assertions) or a dedicated `LmpClientTest` (net472) project for client-internal logic.
 
@@ -329,6 +331,9 @@ _Each entry has a date and the context that prompted it. Don't relearn these._
 - **`lmpAuthSubspace` is the canonical fork-metadata field on vessel ConfigNodes** (2026-05-16, session 3): the `lmp*` prefix means KSP's vessel loader silently ignores the unknown field, so our additions round-trip safely. Stored via the existing `MixedCollection<string, string> Fields` on `Server/System/Vessel/Classes/Vessel.cs`. Future fork-local vessel metadata MUST use the same prefix convention.
 - **`Server/ForkBuildInfo.cs` is the registry of fork-applied fixes** (2026-05-16, session 3, commit `d2186e2e`): `ActiveFixes[]` lists every fix in commit-chronological order; `MainServer.Main` emits a `[fork] ...` banner at boot. Every runtime fix-related log line uses `[fix:BUG-XXX]` prefix so operators can `grep -F "[fix:"` to find fork-attributed events. When adding a new fix: append to `ActiveFixes[]` AND prefix the runtime log lines.
 - ~~**LmpClient cannot be built locally without the .NET Framework 4.7.2 dev pack** (2026-05-16, session 3)~~ — **OBSOLETE 2026-05-16, session 4**: LmpClient now builds locally. Prereqs are documented in the "Build & Run → LmpClient" section: install the .NET Framework 4.7.2 Developer Pack and populate `External/KSPLibraries/` from a local KSP install (`KSP_x64_Data/Managed/`). `LmpClient/Directory.Build.props` wires `TargetFrameworkRootPath` so the SDK MSBuild finds the v4.7.2 targeting pack. Stage 2 client-side fixes that previously shipped "reviewed not compiled" (BUG-003/004 interp cap, BUG-051b retry, BUG-005/006 restored `SendUnloadedSecondary*`) are now compile-verified locally.
+- **`Server/System/Vessel/VesselSanitizer.cs` is the central proto-vessel sanitiser** (2026-05-16, session 5, commit `c5ab8fa5`): defensive normalisation of inbound proto-vessel ConfigNodes runs inside `VesselDataUpdater.RawConfigNodeInsertOrUpdate` so neither the universe-on-disk copy nor any downstream relay carries the bad payload. Currently handles the BUG-013 reaction-wheel `stateString` locale problem; when a future KSP-localisation-bleed-through bug appears (BUG-013 family), add a new whitelist + module-name guard to this file rather than scattering one-offs. Idempotent on clean vessels; logs once per affected vessel with `[fix:BUG-013]`.
+- **Vendored Lidgren has a real shutdown-race NRE** (2026-05-16, session 5, commit `b7a51ae1`): `NetReliableSenderChannel.DestoreMessage` dereferenced `storedMessage.m_recyclingCount` BEFORE its null check. A late ACK arriving while `NetPeer.ExecutePeerShutdown` was draining the heartbeat killed the host process with no diagnostic — caught only when the mock-client harness shut down NetServer + NetClient concurrently. Fix is local; the `Lidgren/` directory is fork-vendored and not synced from any active upstream, so the patch lives here. If we ever do sync from a maintained Lidgren fork, re-check this site.
+- **Mock-client harness is single-instance per process** (2026-05-16, session 5): `ServerHarness` brings the Server up via static singletons (`ServerContext`, `WarpContext`, the 12 `*.SettingsStore`, the singleton `NetPeerConfiguration`). Only one harness instance per test process — use `[AssemblyInitialize]` / `[AssemblyCleanup]` boundaries. Per-test state resets in `[TestInitialize]` via `ServerHarness.ResetPerTestState` (currently clears `ServerContext.Clients` + `WarpSystem.Reset()` + `WarpRequestCache.Clear()`). Add further per-fix state clears there as new harness tests need them. **Do NOT** override `WarpContext.NextSubspaceId` — it races with `LoadSavedSubspace`'s pre-seed and causes silent `TryAdd` no-ops.
 
 _Append new entries chronologically. If a note becomes obsolete, prefer striking it through with a date rather than deleting outright, so future-you sees the lesson._
 
@@ -367,11 +372,11 @@ Master plan (also tracked in conversation todos for active work):
   - ✅ 2.5g Fork-build banner + `[fix:BUG-XXX]` log tags (`d2186e2e`)
   - ⏸ 2.6 First upstream PR — **DEFERRED** by strategy shift
 - **Stage 3 — Operational tooling (3–4 weeks, parallel)** — IN PROGRESS
-  - ✅ 3.7 Admin dashboard v1 — `/fork` + `/log` JSON endpoints via `JsonGetHandler`; ring buffer + `ForkBuildInfo` wired through. v2 (level/subsystem filters, HTML view) deferred.
-  - 3.8 Phase-2 + fixes for BUG-008 (PQS-timing) and other top-10 remaining (#013/#018/#023/#025/#033/#045)
+  - ✅ 3.7 Admin dashboard v1 — `/fork` + `/log` (text/plain, human-readable) + `/logjson` (tooling) endpoints. Backed by `ForkBuildInfo` + `LogRingBuffer`. v2 (level/subsystem filters, HTML view, basic auth) deferred.
+  - ⏳ 3.8 Phase-2 + fixes for remaining top-10 — IN PROGRESS. ✅ BUG-013 fix shipped (`c5ab8fa5`, reaction-wheel `stateString` sanitiser). ✅ BUG-008 Phase-2 doc shipped ([`02-analysis/bug-008-pqs-spawn-altitude.md`](docs/research/02-analysis/bug-008-pqs-spawn-altitude.md)) — code pending. ✅ BUG-018 / BUG-019 / BUG-024 audit-closed via upstream PR #687. Remaining: BUG-010 / BUG-023 / BUG-025 / BUG-033 / BUG-045.
 - **Stage 4 — Mock-client test harness (2–4 weeks)** — IN PROGRESS
-  - ✅ 4.9 Protocol harness v1 — `MockClientTest` project with `ServerHarness` (real Server in-process on a free localhost UDP port) + `MockNetClient` (Lidgren peer speaking the LMP wire protocol via the production factories). `HandshakeSmokeTest` proves the wiring end-to-end. Design at `docs/research/04-mock-client-harness-design.md`. Future: per-fix regression tests stack on top.
-  - 4.10 Regression tests for shipped fixes (BUG-051a dedup, BUG-001 solo detection, BUG-005/006 past-subspace rejection — all server-observable via the harness; BUG-003/004 + BUG-051b are client-internal and need a separate `LmpClientTest` net472 project)
+  - ✅ 4.9 Protocol harness v1 — `MockClientTest` project with `ServerHarness` (real Server in-process on a free localhost UDP port) + `MockNetClient` (Lidgren peer speaking the LMP wire protocol via the production factories). `HandshakeSmokeTest` proves the wiring end-to-end. Design at `docs/research/04-mock-client-harness-design.md`.
+  - ⏳ 4.10 Regression tests for shipped fixes — IN PROGRESS. ✅ BUG-051a (`Bug051aDedupTest`). Remaining: BUG-001 solo detection broadcast, BUG-005/006 past-subspace proto rejection. Also surfaced + fixed [BUG-052](docs/research/01-bug-inventory.md) (vendored Lidgren `NetReliableSenderChannel.DestoreMessage` NRE on late-ACK during peer shutdown) while writing the first test. BUG-003/004 + BUG-051b are client-internal and need a separate `LmpClientTest` net472 project that references the now-buildable `LmpClient.dll`.
   - 4.11 CI integration
 - **Stage 5 — Per-agency career (2–4 months, separate branch)**
   - 5.12 Create `feature/per-agency`
