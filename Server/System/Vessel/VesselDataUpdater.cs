@@ -59,6 +59,10 @@ namespace Server.System.Vessel
                         return;
                     }
                 }
+                //BUG-013: rewrite localised stateString fields back to canonical English BEFORE the
+                //vessel lands in CurrentVessels, so neither the universe-on-disk copy nor any
+                //downstream relay carries the bad payload.
+                VesselSanitizer.Sanitize(vessel, vesselId.ToString());
                 //BUG-005/006: stamp the contributing client's subspace as the new authority.
                 //Sentinels (subspaceId <= 0) are not stamped — they leave existing authority in place
                 //so a warping or unidentified client cannot blank a vessel's authority.

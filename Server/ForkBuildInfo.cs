@@ -22,6 +22,7 @@ namespace Server
             "BUG-003/004", // Symmetric future-subspace interpolation cap
             "BUG-051b",    // Client steady-state retry while stuck-at-warp
             "BUG-005/006", // Cross-subspace lock keying + protocol bump
+            "BUG-013",     // Reaction-wheel stateString locale-normalisation
         };
     }
 }
