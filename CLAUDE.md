@@ -94,6 +94,7 @@ luna-multiplayer/
 ├── Lidgren/ Lidgren.Core/ Lidgren.Net/   # Vendored UDP transport
 ├── ServerTest/                 # NUnit tests for server (18 tests)
 ├── LmpCommonTest/              # NUnit tests for LmpCommon
+├── LmpClientTest/              # MSTest on net472 — client-internal unit tests
 ├── docs/
 │   └── research/
 │       ├── 00-overview.md      # Inventory method
@@ -288,13 +289,16 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 `LmpCommonTest/`:
 - `LunaNetUtilsTest`, `MessageStoreTest`, `SerializationTests`, `TimeTests`
 
+`LmpClientTest/` (5 tests on `net472` via MSTest, Stage 4.10 scaffolding):
+- `CommonUtilTest` — pure-BCL proof tests over `LmpClient.Utilities.CommonUtil` (`ScrambledEquals` + `CombinePaths`). The point is to demonstrate the scaffold works: SDK-style `net472` test project, references the old-style `LmpClient.csproj`, runs under `dotnet test` from the user-installed .NET 10 SDK. Future client-internal regression tests (BUG-003/004 interp cap math, BUG-051b retry predicate, BUG-008 Phase A `PqsAlignmentDecision`) join this project as their helpers get extracted into testable forms.
+
 `MockClientTest/` (7 tests on `net10.0` via MSTest, Stage 4.9 v1 + 4.10):
 - `HandshakeSmokeTest` — proves the in-process harness wires up: `ServerHarness.Start` brings up a real Server on a free localhost port, `MockNetClient` connects via Lidgren and completes the LMP handshake, server registers the `ClientStructure`. Design + future work in `docs/research/04-mock-client-harness-design.md`.
 - `Bug051aDedupTest` — end-to-end BUG-051a coverage: duplicate `WarpNewSubspaceMsgData` with same `RequestSeq` returns the same subspace (no orphan); `RequestSeq=0` sentinel always mints (pre-fix client backward-compat).
 - `Bug001SoloBroadcastTest` — end-to-end BUG-001 coverage: `WarpSystem.RefreshSoloStatuses` flips a subspace's `Solo` flag and broadcasts `WarpSubspaceSoloStatusMsgData` to a connected mock client when occupancy transitions in either direction (1 occupant → solo, 2 occupants → non-solo). Drives `RefreshSoloStatuses` directly to avoid waiting on the periodic-task interval — per-subspace correctness is already covered by `WarpSoloDetectionTest`.
 - `Bug005SubspaceRejectTest` — end-to-end BUG-005/006 coverage: two mock clients in different subspaces, a planted vessel in `VesselStoreSystem.CurrentVessels`. Past-subspace client → future-auth vessel proto-update is rejected (stored vessel reference unchanged, no relay to the future client); future-subspace client → past-auth vessel is accepted (relay reaches the past client). Sample vessel ConfigNode is loaded from `ServerTest/XmlExampleFiles/Others/` via a relative-path walk-up — no fixture duplication.
 
-Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing. Client-side regression coverage for BUG-003/004 (interp cap), BUG-051b (retry), and BUG-005/006 (restored `SendUnloadedSecondary*` routines) is still review + soak — those need either harness extensions (server-observable assertions) or a dedicated `LmpClientTest` (net472) project for client-internal logic.
+Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing. Client-side regression coverage for BUG-003/004 (interp cap math), BUG-051b (retry predicate), and BUG-008 Phase A (once shipped) now has a home in `LmpClientTest/` — those tests still need the relevant helpers to be extracted from their current call sites before they can be authored.
 
 ---
 
