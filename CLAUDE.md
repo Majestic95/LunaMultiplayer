@@ -239,6 +239,7 @@ Server-side systems (selected, see `Server/System/` for the full list):
 | `FlagSystem` | `FlagSystem.cs` | Flag asset distribution |
 | `GcSystem` | `GcSystem.cs` | Periodic forced GC pass |
 | `ModFileSystem` | `ModFileSystem.cs` | Mod-control file enforcement |
+| `AgencySystem` (Stage 5 — `feature/per-agency`) | `Server/System/Agency/AgencySystem.cs` + `AgencyState.cs` + `AgencySystemSender.cs` | Per-agency career registry + persistence + outbound wire. Gated on `GameplaySettings.PerAgencyCareer` (default false — dual-mode invisible to shared-agency path). Lifecycle: register on handshake auth, persist via `FileHandler.WriteAtomic`, boot-load on `MainServer.LoadExistingAgencies`. Wire surface: registration messages (Handshake/CreateRequest/CreateReply/State) shipped 5.15b/c; 9 mutation+visibility messages deferred to consumer steps. |
 
 Vessel-side ingest lives under `Server/Message/` (proto, position, flight state, part sync, fairings, action groups, eva, decouple/couple). 30+ Harmony patches on the client mirror these.
 
@@ -263,7 +264,7 @@ Add a new JSON endpoint by registering one more `.With("route", new JsonGetHandl
 - `GeneralSettings`, `ConnectionSettings`, `GameplaySettings`, `CraftSettings`, `DebugSettings`, `DedicatedServerSettings`
 - `IntervalSettings`, `LogSettings`, `ScreenshotSettings`, `WarpSettings`, `WebsiteSettings`, `MasterServerSettings`
 
-New settings: add a field with `[XmlElement]` and a default value, then verify round-trip via `SettingsHandler.LoadSettings` / `SaveSettings`.
+New settings: add a field with `[XmlElement]` and a default value, then verify round-trip via `SettingsHandler.LoadSettings` / `SaveSettings`. **Caveat:** `SettingsHandler.HasDifferencesAgainstGivenSetting` reflects over EVERY public property when validating against a difficulty preset (`SetEasy/SetNormal/SetModerate/SetHard`); a stored value that differs from the preset baseline silently flips `GameDifficulty=Custom`. For a setting that's intentionally orthogonal to difficulty (Stage 5's `PerAgencyCareer` is the first one), either accept the flip-to-Custom as documented behaviour or factor an exclusion mechanism. Deferred to the Stage 5.18 area — see `docs/research/05a-stage5-progress.md` "Deferred items".
 
 ## Admin Commands (`Server/Command/Command/`)
 
@@ -275,7 +276,7 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 
 ## Test Suite
 
-`ServerTest/` (87 tests on `net10.0` via MSTest):
+`ServerTest/` (131 tests on `net10.0` via MSTest — pre-Stage-5 baseline 87, +44 across Stage 5.14a/5.14c/5.15a/5.15c on `feature/per-agency`):
 - `FileHandlerTest` — disk-IO round-trip
 - `HandshakeSystemValidatorTest` — handshake validation
 - `LockSystemTest` — lock state transitions + cross-subspace acquire rejection (BUG-005/006)
@@ -289,6 +290,9 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 - `WebDashboardTest` — `ForkInformation` + `LogSnapshot` payloads (Stage 3.7)
 - `VesselSanitizerTest` — `ModuleReactionWheel` `stateString` locale-normalisation (BUG-013, session 5)
 - `ScenarioStoreBackupRaceTest` — `SerializeUnderWriterLock` contract under concurrent mutation + `GetSemaphore` idempotency + per-scenario distinctness (BUG-033, session 8)
+- `FileHandlerAtomicWriteTest` — `WriteAtomic` rotate+rename + `ReadAtomic` canonical-then-bak fallback + concurrent-write contention (Stage 5.14c)
+- `AgencyStateTest` — ConfigNode round-trip + GUID-N filename + invariant-culture doubles + brace-wrap tolerance + missing-AgencyId-throws (Stage 5.14c)
+- `AgencySystemTest` — register/load/save lifecycle + heal-on-bak-recovery + idempotent re-register + concurrent-same-name-race + dual-mode-disabled no-op + `ValidateDisplayName` (Stages 5.15a + 5.15c)
 
 `MockClientTest/` (12 tests on `net10.0` via MSTest):
 - `HandshakeSmokeTest` — wire-end-to-end handshake proves the harness setup
@@ -306,8 +310,9 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 
 (BUG-010 disconnect pin broadcast lives in `MockClientTest/` — there is no pure unit-testable surface for it because the trigger is a Lidgren disconnect arrival on the receive thread.)
 
-`LmpCommonTest/`:
-- `LunaNetUtilsTest`, `MessageStoreTest`, `SerializationTests`, `TimeTests`
+`LmpCommonTest/` (12 tests):
+- `LunaNetUtilsTest`, `MessageStoreTest`, `TimeTests`
+- `SerializationTests` — wire round-trip cases; Stage 5.15b added 6 Agency-message tests (Handshake, CreateRequest C→S, CreateReply success+failure, State) with field-equality assertions via shared `RoundTripServer`/`RoundTripClient` helpers
 
 Detailed per-test rationale for each `MockClientTest` and `LmpClientTest` case lives in the brief lists above. Detailed historical context — e.g. why each Bug00x test was written, what `MockClientTest` setup looks like end-to-end — is captured in `docs/research/04-mock-client-harness-design.md` and in each commit's body.
 
@@ -364,6 +369,8 @@ _Each entry has a date and the context that prompted it. Don't relearn these._
 - **BUG-008 pack-on-load is gated by `ShouldPackForLoad`, never on the active vessel** (2026-05-17): `PqsAlignmentRoutine.AlignAndThen` packs a freshly-loaded surface vessel (LANDED/SPLASHED/PRELAUNCH) only when it arrived in physics range (`vessel.packed == false`) on a body with a `pqsController`, AND it is not `FlightGlobals.ActiveVessel`. The active-vessel exclusion is non-negotiable — packing the camera-target judders the player's view, and the active-vessel reconnect case is a separate gap that needs phantom-force suppression (BUG-008 item 4c) or a hard landed-pin (4d) instead. Already-packed remote vessels stay on the snap-only path because frozen physics can't scramble polygons; only the `packed==false` case has the collider race. After the pack the coroutine polls PQS until stability (or the existing 5s cap), snaps if `NeedsRealignment`, yields one FixedUpdate to let `Vessel.UpdateCaches` settle on the new pose, then unpacks. The unpack is wrapped in a try/catch — if KSP refuses, the vessel is left packed and KSP's natural physics-range tick re-evaluates on the next FixedUpdate. Log marker is `[fix:BUG-008-pack]` (distinct from the `[fix:BUG-008]` snap-path marker) so operators can grep pack-path events independently of snap-path events.
 - **Pure-helper extraction for client-internal decision math is the Stage 4.10 pattern** (2026-05-17, session 9, commit `ecd9997f`): KSP-bound decision logic that needs LmpClientTest coverage gets pulled out of the inline call site into a `public static` helper that takes its inputs as parameters (not reads from singletons or `TimeWarp.*`). The instance method becomes a one-line delegate that captures the call-site state and passes it through. Pattern in production: `VesselPositionUpdate.ComputeMaxInterpolationDuration(int intervalMs, bool subspaceIsEqualOrInThePast)` for BUG-003/004; `WarpSystem.ShouldSteadyStateRetry(int currentSubspace, bool waitingSubspaceIdFromServer, int timeWarpRateIndex, float timeWarpRate, uint currentRequestSeq)` for BUG-051b; `PqsAlignmentRoutine.NeedsRealignment(...)` for BUG-008 Phase A. Promote any named constants the helper uses from `private const` to `public const` so test cases can pin them — they're solution-internal so the const-inline-into-callers ABI risk is theoretical. When extracting, verify behaviour preservation bit-for-bit (no sign flip, no precision shift) BEFORE writing tests; the tests pin the new helper, so they cannot detect a regression introduced during extraction.
 - **`feature/per-agency` is fork-divergent — never push to upstream from it; nothing merges back to `master` until Stage 5 acceptance** (2026-05-17, session 10, branched from `master` at `6515e006`): Stage 5 per-agency career lives on this branch. All Stage 5 commits land here including CLAUDE.md edits + progress-tracker doc. Master receives only fork-master work (soak hotfixes, BUG-008 4b/c/d if needed, unrelated fixes); when master moves, merge master → feature/per-agency (not the other way) until Stage 5 ships. Two non-obvious gates the audit at [docs/research/05a-plaguenz-audit.md](docs/research/05a-plaguenz-audit.md) surfaced and that must be decided BEFORE Stage 5.14 code starts: (1) **server-side scenario projection vs. client-side Harmony patching** — PlagueNZ proved scenario projection alone covers funds/science/rep/tech, deleting most of the ~83-site Harmony work the spec assumes; (2) **contract architecture is hybrid (shared offered pool + per-agency Active/Completed)**, not full-isolation — PlagueNZ shipped full-isolation and bailed under Contract Configurator interop pain. Plus (3) the soak window for v0.30.0-private-1 needs ≥48-72h of cohort signal before Stage 5.14 begins. Tracker at [docs/research/05a-stage5-progress.md](docs/research/05a-stage5-progress.md) is the per-step source of truth on this branch.
+- **Per-agency wire surface anchored at `AgencySrvMsg` ch 22 / `AgencyCliMsg` ch 21** (2026-05-17, session 12, Stage 5.15b + 5.15c): `LmpCommon/Message/Data/Agency/` holds the per-agency MsgData family. `ServerMessageType.Agency=21` + `ClientMessageType.Agency=20` route inbound CliMsgs to `Server/Message/AgencyMsgReader.cs` via `MessageReceiver.HandlerDictionary`. Outbound is `Server/System/Agency/AgencySystemSender.cs`. **Privacy rule (spec §10 Q1):** `AgencyStateMsgData` carries Funds/Science/Reputation and is therefore OWNER-ONLY — never `SendToAllClients`. Cross-agency awareness goes through the public-summary `AgencyInfo` struct embedded in `AgencyHandshakeMsgData` (id + owner + display name, no scalars). The 5.15b registration set ships 4 messages (Handshake/CreateRequest/CreateReply/State); the remaining 9 mutation+visibility messages from spec §4 are deliberately deferred to their consumer steps (5.17b/5.17d/5.18c) so wire definitions land with their callers. See [[reference-agency-wire-extension]] memory for the 6-step recipe each of those steps will run.
+- **`AgencyState` locking contract for Stage 5.17b Share* writers** (2026-05-17, session 12, Stage 5.15c): mutations to any `AgencyState` field MUST hold `AgencySystem.GetAgencyLock(agencyId)` around the write. `SaveAgency`'s `Serialize` acquires the same lock — without the caller-side hold, a multi-field mutation (e.g. paying for a tech node = debit Science + flip TechNodeState) produces a torn intermediate snapshot on disk. `GetAgencyLock` is `internal` and ServerTest-visible; expose as `public` when the client-side mirror lands in 5.18a. Same shape as `ScenarioDataUpdater.GetSemaphore` from BUG-033 — the per-key lock + caller-cooperation contract is the established LMP pattern. `RegisterAgency` separately uses a per-player-name lock (closes the same-name concurrent-register race the pass-1 review caught); these two lock families are orthogonal and acquired in a consistent Name→Agency order, no AB-BA cycle.
 
 _Append new entries chronologically. If a note becomes obsolete, prefer striking it through with a date rather than deleting outright, so future-you sees the lesson._
 
@@ -411,11 +418,16 @@ Master plan (also tracked in conversation todos for active work):
 - **Stage 5 — Per-agency career (2–4 months, separate branch)** — IN PROGRESS on `feature/per-agency`. Spec at [docs/research/05-per-agency-spec.md](docs/research/05-per-agency-spec.md). Progress tracker at [docs/research/05a-stage5-progress.md](docs/research/05a-stage5-progress.md).
   - ✅ 5.12 Create `feature/per-agency` (2026-05-17 session 10, branched from `master` at `6515e006`). Q1-Q4 + migration/CommNet defaults signed off and recorded in spec §10.
   - ✅ 5.13 Audit PlagueNZ — [docs/research/05a-plaguenz-audit.md](docs/research/05a-plaguenz-audit.md). Benchmark only, no code adopted.
-  - 5.14 `AgencyState` + persistence + `PerAgencyCareer` setting + protocol bump to 0.31.0 (spec §12 step 1-2)
-  - 5.15 `AgencySystem` lifecycle + wire protocol + server handlers (spec §12 step 3-5)
-  - 5.16 MockClientTest agency harness + `OwningAgency` on vessels (spec §12 step 6-7)
-  - 5.17 `LockSystem` cross-agency rejection + Share* per-agency routing (spec §12 step 8-9)
-  - 5.18 Client `AgencySystem` mirror + Harmony patches + UI + admin commands + final CLAUDE.md update (spec §12 step 10-14). Continuous PlagueNZ comparison across this stretch.
+  - ✅ 5.13b Q5/Q6/Q7 audit-driven design checks resolved + spec §2/§3/§5/§6/§10/§12 amended (session 11, `51cd86d7`).
+  - ✅ 5.14a `PerAgencyCareer` setting (default false) + protocol bump 0.30.0 → 0.31.0 + ForkBuildInfo entry (session 12, `49583ec5`).
+  - ✅ 5.14c `FileHandler.WriteAtomic` / `ReadAtomic` + `Server/System/Agency/AgencyState.cs` ConfigNode round-trip + `Universe.CheckUniverse` hookup (session 12, `d0b484c4`).
+  - ✅ 5.15a `Server/System/Agency/AgencySystem.cs` lifecycle (register/load/save/boot-load) + `HandshakeSystem` hook + heal-on-bak-recovery (session 12, `f45cd891`).
+  - ✅ 5.15b Wire protocol — registration set (4 messages: Handshake / CreateRequest / CreateReply / State) + `AgencySrvMsg` ch 22 / `AgencyCliMsg` ch 21 + enum entries (session 12, `b1644532`). Scope re-derived from spec §4: 9 mutation+visibility messages deferred to consumer steps.
+  - ✅ 5.15c Server-side handlers (`Server/Message/AgencyMsgReader.cs`) + outbound sender (`Server/System/Agency/AgencySystemSender.cs`) + `HandshakeSystem` extension to push Handshake+State on auth (session 12, `57bbc2b1`). Privacy rule (spec §10 Q1): `AgencyStateMsgData` is owner-only; cross-agency goes through public `AgencyInfo` summary.
+  - 5.16a (next) MockClientTest agency harness — extends MockNetClient to send CreateRequest + consume Handshake/State; end-to-end test against the in-process server.
+  - 5.16b `lmpOwningAgency` on vessels (spec §12 step 7).
+  - 5.17 `LockSystem` cross-agency rejection + `AgencyScenarioProjector` (Q5) + `AgencyContractRouter` (Q6) + Share* per-agency routing (spec §12 steps 8-11). 5.17b/5.17d also add the 9 deferred wire messages — see [[reference-agency-wire-extension]] for the recipe.
+  - 5.18 Client `AgencySystem` mirror + Harmony patches + UI + admin commands + CC soak + final CLAUDE.md update + Stage 5 acceptance (spec §12 steps 12-17). Continuous PlagueNZ comparison across this stretch.
 
 ---
 
