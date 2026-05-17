@@ -280,23 +280,32 @@ Merge to `master`: only after all Stage 5.* items land green and the dual-mode t
 
 ## 10. Open questions and explicit deferrals
 
-### Open (resolve before Stage 5.14 starts)
+### Resolved (signed off 2026-05-17 by Majestic95)
 
-- **Q1:** Should other agencies' funds/science/rep be visible in the agency window? Default = `PrivateAgencyResources = true` (hidden). Easy to flip per server.
-- **Q2:** Should the `transferagency` admin command preserve vessel ownership, or strip it? Default = preserve (vessels move to new owner).
-- **Q3:** When a vessel is unowned (loaded from a pre-0.31 save, missing `lmpOwningAgency`), what happens? Default = assigned to a sentinel `"Unassigned"` agency that all players can interact with. Operator can transfer via admin command.
-- **Q4:** Contract reward routing — if Player A's vessel completes a contract offered to Player B's agency (because the vessel passed through Player B's mission area), who gets the reward? Default = whoever's contract it was. Vessel ownership doesn't matter for reward routing.
+- **Q1 — PrivateAgencyResources:** Hidden by default. `PrivateAgencyResources = true`. Each agency only sees its own pools; operator can flip the setting per server.
+- **Q2 — `transferagency` vessel handling:** Preserve. Vessels follow the agency to the new owner (`lmpOwningAgency` unchanged).
+- **Q3 — Pre-0.31 vessels missing `lmpOwningAgency`:** Assigned to the sentinel `"Unassigned"` agency. All players can interact; operator transfers via admin command.
+- **Q4 — Contract reward routing:** Contract owner is paid. Vessel ownership is irrelevant for reward routing — a contract is an agency-level relationship, the vessel is just the instrument.
+- **Migration tool:** Confirmed fresh-start-only in v1. Operator workflow remains "archive the shared-agency universe, start fresh with PerAgencyCareer enabled." No CLI migrator, no migration UI in v1. The Q3 Unassigned sentinel still covers any stray vessels loaded into a per-agency universe.
+- **CommNet:** Confirmed shared infrastructure in v1. All agencies use the same ground stations and any deployed relay. See "Future / v2+" below for the inter-agency CommNet billing direction Majestic95 wants to head once v1 ships.
 
 ### Explicit deferrals (out of scope for v1)
 
 - Multi-player agencies / teams via `GroupSystem`.
-- Per-agency CommNet.
+- Per-agency CommNet enforcement (relays are agency-scoped, peers must pay/borrow for transit).
 - Per-agency separate KSCs at different Kerbin coordinates.
 - Voluntary vessel ownership transfer UI (admin command only in v1).
 - Agency emblems / flags (cosmetic).
 - Inter-agency funds/science transfer UI (admin only in v1).
 - Migration tool for existing shared-agency saves.
 - Per-agency administrative buildings (each agency has its own Mission Control instance, etc.). v1: facility upgrade tiers are per-agency, but the *instance* of Mission Control's contract list is per-agency-scoped, not a separate building.
+
+### Future / v2+ direction (recorded 2026-05-17, not committed scope)
+
+- **Inter-agency relay billing.** Per-agency CommNet plus an opt-in funds-transfer protocol: relay-owner agency can charge per-use (per-packet, per-second, flat session fee — TBD) for traffic that transits its relays. Sets up a broader "agencies can choose to cooperate or not, with currency consequences" surface — leases, science-trade, mission-subcontracting. Becomes the foundation for **player-agency-as-free-will**: the per-agency machinery hosts the rules, the players decide who they help, hinder, or do business with.
+- **Inter-agency funds/science/contract transfer UI.** Same workstream — once Stage 5 ships, agency-to-agency transactions become first-class.
+
+These items are NOT in Stage 5 scope. They drive the Stage-6+ workstream once Stage 5 lands and the v1 per-agency machinery is in the wild.
 
 ---
 

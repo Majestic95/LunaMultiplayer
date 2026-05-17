@@ -54,29 +54,38 @@ Folded into [Phase-2 analysis for BUG-010](research/02-analysis/bug-010-disconne
 
 ---
 
-## 3. Stage 5 — Per-agency career
+## 3. ~~Stage 5 — Per-agency career~~ → MOVED to feature/per-agency branch (2026-05-17, session 10)
 
-**Status:** Spec written 2026-05-16. See [`docs/research/05-per-agency-spec.md`](research/05-per-agency-spec.md) for the full design.
+**Status:** Stage 5.12 (branch + Q1-Q4 sign-off) and Stage 5.13 (PlagueNZ audit) shipped on `feature/per-agency`. Per-step tracker is now [`docs/research/05a-stage5-progress.md`](research/05a-stage5-progress.md) on that branch; do NOT track Stage 5 items in `near-term-todos.md` going forward.
 
-**Confirmed decisions (Majestic95, 2026-05-16):**
-- 1 player = 1 agency.
-- Per-agency independent tech tree.
-- Per-agency facility upgrade levels, shared physical KSC.
-- All vessels visible in tracking station, agency-labelled.
+Pre-5.14 gates (also tracked in the progress doc, repeated here for the master-branch view):
+- v0.30.0-private-1 soak window ≥48-72h with no critical regression
+- MockClientTest `Bug001SoloBroadcastTest.SoloDetected_BroadcastsToConnectedClient` flake fixed (item 5 below)
+- Three audit-surfaced design checks resolved (scenario projection vs. Harmony, contract hybrid architecture, AgencyId persistence key)
 
-**Defensible defaults to confirm before Stage 5.14 coding starts (see spec §2 and §10):**
-- Q1: Other agencies' funds/sci/rep hidden in UI (`PrivateAgencyResources = true` default)?
-- Q2: `transferagency` admin command preserves owned vessels?
-- Q3: Sentinel `"Unassigned"` agency owns vessels missing `lmpOwningAgency`?
-- Q4: Contract rewards route by contract-issuing agency, not by vessel-owning agency?
-- Migration: fresh-start-only (no shared→per-agency migration tool in v1) — confirm.
-- CommNet: shared infrastructure in v1 — confirm.
-- Save migration tool: explicitly deferred — confirm.
+---
 
-**Action items before Stage 5.12 (branch creation):**
-- Walk through spec §10 Open Questions with Majestic95 and lock final defaults.
-- Decide whether the new `LmpClientTest` project (spec §8 item 10) is created as part of Stage 4.10 follow-on or as Stage 5.15 setup.
-- Confirm protocol bump 0.30.0 → 0.31.0 is the right move (vs. additive optional fields that could keep cross-compat with shared-agency 0.30.x clients).
+## 5. MockClientTest Bug001 flake — investigate before Stage 5.14
+
+**Source:** `[[project-mock-harness-flakes]]` memory + Stage 5 audit recommendation. The `Bug001SoloBroadcastTest.SoloDetected_BroadcastsToConnectedClient` test passes ~2/3 of the time on this workstation on clean master; the failure shape is the solo-broadcast not arriving within the test's poll window. Cosmetic on master (we re-run); compounds across Stage 5 because spec §8 adds ~3 new MockClientTest cases that will sit on top of the same harness timing.
+
+**Approach:** read `MockClientTest/HarnessSupport/ServerHarness.cs` + the test itself, identify the polling/timing pattern, and either (a) fix the harness so the broadcast is observed deterministically (likely a `WaitForMessage<T>(subtype, timeout)` helper that consumes the receive queue instead of busy-polling occupant count), or (b) document the workaround clearly and apply it consistently. Option (a) preferred; lifts every existing test plus future Stage 5 tests.
+
+**Acceptance:** 20 consecutive `--filter "FullyQualifiedName~Bug001"` runs pass on this workstation. Then 20 more on Ubuntu CI (`gh workflow run` against a throwaway branch).
+
+**Estimate:** 1 focused session (≈2-3h). Cheap compared to the working-around-it cost across Stage 5.
+
+---
+
+## 6. Auto-updater RepoConstants fork-edit — before v0.31 cohort distribution
+
+**Source:** `[[reference-fork-distribution]]` memory. `LmpUpdater` + the in-game "check for updates" UI both point at `LunaMultiplayer/LunaMultiplayer/releases/latest` (upstream). If a v0.30.0-private-1 tester clicks "check for updates", they downgrade to upstream 0.29.1 — losing every fix in the build and silently dropping out of the cohort. Currently mitigated by a release-notes warning ("DO NOT click check for updates"), which is fragile.
+
+**Approach:** edit the constants in `LmpUpdater` and `LmpClient/Systems/ModApi`/wherever the updater repo URL lives to point at `Majestic95/LunaMultiplayer/releases/latest`. Confirm by reading the release-feed JSON shape Octokit expects matches what GitHub returns for a fork release.
+
+**Acceptance:** test "check for updates" with the fork build installed, see "Up to date" (or "Update to v0.30.0-private-1 → v0.30.0-private-2" once a follow-up release exists). No accidental downgrade path.
+
+**Estimate:** ≈30 min. Not blocking Stage 5 dev, but blocking the moment we ship a v0.31 to cohort.
 
 ---
 
