@@ -32,7 +32,7 @@ Defensible defaults for secondary decisions (flag if you disagree before coding 
 | Decision | Default | Rationale |
 |---|---|---|
 | Funds / Science / Reputation pools | Per-agency, independent. Server-configurable starting amounts (default = stock career starting values). | Follows from per-agency tech tree. |
-| Contracts | Per-agency offering pool. `ContractPreLoader_Filter.cs` Harmony patch already exists as precedent for intercepting contract generation; extend it to scope per-agency. | Cleanest game-coherent model. Each agency sees their own offerings. |
+| Contracts | **Hybrid: shared offered pool + per-agency Active/Completed/Declined.** `ContractSystem.Instance.Contracts[State.Offered]` and the `ContractPreLoader` ScenarioModule stay global — CC's pre-loader cache sees the world it expects. Per-agency state holds the contract once accepted: `Active`, `Completed`, `Declined` and reward routing keyed by `(AgencyId, contractGuid)`. Stage 5.17b also commits to: (a) **do not persist Offered-state per-agency** (PlagueNZ saw 1,727-entry bloat); (b) **per-contract exception isolation** in the restore loop (one broken CC contract throwing `Register()` must not abort the whole load). | Empirically proven by PlagueNZ's painful retreat from full-isolation. CC source confirms five distinct fight surfaces with per-agency contract pools (`ContractPreLoader` ScenarioModule, `onContractsLoaded` event re-fire, `ContractDisabler.SetContractState` global Withdraw, hand-rolled `Activator.CreateInstance + Load`, null-unsafe `HomeWorld()`). The hybrid sidesteps all five. Decision audit-driven, signed off 2026-05-17 (§10 Q6). |
 | Kerbal roster | Per-agency. Each agency starts with 4 auto-generated "original" Kerbals (deterministic names seeded by agency name). | Avoids N coincident Jebs. Server config can opt into a "shared originals" mode if desired. |
 | Strategies (Mission Control) | Per-agency. | Standard career system; each agency runs its own. |
 | World firsts / milestones | Per-agency tracking. Server can emit an optional global feed of `"<agency> achieved <milestone>"` chat-style announcements. | Preserves multiplayer feel without conflating progression. |
@@ -65,7 +65,9 @@ Fields per agency:
 - `WorldFirsts` — `HashSet<string>`. Milestone IDs achieved by this agency.
 - `Achievements` — `Dictionary<string, AchievementState>`. Stock achievement tracking.
 
-Persistence: one file per agency under `Universe/Agencies/<AgencyId>.txt` in ConfigNode format. Flushed by `BackupSystem.RunBackup()` like other universe state. Archived by `RunArchiveBackup()`.
+Persistence: one file per agency under `Universe/Agencies/<AgencyId>.txt` in ConfigNode format, where `<AgencyId>` is the canonical GUID (no player-name in path — survives renames; PlagueNZ had to ship `MigrateLegacyFile` to recover from a player-name keyed scheme, we don't repeat that). Flushed by `BackupSystem.RunBackup()` like other universe state. Archived by `RunArchiveBackup()`.
+
+**Atomic write requirement:** AgencyState is the player's career — a half-written file on power-loss = lost progression. `FileHandler.WriteToFile` is `FileMode.Create` direct; Stage 5.14c adds `FileHandler.WriteAtomic(path, bytes)` that writes to `<path>.tmp`, renames `<path>` → `<path>.bak` (single-generation rotation), then renames `<path>.tmp` → `<path>`. AgencyState writes go through this path; on load, if `<path>` is missing or unparseable, fall back to `<path>.bak`. Operator-readable inspection helper is the `listagencies` admin command (already in §5) printing `{AgencyId} → {DisplayName} (owned by {PlayerName})`.
 
 New file: `Server/System/Agency/AgencySystem.cs`
 
@@ -134,22 +136,38 @@ This means `Share*Sender` on the client doesn't need to change in v1 — the rou
 
 ## 5. Server-side implementation
 
+### Career-data projection strategy (Hybrid — signed off §10 Q5)
+
+Per-agency funds/science/reputation/tech/contracts/strategies/facilities/kerbals reach the right client via **two layers, not one**:
+
+1. **Server-side scenario projection at handshake + scene-load.** `Server/System/ScenarioSystem.cs` is extended so `SendScenarioModules` calls a new `Server/System/Agency/AgencyScenarioProjector.GetScenarioForPlayer(playerName, scenarioName)` per scenario per client. The projector substitutes the relevant `Funding`/`ResearchAndDevelopment`/`Reputation`/`ResearchAndDevelopmentParts`/`ContractSystem[Active|Completed]`/`StrategySystem`/`ScenarioUpgradeableFacilities`/`KerbalRoster`/`ScenarioAchievements`/`ScenarioDestructibles` ConfigNode blobs with the **sending client's agency** projection on top of the shared scenario template. The client's KSP singletons load up with correct per-agency state without knowing other agencies exist. **This is the read path** — covers ~80% of the call-site count (the ~83 `Funding.Instance` reference sites CLAUDE.md notes) for free.
+2. **Client-side Harmony patches on high-traffic write paths only.** Mid-session mutations (`Funding.Instance.AddFunds`, `ResearchAndDevelopment.Instance.AddScience`, `Reputation.Instance.AddReputation`, tech-unlock writers, facility-upgrade writers, contract-state writers) route through Harmony postfixes that fire `AgencyMutate*MsgData` to the server. The server validates, applies to that agency's `AgencyState`, and broadcasts the new state delta back. Reads are NOT patched — they hit the singleton populated by step 1. **This is the write path** — much smaller surface than the spec's original Harmony-only design (~5-10 write methods total vs. ~83+ read sites).
+
+**Why hybrid, not projection-only:** projection covers handshake + scene-load. Mid-session writes between scenes (e.g. recovering a vessel mid-flight credits funds) would diverge silently if there's no write-path interception. PlagueNZ ships projection-only and gets away with it because the existing `Share*` family relays writes — but their relay is "broadcast to all," which we have to scope to "this agency's owner only." That scoping IS the write-path Harmony layer.
+
+**Why hybrid, not Harmony-only:** the original spec's ~83 read-site count is the per-`Funding.Instance` reference count — multiplied by `R&D.Instance` + `Reputation.Instance` + tech + facilities + kerbal-roster + contracts + strategies, the read-side patch surface easily exceeds 250 sites. Projection collapses every one of those reads to a singleton already loaded with the right per-agency value. The remaining write-path patches are small and high-value.
+
+Audit-derived risk: CC's `ContractDisabler.SetContractState` calls `Withdraw()` on contracts globally across `ContractSystem.Instance.Contracts`. If our projection partitions `Contracts[Active|Completed]` per-agency on the client, a CC-driven type-disable could withdraw agency A's in-flight contracts when it should only touch agency B's. Hybrid + §2 contracts decision (shared offered pool) keeps the surface CC touches global; per-agency divergence only kicks in after `Contract.Accept` where CC's loops no longer reach.
+
 ### New systems
 
 1. **`Server/System/Agency/AgencySystem.cs`** — registry, lifecycle, persistence.
 2. **`Server/System/Agency/AgencyValidator.cs`** — server-side validation of mutation requests. Funds requests check non-negative result; tech unlocks check prerequisites; facility upgrades check both funds and tier-1-before-tier-2 ordering.
-3. **`Server/System/Agency/AgencyContractGenerator.cs`** — per-agency contract pool generation. Hooks into the existing contract sync flow.
+3. **`Server/System/Agency/AgencyScenarioProjector.cs`** — per-player scenario projection (the read-path layer). Produces a personalised `ConfigNode` for each of the ~10 career scenarios at handshake + scene-load. Called by `ScenarioSystem.SendScenarioModules`.
+4. **`Server/System/Agency/AgencyContractRouter.cs`** — hybrid contract architecture (§2 Contracts). Routes shared offered-pool generation through the existing CC-friendly path; routes Active/Completed/Declined transitions per-agency. Also enforces "do not persist Offered-state per-agency" + per-contract exception isolation in the restore loop.
 
 ### Modified systems
 
-1. **`Server/System/Share*System.cs` (13 files)** — each gets a `PerAgencyCareer` branch: when true, scope the mutation to the sender's agency instead of broadcasting. Touch points roughly identical in each file (a single condition guarding the broadcast call). This is the "wide-but-shallow" work CLAUDE.md flags.
+1. **`Server/System/Share*System.cs` (13 files)** — each gets a `PerAgencyCareer` branch: when true, apply the mutation to the sender's `AgencyState` (not the shared scenario) and echo back to the sender only. Touch points roughly identical in each file (a single condition guarding the broadcast call + a delegate to `AgencySystem.ApplyMutation`). This is the "wide-but-shallow" work CLAUDE.md flags. **Pairs with the §6 client-side Harmony write-path layer** — `Share*Sender` on the client doesn't need to change because the routing decision is server-side. (Per the projection strategy above, the read path is handled by `AgencyScenarioProjector` at handshake/scene-load; `Share*` is purely the write path.)
 2. **`Server/System/LockSystem.cs`** — `AcquireLock` for `Control`/`Update`/`UnloadedUpdate` now ALSO checks `requesterAgency == vessel.OwningAgency`. Reject with `CrossAgencyDenied` if mismatch. (This stacks on the existing `CrossSubspaceDenied` check.)
 3. **`Server/System/Vessel/Classes/Vessel.cs`** — add `OwningAgencyId` accessor backed by `Fields["lmpOwningAgency"]`.
 4. **`Server/Message/Vessel/VesselProtoMsgReader.cs`** — read/write the new field.
 5. **`Server/Settings/Definition/GameplaySettings.cs`** — add `PerAgencyCareer` bool (default false), `DefaultStartingFunds`, `DefaultStartingScience`, `DefaultStartingReputation`, `AgencyInactivityDays` (default 0).
-6. **`Server/Web/Handlers/`** — extend `/` dashboard payload to include agency counts; add `/agencies` endpoint listing all `AgencyState`s.
-7. **`Server/Client/ClientConnectionHandler.cs`** — on `ConnectClient`, call `AgencySystem.RegisterOrLoadAgency(playerName)`. On `DisconnectClient`, persist agency state.
-8. **`Server/ForkBuildInfo.cs`** — append `"Per-agency career (Stage 5)"` to `ActiveFixes[]`.
+6. **`Server/System/FileHandler.cs`** — add `WriteAtomic(path, byte[] data, int numBytes)` per §3. Existing `WriteToFile` keeps its semantics; AgencyState uses the new atomic path.
+7. **`Server/System/ScenarioSystem.cs`** — `SendScenarioModules` calls `AgencyScenarioProjector.GetScenarioForPlayer` per scenario per client when `PerAgencyCareer=true`. Shared-agency path unchanged.
+8. **`Server/Web/Handlers/`** — extend `/` dashboard payload to include agency counts; add `/agencies` endpoint listing all `AgencyState`s.
+9. **`Server/Client/ClientConnectionHandler.cs`** — on `ConnectClient`, call `AgencySystem.RegisterOrLoadAgency(playerName)`. On `DisconnectClient`, persist agency state.
+10. **`Server/ForkBuildInfo.cs`** — append `"Per-agency career (Stage 5)"` to `ActiveFixes[]`.
 
 ### Admin commands
 
@@ -170,25 +188,28 @@ Extend existing commands:
 
 ## 6. Client-side implementation
 
-This is where Stage 5.15 ("Harmony interception layer") lives. Wide-but-shallow.
+This is where Stage 5.18b ("Harmony write-path interception layer") lives. **Narrow-and-focused** — the read side is handled server-side by `AgencyScenarioProjector` (§5), so client-side Harmony only targets the **write methods** that mutate KSP singletons mid-session.
 
-### Harmony patch surface
+### Harmony patch surface (writes only)
 
-For each KSP singleton accessed by LMP, intercept reads and writes and route to the local agency's state:
+For each KSP singleton accessed by LMP, intercept the **write methods** that fire when a player spends/earns funds, unlocks tech, etc. Route to the server via `AgencyMutate*MsgData`. **Read sites are not patched** — they hit the singleton populated by handshake/scene-load projection (§5).
 
-| Singleton | Read sites | Write sites | Harmony pattern |
-|---|---|---|---|
-| `Funding.Instance.Funds` | ~30 | ~12 | Property getter/setter prefix; `__result = localAgency.Funds` on read, `localAgency.Funds = value; QueueSync()` on write. |
-| `ResearchAndDevelopment.Instance.Science` | ~25 | ~10 | Same shape. |
-| `Reputation.Instance.reputation` | ~15 | ~8 | Same shape. |
-| `ResearchAndDevelopment.Instance` tech node state (`GetTechState`, `UnlockProtoTechNode`, etc.) | ~20 | ~6 | More involved — per-method patches. |
-| `HighLogic.CurrentGame.CrewRoster` | ~40 | ~10 | Read returns the local agency's roster; write mutates only. |
-| `ScenarioUpgradeableFacilities.GetFacilityLevel` | ~10 | ~4 | Read returns local agency's tier; upgrade triggers `AgencyFacilityUpgradeMsgData`. |
-| `ContractSystem.Instance.Contracts` | ~15 | varies | Patch `ContractPreLoader` (existing precedent in `LmpClient/Harmony/ContractPreLoader_Filter.cs`) to filter per-agency. |
-| `Strategies.StrategySystem.Instance` | ~5 | ~5 | Per-agency strategy list. |
-| `ProgressTracking.Instance` (world firsts) | ~10 | varies | Per-agency milestone tracking; emit `AgencyMilestoneMsgData` on achievement. |
+| Singleton write method | Approx call sites | Harmony pattern |
+|---|---|---|
+| `Funding.Instance.AddFunds(amount, reason)` | ~5 (recover-vessel, contract-complete, strategy-tick, admin-grant, advance) | Postfix: server-confirm via `AgencyFundsMutateMsgData`. Local update happens via the existing `OnFundsChanged` event after server echo. |
+| `Funding.Instance.set_Funds` (direct setter, rare — admin paths only) | ~2 | Same shape. |
+| `ResearchAndDevelopment.Instance.AddScience(amount, reason)` | ~6 (experiment-transmit, lab-process, contract-complete, strategy-tick, admin-grant) | Postfix: `AgencyScienceMutateMsgData`. |
+| `Reputation.Instance.AddReputation(amount, reason)` | ~4 (contract-complete, contract-fail, strategy-tick, admin-grant) | Postfix: `AgencyReputationMutateMsgData`. |
+| `ResearchAndDevelopment.Instance.UnlockProtoTechNode` / `PartTechUnlock` | ~3 | Postfix: `AgencyTechUnlockMsgData` (per-node and per-part). |
+| `ScenarioUpgradeableFacilities` facility upgrade writer | ~2 | Postfix: `AgencyFacilityUpgradeMsgData`. |
+| `KerbalRoster` hire/fire/status mutation | ~4 | Postfix: `AgencyKerbalUpdateMsgData`. |
+| `Contract.Accept` / `Contract.Decline` / `Contract.Complete` / `Contract.Fail` | ~4 | Postfix: `AgencyContractMsgData`. Pairs with `ContractSystem.Instance.Contracts[Offered]` staying shared per §2 — only post-accept transitions are per-agency. |
+| `StrategySystem` strategy-activate / strategy-deactivate | ~2 | Postfix: `AgencyStrategyMsgData`. |
+| `ProgressTracking` world-firsts achievement | ~3 | Postfix: `AgencyMilestoneMsgData`. |
 
-**Reference count** (per CLAUDE.md note 2026-05-16): `Funding.Instance` alone is ~83 references. Most are reads. The patch strategy is to intercept at the singleton's property/method level rather than at every call site — one patch, all call sites covered.
+**Approximate total: ~35 patch sites across all singletons**, down from the original spec's ~250+ read+write surface. CLAUDE.md's "~83 reference sites for `Funding.Instance`" count was reads + writes combined; the projection layer takes the reads off the table.
+
+**Bracket pattern (BUG-025 precedent):** every server-acknowledged refund/credit that fires KSP's `OnXxxChanged` event must be bracketed in `ShareXxxSystem.Singleton.StartIgnoringEvents() / StopIgnoringEvents()` to suppress the feedback loop where the local mutation rebroadcasts our new total back to the server. Lesson learned the hard way on the shared-agency BUG-025 fix; mandatory for every `AgencyMutate*` handler.
 
 ### New client systems
 
@@ -289,6 +310,14 @@ Merge to `master`: only after all Stage 5.* items land green and the dual-mode t
 - **Migration tool:** Confirmed fresh-start-only in v1. Operator workflow remains "archive the shared-agency universe, start fresh with PerAgencyCareer enabled." No CLI migrator, no migration UI in v1. The Q3 Unassigned sentinel still covers any stray vessels loaded into a per-agency universe.
 - **CommNet:** Confirmed shared infrastructure in v1. All agencies use the same ground stations and any deployed relay. See "Future / v2+" below for the inter-agency CommNet billing direction Majestic95 wants to head once v1 ships.
 
+### Resolved (signed off 2026-05-17, audit-driven — pre-5.14 design checks)
+
+PlagueNZ audit ([`05a-plaguenz-audit.md`](05a-plaguenz-audit.md)) surfaced three architectural decisions that needed pre-coding resolution. Decisions captured here and reflected in §2 (Contracts row), §3 (persistence), §5 (projection strategy), §6 (Harmony surface).
+
+- **Q5 — Read-path projection vs. Harmony interception:** **Hybrid.** Server-side `AgencyScenarioProjector` handles reads at handshake + scene-load (substitutes per-agency ConfigNode blobs into `SendScenarioModules`). Client-side Harmony targets **write methods only** (~35 sites total vs. the original spec's ~250+ read+write surface). See §5 "Career-data projection strategy" for the why. Spec §6 rewritten to reflect the writes-only surface.
+- **Q6 — Contract architecture:** **Hybrid: shared offered pool + per-agency Active/Completed/Declined.** Empirically proven by PlagueNZ's painful retreat from full-isolation; CC source verification confirmed five distinct fight surfaces with per-agency contract pools (`ContractPreLoader` ScenarioModule, `onContractsLoaded` event re-fire, `ContractDisabler.SetContractState` global Withdraw, hand-rolled `Activator.CreateInstance + Load`, null-unsafe `HomeWorld()`). Stage 5.17b commits to three implementation rules surfaced by the PlagueNZ DEVLOG: (a) do NOT persist Offered-state per-agency (their JSON bloated to 1,727 entries); (b) per-contract exception isolation in the restore loop (one broken CC contract throwing `Register()` must not abort the load); (c) the shared `ContractPreLoader` ScenarioModule is left untouched. See §2 Contracts row.
+- **Q7 — AgencyId on disk + wire:** **GUID throughout.** `Universe/Agencies/{AgencyId GUID}.txt` persistence path with atomic `.tmp + move + .bak` rotation (new `FileHandler.WriteAtomic` in Stage 5.14c). Wire-level identifier is the GUID; player-name is a lookup convenience only. Operator inspection via the existing `listagencies` admin command. PlagueNZ shipped a hardware-hash key and had to write `MigrateLegacyFile` to recover; we pay the GUID complexity up front so future-us doesn't repeat the migration. See §3 persistence subsection.
+
 ### Explicit deferrals (out of scope for v1)
 
 - Multi-player agencies / teams via `GroupSystem`.
@@ -334,22 +363,24 @@ A coding agent has finished Stage 5 when:
 In dependency order. Each step lands as its own commit (or small commit series) on `feature/per-agency`. Don't move to step N+1 until N is green.
 
 1. **Branch + settings + protocol bump.** Create `feature/per-agency`. Add `PerAgencyCareer` setting (default false, so behavior is unchanged). Bump protocol to 0.31.0 in `LmpVersioning.cs` and reject cross-version.
-2. **`AgencyState` + persistence.** Pure data + ConfigNode round-trip. No wire protocol, no UI. Test via `AgencyStateTest`.
+2. **`FileHandler.WriteAtomic` + `AgencyState` + persistence.** Add atomic-write helper (.tmp + move + .bak per §3) to `FileHandler`. Pure data + ConfigNode round-trip for `AgencyState`. No wire protocol, no UI. Test via `FileHandlerAtomicWriteTest` + `AgencyStateTest`.
 3. **`AgencySystem` + lifecycle.** Register/load/save/cleanup. Hooked into `ClientConnectionHandler`. Test via `AgencySystemTest`.
 4. **Wire protocol messages.** Define all `Agency*MsgData` types in `LmpCommon/Message/Data/Agency/`. No handlers yet — just the wire definitions. Verified by `SerializationTests`.
 5. **Server-side handlers.** Implement message handlers in `Server/Message/Agency/`. Each mutation message validates + applies + responds.
 6. **`MockClientTest` agency harness.** Extend the mock client to send agency-create-request and consume agency-state messages. Test via `AgencyHandshakeTest`.
 7. **`OwningAgency` on vessels.** Add `lmpOwningAgency` field. Stamp on launch. Round-trip through proto. Test via `VesselOwningAgencyTest`.
 8. **`LockSystem` cross-agency rejection.** Test via `LockSystemAgencyTest` + `CrossAgencyLockRejectionTest`.
-9. **Server-side per-agency routing of `Share*` messages.** Each of the 13 systems gets the `PerAgencyCareer` branch. Test each via a focused test.
-10. **Client `AgencySystem`.** Mirror registry. Receive state updates.
-11. **Client Harmony patches.** Funding → Science → Reputation → tech tree → roster → facilities → contracts → strategies → milestones. One patch (or one group of patches) per session, with the test plan verifying each.
-12. **Client UI.** `AgencyWindow`, `AgencyCreateWindow`, tracking-station overlay.
-13. **Admin commands.** `listagencies`, `setagency*`, `transferagency`, `deleteagency`.
-14. **CLAUDE.md update + acceptance run.** Full Stage 5 acceptance criteria walkthrough.
-15. **Merge to `master`.** Squash or merge-commit per project convention.
+9. **`AgencyScenarioProjector` + `ScenarioSystem.SendScenarioModules` hook (Q5 Hybrid — read path).** Per-player scenario projection for funds/science/rep/tech/contracts/strategies/facilities/kerbals. Tested by extending `MockClientTest` to assert a client receives an agency-specific `ScenarioModules` blob at handshake.
+10. **`AgencyContractRouter` (Q6 contracts — shared offered + per-agency Active/Completed/Declined).** Hybrid contract routing with the three Stage-5.17b commitments: (a) no Offered persistence per-agency, (b) per-contract exception isolation, (c) CC's `ContractPreLoader` ScenarioModule untouched. Tested by `ContractRouterTest` + a CC-installed soak run in 5.18e.
+11. **Server-side per-agency routing of `Share*` messages (write path).** Each of the 13 systems gets the `PerAgencyCareer` branch, applying mutations to sender's `AgencyState` and echoing only to the sender. Bracket every server-acknowledged delta with `Share*System.Singleton.StartIgnoringEvents/StopIgnoringEvents` per BUG-025 precedent.
+12. **Client `AgencySystem`.** Mirror registry. Receive state updates.
+13. **Client Harmony patches (Q5 Hybrid — write path).** ~35 sites across `Funding.Instance.AddFunds` → `R&D.AddScience` → `Reputation.AddReputation` → tech writers → facility writers → roster writers → contract Accept/Decline/Complete/Fail → strategy activate/deactivate → world-firsts. **Reads are NOT patched** — they hit the projector-populated singleton from step 9. One patch group per session, with the test plan verifying each.
+14. **Client UI.** `AgencyWindow`, `AgencyCreateWindow`, tracking-station overlay.
+15. **Admin commands.** `listagencies`, `setagency*`, `transferagency`, `deleteagency`.
+16. **CLAUDE.md update + acceptance run + CC soak.** Full Stage 5 acceptance criteria walkthrough; plus an explicit soak with Contract Configurator installed to validate the §2/§6 hybrid against the audit's residual risks.
+17. **Merge to `master`.** Squash or merge-commit per project convention.
 
-Estimated effort by CLAUDE.md: 2–4 months. Step 11 (Harmony patches) is the long pole — wide-but-shallow over ~83 reference sites for `Funding.Instance` alone, comparable counts for the other singletons.
+Estimated effort by CLAUDE.md: 2–4 months. Step 13 (Harmony patches) is no longer the long pole at ~35 sites (projection collapsed the read surface) — step 10 + 11 + the CC soak are now the highest-uncertainty work.
 
 ---
 
