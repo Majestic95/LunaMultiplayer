@@ -214,7 +214,13 @@ namespace LmpClient.Systems.VesselProtoSys
                             if (VesselLoader.LoadVessel(protoVessel, forceReload))
                             {
                                 LunaLog.Log($"[LMP]: Vessel {protoVessel.vesselID} loaded");
-                                VesselLoadEvent.onLmpVesselLoaded.Fire(protoVessel.vesselRef);
+                                //BUG-008 Phase A: defer the load event until PQS terrain has stabilised
+                                //and the vessel has been snapped onto the high-LOD surface. AlignAndThen
+                                //fires the callback synchronously when no realignment is required (most
+                                //loads) — only the cold-PQS case takes the coroutine path. See
+                                //docs/research/02-analysis/bug-008-pqs-spawn-altitude.md.
+                                var loadedVessel = protoVessel.vesselRef;
+                                PqsAlignmentRoutine.AlignAndThen(loadedVessel, () => VesselLoadEvent.onLmpVesselLoaded.Fire(loadedVessel));
                             }
                         }
                         else

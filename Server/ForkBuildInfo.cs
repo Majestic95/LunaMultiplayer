@@ -23,6 +23,7 @@ namespace Server
             "BUG-051b",    // Client steady-state retry while stuck-at-warp
             "BUG-005/006", // Cross-subspace lock keying + protocol bump
             "BUG-013",     // Reaction-wheel stateString locale-normalisation
+            "BUG-008-A",   // Client-side PQS-aware spawn-altitude re-alignment (Phase A)
         };
     }
 }
