@@ -88,13 +88,9 @@ Folded into [Phase-2 analysis for BUG-010](research/02-analysis/bug-010-disconne
 
 **Approach: ship in priority order, evaluate after each.** Highest leverage first; each item is independently shippable.
 
-### 4a. Pack-on-load + delayed unpack (highest leverage, ship first)
-- After `vesselProto.Load` returns inside `LmpClient/VesselUtilities/VesselLoader.cs:LoadVesselIntoGame`, call `vessel.GoOnRails()` immediately. Hold on-rails until BOTH `PqsAlignmentRoutine` reports stable AND at least one physics tick has elapsed with no pending flight-state update for that vessel.
-- Only `GoOffRails()` once stable, THEN fire `VesselLoadEvent.onLmpVesselLoaded`.
-- DMP-era trick. Collider explosion happens during the high-LOD terrain stream-in if parts have non-zero velocity or overlap unresolved geometry; pinning to rails freezes physics integration so the stream-in completes harmlessly.
-- Touch: `VesselLoader.cs` (call site after Load), `PqsAlignmentRoutine.cs` (extend to drive pack/unpack lifecycle, not just position).
-- Cheap, no wire change, no protocol bump. Visible side-effect: ~1s "vessel sits frozen post-spawn" — vastly preferable to detonation.
-- Active-vessel reload path must also be guarded (Phase A doc risk note item #3) — confirm in code that the active-vessel post-scene-transition reload still flows through `LoadVesselIntoGame`, OR add a parallel hook.
+### 4a. ~~Pack-on-load + delayed unpack~~ ✅ SHIPPED 2026-05-17 (pre-private-testing close)
+- Resolved by an extension of `PqsAlignmentRoutine.AlignAndThen`: surface vessels (LANDED/SPLASHED/PRELAUNCH) that arrived loaded (`vessel.packed == false`) on a PQS body now take a new `PackStabiliseAndAlignCoroutine` path — `GoOnRails()` on entry, PQS poll until stable (or the 5s cap), snap if `NeedsRealignment`, one `WaitForFixedUpdate`, then `GoOffRails()`. Active vessel never packed (would judder the camera). Pure decision math extracted as `PqsAlignmentRoutine.ShouldPackForLoad(situation, isActiveVessel, hasPqsController, currentlyPacked)` with 11 new `LmpClientTest` cases. Log marker `[fix:BUG-008-pack]`. Active-vessel reconnect case still uncovered — needs 4c or 4d.
+- **Soak status:** unit tests pass; in-KSP repro (cold PQS landed spawn) deferred to the next live-session run.
 
 ### 4b. Phase B — server-stored `terrainAltitude` in the proto
 - Add `lmpTerrainAltitude` field to the vessel ConfigNode (fork-local, `lmp*` prefix per the convention in CLAUDE.md "Stack Notes" — KSP silently ignores unknown top-level fields, so round-trip is safe).

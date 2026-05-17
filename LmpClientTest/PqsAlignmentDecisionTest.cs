@@ -171,5 +171,137 @@ namespace LmpClientTest
             Assert.IsTrue(PqsAlignmentRoutine.IsSaneAltitudeSample(PqsAlignmentRoutine.SanityMaxAbsAltitudeMeters));
             Assert.IsTrue(PqsAlignmentRoutine.IsSaneAltitudeSample(-PqsAlignmentRoutine.SanityMaxAbsAltitudeMeters));
         }
+
+        // ---------- IsSurfaceSituation (BUG-008 item 4a) ----------
+        // KSP's Vessel.Situations enum values, pinned: LANDED=1, SPLASHED=2,
+        // FLYING=8 (gap), PRELAUNCH=4, SUB_ORBITAL=16, ORBITING=32, ESCAPING=64,
+        // DOCKED=128. The three surface-state values used by the pack path are
+        // 1 / 2 / 4. Passing the int form of the enum keeps the helper KSP-DLL-free
+        // so this test project does not need to reference Assembly-CSharp.
+
+        [TestMethod]
+        public void IsSurfaceSituation_Landed_True()
+        {
+            Assert.IsTrue(PqsAlignmentRoutine.IsSurfaceSituation(1));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Splashed_True()
+        {
+            Assert.IsTrue(PqsAlignmentRoutine.IsSurfaceSituation(2));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Prelaunch_True()
+        {
+            Assert.IsTrue(PqsAlignmentRoutine.IsSurfaceSituation(4));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Flying_False()
+        {
+            Assert.IsFalse(PqsAlignmentRoutine.IsSurfaceSituation(8));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_SubOrbital_False()
+        {
+            Assert.IsFalse(PqsAlignmentRoutine.IsSurfaceSituation(16));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Orbiting_False()
+        {
+            Assert.IsFalse(PqsAlignmentRoutine.IsSurfaceSituation(32));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Escaping_False()
+        {
+            Assert.IsFalse(PqsAlignmentRoutine.IsSurfaceSituation(64));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Docked_False()
+        {
+            // DOCKED — host vessel may be physically on the ground but the situation flag
+            // is not LANDED/SPLASHED/PRELAUNCH, so the pack path doesn't fire. Out-of-scope
+            // for BUG-008 4a; if a surface-docked rover assembly ever exhibits a PQS-race
+            // in practice we'd revisit.
+            Assert.IsFalse(PqsAlignmentRoutine.IsSurfaceSituation(128));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Zero_False()
+        {
+            // Defensive: zero is not a defined Vessel.Situations value but represents
+            // "uninitialised" in some KSP code paths.
+            Assert.IsFalse(PqsAlignmentRoutine.IsSurfaceSituation(0));
+        }
+
+        [TestMethod]
+        public void IsSurfaceSituation_Negative_False()
+        {
+            // Defensive: a corrupted proto or signed/unsigned cast error could leak a
+            // negative value through (int)vessel.situation. The helper must not assert
+            // the value is positive — just return false.
+            Assert.IsFalse(PqsAlignmentRoutine.IsSurfaceSituation(-1));
+        }
+
+        // ---------- ShouldPackForLoad (BUG-008 item 4a) ----------
+        // One case per AND-chain guard plus the happy path, so a regression flipping the
+        // sign or dropping a clause is caught individually rather than masked by another
+        // clause coincidentally returning false.
+
+        [TestMethod]
+        public void ShouldPackForLoad_SurfaceRemoteLoadedWithPqs_True()
+        {
+            // The exact case the pack path is here to handle: a remote player's landed
+            // vessel arrived in our physics bubble (packed==false) on a PQS body.
+            Assert.IsTrue(PqsAlignmentRoutine.ShouldPackForLoad(
+                isSurfaceSituation: true, isActiveVessel: false,
+                hasPqsController: true, currentlyPacked: false));
+        }
+
+        [TestMethod]
+        public void ShouldPackForLoad_ActiveVessel_False()
+        {
+            // Active vessel never gets packed — would judder the camera. The snap-only
+            // path is the partial mitigation for the active-vessel reconnect case.
+            Assert.IsFalse(PqsAlignmentRoutine.ShouldPackForLoad(
+                isSurfaceSituation: true, isActiveVessel: true,
+                hasPqsController: true, currentlyPacked: false));
+        }
+
+        [TestMethod]
+        public void ShouldPackForLoad_NoPqsController_False()
+        {
+            // Body without PQS (Kerbol) cannot have the spawn-altitude race; pack would
+            // be a no-op wait.
+            Assert.IsFalse(PqsAlignmentRoutine.ShouldPackForLoad(
+                isSurfaceSituation: true, isActiveVessel: false,
+                hasPqsController: false, currentlyPacked: false));
+        }
+
+        [TestMethod]
+        public void ShouldPackForLoad_AlreadyPacked_False()
+        {
+            // Vessel arrived out of physics range; physics frozen, no collider race, no
+            // reason to burn a FixedUpdate. The snap path still fires on this branch when
+            // NeedsRealignment returns true.
+            Assert.IsFalse(PqsAlignmentRoutine.ShouldPackForLoad(
+                isSurfaceSituation: true, isActiveVessel: false,
+                hasPqsController: true, currentlyPacked: true));
+        }
+
+        [TestMethod]
+        public void ShouldPackForLoad_NonSurface_False()
+        {
+            // Orbital / flying / docked all fall through here — the call site passes
+            // false for isSurfaceSituation (typically computed via IsSurfaceSituation).
+            Assert.IsFalse(PqsAlignmentRoutine.ShouldPackForLoad(
+                isSurfaceSituation: false, isActiveVessel: false,
+                hasPqsController: true, currentlyPacked: false));
+        }
     }
 }

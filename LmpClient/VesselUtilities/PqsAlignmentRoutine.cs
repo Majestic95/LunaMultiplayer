@@ -14,16 +14,30 @@ namespace LmpClient.VesselUtilities
     /// the high-LOD mesh, collider resolution explodes parts, and polygons scramble.
     /// See docs/research/02-analysis/bug-008-pqs-spawn-altitude.md.
     ///
-    /// The fix waits for PQS to stabilise, snaps the vessel onto the high-LOD
-    /// surface, and only then fires LMP's <c>onLmpVesselLoaded</c> event so the
-    /// rest of the systems see the corrected pose. Per-load latency budget is
-    /// roughly one second on warm PQS, capped at <see cref="MaxPollSeconds"/>
-    /// for the cold-cache case.
+    /// Phase A has two pieces:
+    ///   * <b>Snap</b> — wait for PQS to stabilise, then snap the vessel onto the
+    ///     high-LOD surface. Always active. Driven by <see cref="NeedsRealignment"/>.
+    ///   * <b>Pack-on-load</b> (BUG-008 item 4a) — for surface vessels that arrived
+    ///     <i>loaded</i> (i.e. in physics range of the local camera, packed==false
+    ///     after <c>ProtoVessel.Load</c>) we additionally call
+    ///     <c>Vessel.GoOnRails()</c> on entry, run the poll regardless of whether
+    ///     the immediate sample agrees with stored altitude, yield one
+    ///     FixedUpdate after the snap, and then call <c>Vessel.GoOffRails()</c>.
+    ///     The PQS stream may not have caught up yet even when the first sample
+    ///     looks fine; physics frozen during the wait keeps the collider race from
+    ///     scrambling polygons. The active vessel is never packed (camera judder);
+    ///     already-packed vessels skip the pack path (no physics → no race).
+    ///     Driven by <see cref="ShouldPackForLoad"/>.
+    ///
+    /// Per-load latency budget is roughly one second on warm PQS, capped at
+    /// <see cref="MaxPollSeconds"/> for the cold-cache case. The pack path adds
+    /// one FixedUpdate (~20 ms) of artificial freeze.
     ///
     /// The decision math (does this vessel need re-alignment? is a PQS poll
-    /// sample stable?) is split out as pure static helpers so the regression
-    /// suite in <c>LmpClientTest</c> can exhaustively cover the edge cases
-    /// (NaN inputs, exact threshold, etc.) without standing up KSP.
+    /// sample stable? should this vessel be packed for the load wait?) is split
+    /// out as pure static helpers so the regression suite in <c>LmpClientTest</c>
+    /// can exhaustively cover the edge cases (NaN inputs, exact threshold, etc.)
+    /// without standing up KSP.
     /// </summary>
     public static class PqsAlignmentRoutine
     {
@@ -87,6 +101,66 @@ namespace LmpClient.VesselUtilities
             return Math.Abs(altitudeAboveSea) <= SanityMaxAbsAltitudeMeters;
         }
 
+        /// <summary>Pure: returns true when the freshly-loaded vessel should be packed
+        /// (<c>GoOnRails</c>) for the PQS-stabilise wait. The decision exists as a separate
+        /// helper from <see cref="NeedsRealignment"/> because the pack path triggers on
+        /// <i>where</i> the vessel arrived (in physics range, loaded), not on whether the
+        /// immediate PQS sample looks wrong; an immediately-correct sample can become
+        /// wrong half a second later when the high-LOD mesh streams in.
+        ///
+        /// <para>Skip conditions, in order:
+        /// <list type="bullet">
+        ///   <item><description><b>Active vessel</b> — packing would judder the camera. The
+        ///     existing snap-only path is the partial mitigation for the active-vessel
+        ///     reconnect case; full coverage is BUG-008 item 4c (phantom-force suppression)
+        ///     or 4d (hard landed-pin), not this slice.</description></item>
+        ///   <item><description><b>No PQS controller</b> — bodies without PQS (Kerbol, the
+        ///     sun) can't have the spawn-altitude race; pack would be a no-op wait.</description></item>
+        ///   <item><description><b>Already packed</b> — vessel arrived out of physics range
+        ///     (loaded packed by stock KSP). Physics frozen, no collider race, no need to
+        ///     burn a FixedUpdate. The snap path still fires on this branch via
+        ///     <see cref="NeedsRealignment"/>.</description></item>
+        ///   <item><description><b>Non-surface situation</b> — the race only manifests for
+        ///     <c>LANDED</c>/<c>SPLASHED</c>/<c>PRELAUNCH</c> vessels colliding with
+        ///     streamed-in terrain. Orbital vessels are unaffected. Compute the bool via
+        ///     <see cref="IsSurfaceSituation(int)"/>.</description></item>
+        /// </list>
+        /// </para>
+        ///
+        /// <para>Takes a pre-computed <paramref name="isSurfaceSituation"/> bool rather than
+        /// the <c>Vessel.Situations</c> enum so this helper stays KSP-DLL-free at compile
+        /// time. <see cref="IsSurfaceSituation(int)"/> is the matching helper to compute
+        /// the bool; both are independently testable in <c>LmpClientTest</c> without
+        /// pulling Assembly-CSharp into the test project.</para>
+        /// </summary>
+        public static bool ShouldPackForLoad(bool isSurfaceSituation, bool isActiveVessel,
+                                             bool hasPqsController, bool currentlyPacked)
+        {
+            if (isActiveVessel) return false;
+            if (!hasPqsController) return false;
+            if (currentlyPacked) return false;
+            return isSurfaceSituation;
+        }
+
+        /// <summary>Pure: returns true when the situation value (read off
+        /// <c>Vessel.Situations</c> at the call site) is one of the three surface states
+        /// the pack/snap path treats as "on the ground". Takes the int form of the enum so
+        /// the test project does not need to reference Assembly-CSharp.
+        ///
+        /// <para>The numeric values pinned here (<c>LANDED == 1</c>, <c>SPLASHED == 2</c>,
+        /// <c>PRELAUNCH == 4</c>) are part of KSP's on-disk vessel format: ConfigNode's
+        /// <c>sit = LANDED</c> serialises to/from the enum value and the int form is what
+        /// ends up in the persistent save. The mapping is therefore stable across the
+        /// targeting pack we build for. <c>Vessel.Situations</c> is not <c>[Flags]</c> —
+        /// each vessel holds exactly one situation value — so this is a value-set test,
+        /// not a bitmask test.</para>
+        /// </summary>
+        public static bool IsSurfaceSituation(int situationValue)
+        {
+            // LANDED = 1, SPLASHED = 2, PRELAUNCH = 4 in KSP 1.12.5's Vessel.Situations.
+            return situationValue == 1 || situationValue == 2 || situationValue == 4;
+        }
+
         /// <summary>
         /// Runtime entry. Inspects the freshly-loaded vessel, runs the PQS-alignment
         /// coroutine when needed, and invokes <paramref name="onAligned"/> exactly once
@@ -109,9 +183,40 @@ namespace LmpClient.VesselUtilities
 
             try
             {
-                if (!IsSurfaceSituation(vessel.situation) || vessel.mainBody == null || vessel.mainBody.pqsController == null)
+                if (!IsSurfaceSituation((int)vessel.situation) || vessel.mainBody == null || vessel.mainBody.pqsController == null)
                 {
                     onAligned?.Invoke();
+                    return;
+                }
+
+                // 4a pack path: surface vessel that arrived loaded (in physics range, packed==false)
+                // gets packed for the PQS wait, regardless of whether the immediate sample looks
+                // correct. The mesh may stream in mid-flight-tick AFTER an initially-agreeing
+                // sample and explode the collider before our existing snap path notices.
+                //
+                // EVA short-circuit: VesselLoader.cs:LoadVesselIntoGame already calls
+                // GoOnRails on EVAs before returning. We trust that pack and stay on the
+                // snap-only path here — packing again risks double-firing the EVA fsm
+                // (the documented NRE source on KerbalEVA.fsm when GoOnRails runs twice
+                // in quick succession). The snap path is the right home for EVA-side
+                // alignment work; the pack lifecycle is owned by VesselLoader.
+                //
+                // Active-vessel check uses BOTH FlightGlobals.ActiveVessel.id and
+                // vessel.isActiveVessel because LMP's reconnect path calls
+                // FlightGlobals.ForceSetActiveVessel inside VesselLoader.LoadVesselIntoGame
+                // and the two flags can briefly disagree while KSP propagates the change.
+                // Either-true is enough to skip pack.
+                if (vessel.isEVA)
+                {
+                    LunaLog.Log($"[fix:BUG-008-pack] vessel {vessel.id} is EVA on {vessel.mainBody.bodyName}; deferring to VesselLoader's existing GoOnRails. Continuing on snap-only path.");
+                }
+                var isActiveVessel = vessel.isActiveVessel
+                                     || (FlightGlobals.ActiveVessel != null && FlightGlobals.ActiveVessel.id == vessel.id);
+                if (!vessel.isEVA && ShouldPackForLoad(isSurfaceSituation: true, isActiveVessel, hasPqsController: true, currentlyPacked: vessel.packed))
+                {
+                    LunaLog.Log($"[fix:BUG-008-pack] vessel {vessel.id} arrived loaded on {vessel.mainBody.bodyName} " +
+                                $"({vessel.situation}); packing for PQS stabilise wait to prevent collider race.");
+                    MainSystem.Singleton.StartCoroutine(PackStabiliseAndAlignCoroutine(vessel, onAligned));
                     return;
                 }
 
@@ -150,13 +255,6 @@ namespace LmpClient.VesselUtilities
             }
         }
 
-        private static bool IsSurfaceSituation(Vessel.Situations situation)
-        {
-            return situation == Vessel.Situations.LANDED
-                || situation == Vessel.Situations.SPLASHED
-                || situation == Vessel.Situations.PRELAUNCH;
-        }
-
         /// <summary>
         /// KSP idiom for getting the high-LOD terrain altitude at a lat/lng: pull the unit
         /// radial outward from the body centre via <c>CelestialBody.GetRelSurfaceNVector</c>,
@@ -179,6 +277,161 @@ namespace LmpClient.VesselUtilities
             if (vessel == null) return false;
             if (VesselRemoveSystem.Singleton != null && VesselRemoveSystem.Singleton.VesselWillBeKilled(vesselId)) return false;
             return true;
+        }
+
+        /// <summary>
+        /// 4a pack-and-stabilise path. Packs the vessel on entry (caller already verified
+        /// <see cref="ShouldPackForLoad"/>), polls PQS until two consecutive samples agree
+        /// or the hard timeout fires, snaps if a delta crossed
+        /// <see cref="DefaultThresholdMeters"/>, yields one FixedUpdate to let KSP run its
+        /// <c>Vessel.UpdateCaches</c> with the new placement, and unpacks. Then fires the
+        /// load callback.
+        ///
+        /// <para>Unpack is conditional on <c>vessel.packed</c> still being true at exit:
+        /// stock KSP physics-range logic may have re-evaluated and packed/unpacked the
+        /// vessel underneath us mid-wait (e.g. the player walks away in EVA). Calling
+        /// <c>GoOffRails</c> in that state would force-load a vessel KSP intentionally
+        /// kept packed.</para>
+        /// </summary>
+        private static IEnumerator PackStabiliseAndAlignCoroutine(Vessel vessel, Action onAligned)
+        {
+            var vesselId = vessel.id;
+            var weCalledPack = false;
+            try
+            {
+                vessel.GoOnRails();
+                weCalledPack = true;
+            }
+            catch (Exception ex)
+            {
+                // If KSP refuses to pack (unusual but not impossible — IVA-occupied, mid-staging,
+                // etc.) fall through to the existing snap-only coroutine rather than block the
+                // load. The snap path is still a strict improvement over the legacy no-PQS-check
+                // behaviour. The recovery StartCoroutine is itself wrapped — if MainSystem is
+                // null or the MonoBehaviour is destroyed mid-scene-transition we still owe the
+                // caller an onAligned fire so subscribers don't hang.
+                LunaLog.LogError($"[fix:BUG-008-pack] GoOnRails threw on vessel {vesselId}; falling back to snap-only path. Details: {ex}");
+                try
+                {
+                    MainSystem.Singleton.StartCoroutine(StabiliseAndAlignCoroutine(vessel, onAligned));
+                }
+                catch (Exception startEx)
+                {
+                    LunaLog.LogError($"[fix:BUG-008-pack] Fallback StartCoroutine also threw on vessel {vesselId}; firing onAligned without alignment. Details: {startEx}");
+                    onAligned?.Invoke();
+                }
+                yield break;
+            }
+
+            var startTime = Time.realtimeSinceStartup;
+            var previousSample = double.NaN;
+            var snapped = false;
+
+            while (true)
+            {
+                if (!IsAlive(vessel, vesselId))
+                {
+                    // Don't leave the vessel orphaned-packed if VesselRemoveSystem only
+                    // flagged-but-didn't-destroy it (kill can be canceled or deferred).
+                    // SafeGoOffRailsIfWePacked re-checks IsAlive internally and try/catches
+                    // the GoOffRails call, so it is safe to invoke on a mid-destruction
+                    // vessel too. Load event deliberately NOT fired — subscribers like
+                    // KerbalEvents.OnVesselLoaded would dereference a destroyed object.
+                    LunaLog.Log($"[fix:BUG-008-pack] vessel {vesselId} removed during pack-wait; unpacking and abandoning without firing load event");
+                    SafeGoOffRailsIfWePacked(vessel, vesselId, weCalledPack);
+                    yield break;
+                }
+
+                double currentSample;
+                try
+                {
+                    currentSample = QueryPqsSurfaceHeight(vessel.mainBody, vessel.mainBody.pqsController, vessel.latitude, vessel.longitude);
+                }
+                catch (Exception ex)
+                {
+                    LunaLog.LogError($"[fix:BUG-008-pack] PQS poll threw on vessel {vesselId}; firing load event without alignment. Details: {ex}");
+                    SafeGoOffRailsIfWePacked(vessel, vesselId, weCalledPack);
+                    onAligned?.Invoke();
+                    yield break;
+                }
+
+                if (!IsSaneAltitudeSample(currentSample))
+                {
+                    LunaLog.LogError($"[fix:BUG-008-pack] PQS sample for vessel {vesselId} outside sanity envelope ({currentSample} m); aborting alignment");
+                    SafeGoOffRailsIfWePacked(vessel, vesselId, weCalledPack);
+                    onAligned?.Invoke();
+                    yield break;
+                }
+
+                var stable = IsStable(previousSample, currentSample, DefaultStabilityDeltaMeters);
+                var timedOut = Time.realtimeSinceStartup - startTime > MaxPollSeconds;
+
+                if (stable || timedOut)
+                {
+                    if (!IsAlive(vessel, vesselId))
+                    {
+                        LunaLog.Log($"[fix:BUG-008-pack] vessel {vesselId} removed just before snap; unpacking and abandoning");
+                        SafeGoOffRailsIfWePacked(vessel, vesselId, weCalledPack);
+                        yield break;
+                    }
+
+                    var stored = vessel.terrainAltitude;
+                    if (NeedsRealignment(stored, currentSample, DefaultThresholdMeters))
+                    {
+                        if (timedOut && !stable)
+                            LunaLog.Log($"[fix:BUG-008-pack] PQS alignment timed out after {MaxPollSeconds}s for vessel {vesselId}; applying best-effort snap (stored={stored:F2} m, pqs={currentSample:F2} m)");
+                        else
+                            LunaLog.Log($"[fix:BUG-008-pack] PQS stabilised for vessel {vesselId} at {currentSample:F2} m; snapping (stored={stored:F2} m)");
+                        TrySnapToSurface(vessel, currentSample);
+                        snapped = true;
+                    }
+                    else
+                    {
+                        LunaLog.Log($"[fix:BUG-008-pack] PQS stabilised for vessel {vesselId} at {currentSample:F2} m, within threshold of stored {stored:F2} m; no snap required");
+                    }
+                    break;
+                }
+
+                previousSample = currentSample;
+                yield return null;
+            }
+
+            // One physics tick post-pack/snap so KSP's UpdateCaches sees the corrected pose
+            // before any inbound flight-state update or unpack-time physics reseed runs.
+            yield return new WaitForFixedUpdate();
+
+            if (!IsAlive(vessel, vesselId))
+            {
+                LunaLog.Log($"[fix:BUG-008-pack] vessel {vesselId} removed during post-snap settle; unpacking and abandoning without firing load event");
+                SafeGoOffRailsIfWePacked(vessel, vesselId, weCalledPack);
+                yield break;
+            }
+
+            SafeGoOffRailsIfWePacked(vessel, vesselId, weCalledPack);
+
+            if (snapped)
+                LunaLog.Log($"[fix:BUG-008-pack] vessel {vesselId} unpacked after PQS alignment");
+
+            onAligned?.Invoke();
+        }
+
+        private static void SafeGoOffRailsIfWePacked(Vessel vessel, Guid vesselId, bool weCalledPack)
+        {
+            if (!weCalledPack) return;
+            if (!IsAlive(vessel, vesselId)) return;
+            try
+            {
+                // KSP will re-evaluate pack state on the next physics-range tick anyway, so
+                // it's fine if the vessel ends up packed again (player walked away during
+                // the wait). The point of the explicit GoOffRails is to undo our
+                // intervention so the vessel resumes physics on the stabilised terrain
+                // when it should.
+                vessel.GoOffRails();
+            }
+            catch (Exception ex)
+            {
+                LunaLog.LogError($"[fix:BUG-008-pack] GoOffRails threw on vessel {vesselId}; vessel left packed (KSP will unpack on next physics-range check). Details: {ex}");
+            }
         }
 
         private static IEnumerator StabiliseAndAlignCoroutine(Vessel vessel, Action onAligned)
