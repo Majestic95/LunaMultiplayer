@@ -76,7 +76,7 @@ Step labels here map to spec §12 numbered steps; column "§12" gives the cross-
 | 5.12 | — | Branch + Q&A sign-off + audit | ✅ | Session 10 (2026-05-17). Branch from `6515e006`. |
 | 5.13 | — | PlagueNZ audit doc | ✅ | Session 10. [`05a-plaguenz-audit.md`](05a-plaguenz-audit.md). |
 | 5.13b | — | Pre-5.14 design checks resolved + spec amendments | ✅ | Session 11 (2026-05-17). All three audit checks signed off; spec §2/§3/§5/§6/§10/§12 amended. |
-| 5.14a | 1 | `PerAgencyCareer` setting (default false) + protocol bump 0.30.0 → 0.31.0 | ⬜ | Behaviour-preserving when false — gate this with regression run of existing ServerTest suite. Mirror the 0.30.0 break pattern (no cross-compat row in `LmpCommon/LmpVersioning.cs`). |
+| 5.14a | 1 | `PerAgencyCareer` setting (default false) + protocol bump 0.30.0 → 0.31.0 | ✅ | Session 12 (2026-05-17, commit `49583ec5`). Three edits: AssemblyInfo 0.30.0→0.31.0, `PerAgencyCareer` bool added to `GameplaySettingsDefinition` + explicit `false` in all four Set*() presets matching the file's exhaustive-preset convention, `"per-agency-career"` appended to `ForkBuildInfo.ActiveFixes`. Two-pass review-agent gate; pass-2 [CONSIDER] deferred — see "Deferred items" below. Build + ServerTest (87/87) + LmpCommonTest (6/6) + MockClientTest (12/12) green. |
 | 5.14c | 2 | `FileHandler.WriteAtomic` + `Server/System/Agency/AgencyState.cs` + ConfigNode round-trip | ⬜ | Test: `FileHandlerAtomicWriteTest` + `AgencyStateTest`. Pure data; no wire, no UI. Atomic .tmp+move+.bak per Q7 sign-off. |
 | 5.15a | 3 | `Server/System/Agency/AgencySystem.cs` lifecycle | ⬜ | Register/load/save/cleanup. Hook into `ClientConnectionHandler`. Test: `AgencySystemTest`. |
 | 5.15b | 4 | Wire protocol — `LmpCommon/Message/Data/Agency/*MsgData` | ⬜ | Definitions only; no handlers. Test: `SerializationTests` round-trip. |
@@ -93,6 +93,14 @@ Step labels here map to spec §12 numbered steps; column "§12" gives the cross-
 | 5.18d | 15 | Admin commands — `listagencies`, `setagency*`, `transferagency`, `deleteagency`, `setagencyfunds`, etc. | ⬜ | |
 | 5.18e | 16 | CC-installed soak + continuous PlagueNZ comparison pass | ⬜ | Re-run audit after major changes. CC soak validates §2 contract hybrid + §6 write-path Harmony against the audit's residual risks. |
 | 5.18f | 16/17 | Final CLAUDE.md update + Stage 5 acceptance run + merge to `master` | ⬜ | Per spec §11. Then dual-mode regression. |
+
+---
+
+## Deferred items (surfaced during execution, NOT to action now)
+
+| Item | Surfaced | Why deferred | Where to action |
+|---|---|---|---|
+| `SettingsHandler.HasDifferencesAgainstGivenSetting` flips the operator's `GameDifficulty` to `Custom` on first boot when `PerAgencyCareer=true` is set with any non-Custom preset. | Stage 5.14a session 12, pass-2 review-agent | The validator reflects over every public property and compares stored `.ToString()` vs. preset-default `.ToString()`; adding `PerAgencyCareer = false;` to all four presets does NOT silence this (preset-default is false either way). `PerAgencyCareer=true` is a no-op today (per-agency logic does not exist yet), so the one-time flip-to-Custom is harmless and informative. | The Stage 5 step that first makes `PerAgencyCareer=true` shippable (likely 5.18 area). Options: (a) add a `[NotDifficultyControlled]`-style attribute and skip in `HasDifferencesAgainstGivenSetting`; (b) move `PerAgencyCareer` out of `GameplaySettingsDefinition` into a dedicated `AgencySettingsDefinition`; (c) accept the flip-to-Custom as documented behaviour. Decide deliberately at that point, not pre-emptively. |
 
 ---
 
