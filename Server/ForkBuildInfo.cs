@@ -29,6 +29,7 @@ namespace Server
             "vessel-sync-log",    // Client-side append-only diagnostic trace at Logs/LMP/VesselSyncLog.txt + Reason wire field on VesselProtoMsgData (ported from upstream Release/0_29_2)
             "BUG-010",     // Disconnect handshake Part A: server broadcasts VesselPinned for each lock-owned vessel before fanning out lock releases; remaining clients hold the vessel immortal until the original pilot reconnects or another player takes the helm
             "BUG-010-B",   // Disconnect handshake Part B: client flushes a fresh proto for every locally-owned vessel before NetworkConnection.Disconnect, so server's on-disk snapshot reflects the actual moment-of-disconnect pose (matters for dock-then-logoff -> undock-child-pose). Clean disconnects only; ungraceful drops rely on Part A alone.
+            "BUG-033",     // ScenarioStoreSystem.BackupScenarios now serializes each scenario under the matching per-scenario writer lock (ScenarioDataUpdater.GetSemaphore), so ConfigNode.ToString() no longer races AddNode/RemoveNode/ReplaceNode on the same instance. Was a critical-but-rare server-crash class: backup task's collection-modified exception killed the worker.
         };
     }
 }

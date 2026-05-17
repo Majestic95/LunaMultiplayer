@@ -16,6 +16,20 @@ namespace Server.System.Scenario
         /// </summary>
         private static readonly ConcurrentDictionary<string, object> Semaphore = new ConcurrentDictionary<string, object>();
 
+        /// <summary>
+        /// [fix:BUG-033] Returns the per-scenario lock object used by every Write*DataToFile
+        /// writer in this folder. Exposed to <see cref="ScenarioStoreSystem.BackupScenarios"/>
+        /// so the backup-side serialization can acquire the same lock writers compete for and
+        /// avoid racing <see cref="LunaConfigNode.CfgNode.ConfigNode.ToString"/> against an
+        /// in-flight AddNode/RemoveNode/ReplaceNode on the same node instance.
+        ///
+        /// Re-entrant safe — C# lock acquisitions on the same object are per-thread; the
+        /// existing <see cref="ScenarioPartPurchaseDataUpdater"/> path that calls into
+        /// BackupScenarios from inside its own per-scenario lock works unchanged.
+        /// </summary>
+        internal static object GetSemaphore(string scenarioName) =>
+            Semaphore.GetOrAdd(scenarioName, _ => new object());
+
         #endregion
 
         /// <summary>

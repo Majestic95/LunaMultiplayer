@@ -78,17 +78,43 @@ namespace Server.System
         }
 
         /// <summary>
-        /// Actually performs the backup of the scenarios to file
+        /// Actually performs the backup of the scenarios to file.
+        ///
+        /// [fix:BUG-033] Each scenario is serialized under its matching writer lock
+        /// (<see cref="ScenarioDataUpdater.GetSemaphore"/>) so <see cref="LunaConfigNode.CfgNode.ConfigNode.ToString"/>
+        /// does not race with an in-flight AddNode/RemoveNode/ReplaceNode on the same
+        /// <see cref="LunaConfigNode.CfgNode.ConfigNode"/> instance. The disk write is
+        /// performed OUTSIDE the lock so I/O latency does not extend the writer-blocking
+        /// window. The outer <see cref="BackupLock"/> is deliberately NOT taken here —
+        /// holding both <see cref="BackupLock"/> and a per-scenario semaphore would
+        /// deadlock against the <see cref="ScenarioPartPurchaseDataUpdater"/> path that
+        /// already calls <see cref="BackupScenarios"/> from inside its own semaphore
+        /// (classic AB-BA cycle). <see cref="BackupLock"/> remains on the startup-only
+        /// load/migration methods because they have no overlap with this code path.
         /// </summary>
         public static void BackupScenarios()
         {
-            lock (BackupLock)
+            var scenariosInXml = CurrentScenarios.ToArray();
+            foreach (var scenario in scenariosInXml)
             {
-                var scenariosInXml = CurrentScenarios.ToArray();
-                foreach (var scenario in scenariosInXml)
-                {
-                    FileHandler.WriteToFile(Path.Combine(ScenarioSystem.ScenariosPath, $"{scenario.Key}{ScenarioSystem.ScenarioFileFormat}"), scenario.Value.ToString());
-                }
+                var serialized = SerializeUnderWriterLock(scenario.Key, scenario.Value);
+                FileHandler.WriteToFile(
+                    Path.Combine(ScenarioSystem.ScenariosPath, $"{scenario.Key}{ScenarioSystem.ScenarioFileFormat}"),
+                    serialized);
+            }
+        }
+
+        /// <summary>
+        /// [fix:BUG-033] Serialize one scenario ConfigNode for backup under the same per-scenario
+        /// lock used by <see cref="Scenario.ScenarioDataUpdater"/> writers. Extracted from
+        /// <see cref="BackupScenarios"/> so the concurrency-regression test in ServerTest can
+        /// exercise the lock contract without going through the disk-writing call path.
+        /// </summary>
+        internal static string SerializeUnderWriterLock(string scenarioName, ConfigNode scenario)
+        {
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore(scenarioName))
+            {
+                return scenario.ToString();
             }
         }
     }
