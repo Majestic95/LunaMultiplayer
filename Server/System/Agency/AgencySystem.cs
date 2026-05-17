@@ -38,6 +38,17 @@ namespace Server.System.Agency
         /// <see cref="Agencies"/>. Player renames are admin-driven (Stage 5.18d
         /// <c>transferagency</c> command); until then the OwningPlayerName field on
         /// AgencyState is treated as stable.
+        ///
+        /// **Mutation ordering rule (Stage 5.18d caller contract).** Any future writer that
+        /// reassigns a player → agency mapping (transferagency, admin overrides) MUST:
+        ///   1. acquire <see cref="PlayerNameLocks"/> for the moving player name,
+        ///   2. update <see cref="Agencies"/> entries (per-agency lock for each side),
+        ///   3. persist via <see cref="SaveAgency"/>,
+        ///   4. ONLY THEN flip the <see cref="AgencyByPlayerName"/> entry.
+        /// The per-vessel proto path in <see cref="Server.Message.VesselMsgReader.HandleVesselProto"/>
+        /// snapshots this index on the receive thread — a torn read where the index points
+        /// at an agency whose state hasn't been persisted yet would stamp a vessel with an
+        /// id that fails the next disk round-trip.
         /// </summary>
         public static ConcurrentDictionary<string, Guid> AgencyByPlayerName { get; } =
             new ConcurrentDictionary<string, Guid>(StringComparer.Ordinal);

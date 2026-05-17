@@ -31,5 +31,15 @@ namespace Server.System
                 ModControl = new ModControlStructure();
             }
         }
+
+        /// <summary>
+        /// Test-only helper. Returns the ModControl reference to its post-boot uninitialised
+        /// state (null). MockClientTest disables <c>GeneralSettings.ModControl</c> in the
+        /// harness, but a test that accidentally flips it back on would silently filter
+        /// against whatever stale allowlist a prior test loaded. This reset forces a
+        /// deterministic NRE in that case so the misconfiguration surfaces immediately.
+        /// Never call from production code.
+        /// </summary>
+        internal static void Reset() => ModControl = null;
     }
 }

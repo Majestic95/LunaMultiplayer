@@ -181,6 +181,18 @@ namespace MockClientTest.Harness
             // Handshake/State messages it doesn't expect).
             AgencySystem.Reset();
             GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            // [Stage 5.16 round-2 review] Drop the locks Bug010PinnedBroadcastTest plants
+            // via LockSystem.AcquireLock(force:true). Without this, prior-test locks linger
+            // in LockStore and a follow-on disconnect can fire VesselPinned broadcasts that
+            // the new test doesn't expect.
+            LockSystem.Reset();
+            // Drop the kill-list. HandleVesselRemove + HandleVesselCouple add to it; once a
+            // vessel id is here, HandleVesselProto silently early-returns on subsequent
+            // arrivals for that id. Latent flake source for tests that reuse vesselIds.
+            VesselContext.RemovedVessels.Clear();
+            // Force a deterministic NRE if a test accidentally flips ModControl back on —
+            // see the disable-ModControl rationale on Start above.
+            ModFileSystem.Reset();
         }
 
         private static int FindFreeUdpPort()

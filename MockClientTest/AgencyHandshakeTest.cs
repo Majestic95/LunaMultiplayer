@@ -9,6 +9,7 @@ using Server.Settings.Structures;
 using Server.System;
 using Server.System.Agency;
 using System;
+using System.IO;
 
 namespace MockClientTest
 {
@@ -101,6 +102,19 @@ namespace MockClientTest
                 Assert.AreEqual(playerA, bHandshake.OtherAgencies[0].OwningPlayerName);
                 Assert.AreEqual($"{playerA} Space Agency", bHandshake.OtherAgencies[0].DisplayName,
                     "Public summary should expose the default display name.");
+
+                // [Privacy rule, spec §10 Q1 PrivateAgencyResources=true]. Player B's
+                // inbox should contain exactly ONE AgencyStateMsgData (B's own). Player A's
+                // funds/science/reputation must never leak through this channel. Pull B's own
+                // State first, then assert no second one is sitting in the inbox.
+                var bState = clientB.WaitForReply<AgencyStateMsgData>(TimeSpan.FromSeconds(5));
+                Assert.IsNotNull(bState, "Player B did not receive their own AgencyStateMsgData.");
+                Assert.AreEqual(bHandshake.AssignedAgencyId, bState.AgencyId,
+                    "Player B's AgencyStateMsgData carried someone else's id.");
+                var strayForB = clientB.WaitForReply<AgencyStateMsgData>(TimeSpan.FromMilliseconds(800));
+                Assert.IsNull(strayForB,
+                    $"Player B received a second AgencyStateMsgData (likely player A's — privacy rule violated). " +
+                    $"AgencyId on the stray = {strayForB?.AgencyId:N}, OwningPlayerName = '{strayForB?.OwningPlayerName}'.");
             }
         }
 
@@ -142,12 +156,17 @@ namespace MockClientTest
 
                 // Persistence assertion — read the canonical Universe/Agencies/{id}.txt
                 // file the server's SaveAgency wrote and confirm the rename round-trips
-                // through ConfigNode serialization.
-                var persistedState = AgencySystem.LoadAgency(reply.AgencyId);
-                Assert.IsNotNull(persistedState,
-                    "AgencySystem.LoadAgency could not retrieve the just-renamed agency from disk.");
+                // through ConfigNode serialization. Read disk DIRECTLY rather than via
+                // AgencySystem.LoadAgency — that path is registry-first and would serve
+                // the in-memory object even if SaveAgency never wrote (round-2 review).
+                var diskPath = Path.Combine(ServerContext.UniverseDirectory, "Agencies", reply.AgencyId.ToString("N") + ".txt");
+                Assert.IsTrue(File.Exists(diskPath),
+                    $"Universe/Agencies/{reply.AgencyId:N}.txt was not created — SaveAgency did not run.");
+                var persistedState = AgencyState.Parse(File.ReadAllText(diskPath));
                 Assert.AreEqual(newDisplayName, persistedState.DisplayName,
-                    "On-disk DisplayName did not match the CreateRequest payload — SaveAgency may not have run.");
+                    "On-disk DisplayName did not match the CreateRequest payload — SaveAgency wrote but with stale content.");
+                Assert.AreEqual(reply.AgencyId, persistedState.AgencyId,
+                    "On-disk AgencyId did not match the assigned id.");
             }
         }
 
@@ -186,9 +205,15 @@ namespace MockClientTest
                 Assert.IsNull(strayState,
                     "Server emitted a State message after rejecting a CreateRequest.");
 
-                var stored = AgencySystem.LoadAgency(initialHandshake.AssignedAgencyId);
-                Assert.IsNotNull(stored);
-                Assert.AreEqual($"{playerName} Space Agency", stored.DisplayName,
+                // Read disk directly (not via AgencySystem.LoadAgency which is registry-first).
+                // The auto-registered agency was persisted at registration time; an empty-name
+                // CreateRequest must NOT have triggered a second SaveAgency with the rejected
+                // value.
+                var diskPath = Path.Combine(ServerContext.UniverseDirectory, "Agencies", initialHandshake.AssignedAgencyId.ToString("N") + ".txt");
+                Assert.IsTrue(File.Exists(diskPath),
+                    "Auto-registered agency file is missing — RegisterAgency did not persist.");
+                var persisted = AgencyState.Parse(File.ReadAllText(diskPath));
+                Assert.AreEqual($"{playerName} Space Agency", persisted.DisplayName,
                     "Auto-registered DisplayName must not change when CreateRequest is rejected.");
             }
         }

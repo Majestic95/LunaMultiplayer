@@ -11,6 +11,17 @@ namespace Server.System
         private static readonly LockStore LockStore = new LockStore();
         public static readonly LockQuery LockQuery = new LockQuery(LockStore);
 
+        /// <summary>
+        /// Test-only helper. Drops every lock so successive tests don't carry state across
+        /// (BugN tests that plant locks via <see cref="AcquireLock"/> with <c>force:true</c>
+        /// directly into the store would otherwise leak into the next test's connection
+        /// flow and trigger spurious <c>VesselPinned</c> broadcasts on disconnect).
+        /// Visible to <c>ServerTest</c> and <c>MockClientTest</c> via
+        /// <see cref="System.Runtime.CompilerServices.InternalsVisibleToAttribute"/> on the
+        /// Server assembly. Never call from production code.
+        /// </summary>
+        internal static void Reset() => LockStore.ClearAllLocks();
+
         public static bool AcquireLock(LockDefinition lockDef, bool force, out bool repeatedAcquire, int requesterSubspace = 0)
         {
             repeatedAcquire = false;

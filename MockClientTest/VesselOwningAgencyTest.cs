@@ -109,6 +109,43 @@ namespace MockClientTest
         }
 
         [TestMethod]
+        public void WireSuppliedOwningAgency_IsIgnored_WhenSenderHasOwnAgency()
+        {
+            // Adversarial spoof case: gate=on, sender A is in agency Aa, but A's proto bytes
+            // claim ownership by spoofedAgency != Aa. Server is authoritative: Aa's id (from
+            // AgencySystem.AgencyByPlayerName) must land on the vessel, NOT the wire-supplied
+            // spoofedAgency. Exercises the `senderOwningAgencyId != Guid.Empty` branch with
+            // adversarial wire content (vs. the gate-off scrub path which exercises the
+            // fall-through scrub).
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+
+            const string playerName = "h-016b-spoo2";
+            SeedSubspace(1, time: 100d);
+
+            var spoofedAgency = Guid.NewGuid();
+
+            using (var client = new MockNetClient())
+            {
+                Assert.IsTrue(client.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
+                var realAgency = HandshakeAndGetAgencyId(client, playerName);
+                Assert.AreNotEqual(realAgency, spoofedAgency, "Spoofed Guid happened to collide with the assigned agency — rerun.");
+                SetClientSubspace(playerName, 1);
+
+                var vesselId = Guid.NewGuid();
+                var spoofedVesselText = InjectOwningAgency(SampleVesselText.Value, spoofedAgency);
+                SendProto(client, vesselId, spoofedVesselText);
+
+                var stored = WaitForVesselAuthStamp(vesselId, expectedAuthSubspace: 1,
+                    TimeSpan.FromSeconds(3));
+                Assert.IsNotNull(stored, "Vessel was never stored.");
+                Assert.AreEqual(realAgency, stored.OwningAgencyId,
+                    "Server must overwrite the wire-supplied lmpOwningAgency with the sender's actual agency id.");
+                Assert.AreNotEqual(spoofedAgency, stored.OwningAgencyId,
+                    "Spoofed agency id leaked through the ingest path.");
+            }
+        }
+
+        [TestMethod]
         public void WireSuppliedOwningAgency_IsScrubbed_WhenSenderHasNone()
         {
             // Spoof defense: a client that ships an lmpOwningAgency field in its proto bytes
@@ -177,6 +214,12 @@ namespace MockClientTest
 
         private static Guid HandshakeAndGetAgencyId(MockNetClient client, string playerName)
         {
+            // Helper precondition — the State message only ships when the gate is on.
+            // Without this assert, a misuse with gate=off would silently time out 5s
+            // waiting for a message the server will never send.
+            Assert.IsTrue(GameplaySettings.SettingsStore.PerAgencyCareer,
+                "HandshakeAndGetAgencyId requires PerAgencyCareer=true — set it before calling.");
+
             HandshakeNoAgency(client, playerName);
 
             // PerAgencyCareer=true path: handshake reply is followed by AgencyHandshake +
