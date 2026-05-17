@@ -188,6 +188,8 @@
     <Compile Include="Harmony\Part_CheckPartPressure.cs" />
     <Compile Include="Harmony\Part_CheckPartTemp.cs" />
     <Compile Include="Harmony\Part_Couple.cs" />
+    <Compile Include="Harmony\Part_RegisterCrew.cs" />
+    <Compile Include="Harmony\KnowledgeBase_GetVesselCrewByAvailablePart.cs" />
     <Compile Include="Harmony\Part_Decouple.cs" />
     <Compile Include="Harmony\Part_Die.cs" />
     <Compile Include="Harmony\Part_Undock.cs" />

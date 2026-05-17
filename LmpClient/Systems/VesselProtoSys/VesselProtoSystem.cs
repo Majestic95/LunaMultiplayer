@@ -2,6 +2,7 @@
 using LmpClient.Diagnostics;
 using LmpClient.Events;
 using LmpClient.Extensions;
+using LmpClient.Systems.KerbalSys;
 using LmpClient.Systems.Lock;
 using LmpClient.Systems.SettingsSys;
 using LmpClient.Systems.TimeSync;
@@ -233,6 +234,28 @@ namespace LmpClient.Systems.VesselProtoSys
             {
                 var protoSwapEligible = IsProtoSwapEligibleScene(HighLogic.LoadedScene);
                 var expensiveReloadsRemaining = MaxExpensiveReloadsPerTick;
+
+                // [fix:BUG-023] Drain any KerbalProto messages queued since the last
+                // KerbalSystem.LoadKerbals tick BEFORE running vesselProto.Load(...) on any vessel
+                // this tick. KerbalSystem.LoadKerbals runs on its own ~1s routine and consumes
+                // KerbalsToProcess only during that tick; CheckVesselsToLoad runs on a faster
+                // routine, so on a busy session (or during the burst that follows initial sync,
+                // when KerbalProto messages can still be in flight as VesselProto messages start
+                // arriving) we can land here with named-but-unmerged kerbals sitting in
+                // KerbalsToProcess. Stock KSP's ProtoPartSnapshot ConfigNode ctor resolves
+                // "crew = NAME" against HighLogic.CurrentGame.CrewRoster as it stands right now,
+                // so any kerbal that's queued-but-not-merged still produces a null entry in
+                // protoModuleCrew (which VesselLoader.ScrubInvalidProtoCrew cleans up, but at
+                // the cost of losing the crew assignment for this load). Draining synchronously
+                // here closes the receiving-side timing gap; the load-time scrub is the
+                // safety net for the cases this drain cannot cover (kerbal arrives after the
+                // VesselProto tick we're currently in). Cheap on the steady state — the queue
+                // is normally empty, this is one IsEmpty check.
+                // Ported from upstream Release/0_29_2 commit 138c2b3e (Drew Banyai).
+                if (KerbalSystem.Singleton != null && !KerbalSystem.Singleton.KerbalsToProcess.IsEmpty)
+                {
+                    KerbalSystem.Singleton.LoadKerbalsIntoGame();
+                }
 
                 foreach (var keyVal in VesselProtos)
                 {
