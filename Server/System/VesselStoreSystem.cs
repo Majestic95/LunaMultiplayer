@@ -28,6 +28,9 @@ namespace Server.System
         public static void RemoveVessel(Guid vesselId)
         {
             CurrentVessels.TryRemove(vesselId, out _);
+            //Retro-review S5: drop the per-vessel object held by VesselDataUpdater so the
+            //Semaphore dictionary doesn't grow without bound across the server's lifetime.
+            Vessel.VesselDataUpdater.ForgetVessel(vesselId);
 
             _ = Task.Run(() =>
             {

@@ -14,6 +14,9 @@ namespace Server.Web.Structures
 
         public string ProtocolVersion { get; } = LmpVersioning.CurrentVersion.ToString();
 
-        public string[] ActiveFixes { get; } = ForkBuildInfo.ActiveFixes;
+        // Defensive copy — retro-review M2. ForkBuildInfo.ActiveFixes is the single source
+        // of truth and must not be aliased through a JSON payload property where a serializer
+        // or test could write back into the registry.
+        public string[] ActiveFixes { get; } = (string[])ForkBuildInfo.ActiveFixes.Clone();
     }
 }

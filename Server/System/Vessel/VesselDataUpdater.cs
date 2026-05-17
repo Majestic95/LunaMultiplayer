@@ -48,42 +48,64 @@ namespace Server.System.Vessel
         {
             _ = Task.Run(() =>
             {
-                var vessel = new Classes.Vessel(vesselDataInConfigNodeFormat);
-                if (GeneralSettings.SettingsStore.ModControl)
+                // Retro-review S6: the fire-and-forget Task.Run body had no top-level try/catch,
+                // so a parse failure or sanitiser fault would surface only via
+                // TaskScheduler.UnobservedTaskException at GC. Wrap so failures show up in the log.
+                try
                 {
-                    var vesselParts = vessel.Parts.GetAllValues().Select(p => p.Fields.GetSingle("name").Value);
-                    var bannedParts = vesselParts.Except(ModFileSystem.ModControl.AllowedParts);
-                    if (bannedParts.Any())
+                    var vessel = new Classes.Vessel(vesselDataInConfigNodeFormat);
+                    if (GeneralSettings.SettingsStore.ModControl)
                     {
-                        LunaLog.Warning($"Received a vessel with BANNED parts! {vesselId}");
-                        return;
+                        var vesselParts = vessel.Parts.GetAllValues().Select(p => p.Fields.GetSingle("name").Value);
+                        var bannedParts = vesselParts.Except(ModFileSystem.ModControl.AllowedParts);
+                        if (bannedParts.Any())
+                        {
+                            LunaLog.Warning($"Received a vessel with BANNED parts! {vesselId}");
+                            return;
+                        }
+                    }
+                    //BUG-013: rewrite localised stateString fields back to canonical English BEFORE the
+                    //vessel lands in CurrentVessels, so neither the universe-on-disk copy nor any
+                    //downstream relay carries the bad payload.
+                    VesselSanitizer.Sanitize(vessel, vesselId.ToString());
+                    //BUG-005/006: stamp the contributing client's subspace as the new authority.
+                    //Sentinels (subspaceId <= 0) are not stamped — they leave existing authority in place
+                    //so a warping or unidentified client cannot blank a vessel's authority.
+                    if (clientSubspaceId > 0)
+                    {
+                        vessel.AuthoritativeSubspaceId = clientSubspaceId;
+                    }
+                    lock (Semaphore.GetOrAdd(vesselId, new object()))
+                    {
+                        // Retro-review S4: auth-preserve must happen INSIDE the per-vessel
+                        // semaphore — the previous version read CurrentVessels outside the
+                        // lock, so a racing update could change the existing entry's auth
+                        // between our TryGetValue and the AddOrUpdate write.
+                        if (clientSubspaceId <= 0
+                            && VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var existingForAuth)
+                            && existingForAuth.AuthoritativeSubspaceId > 0)
+                        {
+                            vessel.AuthoritativeSubspaceId = existingForAuth.AuthoritativeSubspaceId;
+                        }
+                        VesselStoreSystem.CurrentVessels.AddOrUpdate(vesselId, vessel, (key, existingVal) => vessel);
                     }
                 }
-                //BUG-013: rewrite localised stateString fields back to canonical English BEFORE the
-                //vessel lands in CurrentVessels, so neither the universe-on-disk copy nor any
-                //downstream relay carries the bad payload.
-                VesselSanitizer.Sanitize(vessel, vesselId.ToString());
-                //BUG-005/006: stamp the contributing client's subspace as the new authority.
-                //Sentinels (subspaceId <= 0) are not stamped — they leave existing authority in place
-                //so a warping or unidentified client cannot blank a vessel's authority.
-                if (clientSubspaceId > 0)
+                catch (Exception e)
                 {
-                    vessel.AuthoritativeSubspaceId = clientSubspaceId;
-                }
-                lock (Semaphore.GetOrAdd(vesselId, new object()))
-                {
-                    //Preserve authority across reject-and-replace race: if the existing vessel had
-                    //higher authority and the incoming update arrived legitimately (already past
-                    //the synchronous reject check), keep the more advanced authority.
-                    if (clientSubspaceId <= 0
-                        && VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var existingForAuth)
-                        && existingForAuth.AuthoritativeSubspaceId > 0)
-                    {
-                        vessel.AuthoritativeSubspaceId = existingForAuth.AuthoritativeSubspaceId;
-                    }
-                    VesselStoreSystem.CurrentVessels.AddOrUpdate(vesselId, vessel, (key, existingVal) => vessel);
+                    LunaLog.Error($"[vessel] proto ingest failed for {vesselId}: {e}");
                 }
             });
+        }
+
+        /// <summary>
+        /// Drop the per-vessel lock object so the <see cref="Semaphore"/> dictionary doesn't
+        /// grow without bound across the lifetime of a long-running server. Called by
+        /// <see cref="VesselStoreSystem.RemoveVessel"/> after the vessel is removed from
+        /// <see cref="VesselStoreSystem.CurrentVessels"/>. Retro-review S5.
+        /// </summary>
+        public static void ForgetVessel(Guid vesselId)
+        {
+            Semaphore.TryRemove(vesselId, out _);
         }
     }
 }
