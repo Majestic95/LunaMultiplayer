@@ -7,6 +7,7 @@ using Server.Context;
 using Server.Log;
 using Server.Plugin;
 using Server.Server;
+using Server.Settings.Structures;
 using Server.System.Agency;
 
 namespace Server.System
@@ -49,6 +50,18 @@ namespace Server.System
                 LunaLog.Normal($"Client {data.PlayerName} ({data.UniqueIdentifier}) handshake successful, LMP Version: {client.LmpVersion}, KSP Version: {client.KspVersion}");
 
                 HandshakeSystemSender.SendHandshakeReply(client, HandshakeReply.HandshookSuccessfully, "success");
+
+                // [Stage 5.15c] Push the per-agency handshake + assigned-agency state on
+                // top of the LMP handshake reply, so the client's AgencySystem mirror
+                // (Stage 5.18a) lands populated by the time the player reaches the main
+                // menu. No-op when PerAgencyCareer is false.
+                if (GameplaySettings.SettingsStore.PerAgencyCareer
+                    && AgencySystem.AgencyByPlayerName.TryGetValue(client.PlayerName, out var assignedAgencyId))
+                {
+                    AgencySystemSender.SendHandshakeTo(client, assignedAgencyId);
+                    if (AgencySystem.Agencies.TryGetValue(assignedAgencyId, out var assignedState))
+                        AgencySystemSender.SendStateTo(client, assignedState);
+                }
 
                 var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<PlayerConnectionJoinMsgData>();
                 msgData.PlayerName = client.PlayerName;

@@ -1,5 +1,6 @@
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Server.Context;
+using Server.Message;
 using Server.Settings.Structures;
 using Server.System;
 using Server.System.Agency;
@@ -327,6 +328,87 @@ namespace ServerTest
             Assert.AreEqual(1, AgencySystem.AgencyByPlayerName.Count);
             Assert.AreEqual(1, Directory.GetFiles(AgencyState.AgenciesPath, "*.txt").Length,
                 "exactly one agency file must exist on disk — no orphans from a losing race");
+        }
+
+        // ---- Stage 5.15c: AgencyMsgReader.ValidateDisplayName ----
+        // The reader's HandleMessage path is exercised end-to-end in Stage 5.16a's
+        // MockClient harness; here we pin the pure-data validator independently. Each
+        // case maps to one rejection reason a client UI would see (Stage 5.18c).
+
+        [TestMethod]
+        public void ValidateDisplayName_AcceptsTypicalName()
+        {
+            Assert.IsTrue(AgencyMsgReader.ValidateDisplayName("Cool Space Co", out var reason));
+            Assert.AreEqual(string.Empty, reason);
+        }
+
+        [TestMethod]
+        public void ValidateDisplayName_RejectsNullOrEmpty()
+        {
+            Assert.IsFalse(AgencyMsgReader.ValidateDisplayName(null, out var nullReason));
+            StringAssert.Contains(nullReason, "empty");
+
+            Assert.IsFalse(AgencyMsgReader.ValidateDisplayName(string.Empty, out var emptyReason));
+            StringAssert.Contains(emptyReason, "empty");
+        }
+
+        [TestMethod]
+        public void ValidateDisplayName_RejectsWhitespaceOnly()
+        {
+            // Whitespace-only names would render as blank labels in the tracking
+            // station — disallow at the validator so the client never sees an
+            // "anonymous" agency in the public summary.
+            Assert.IsFalse(AgencyMsgReader.ValidateDisplayName("   ", out var reason));
+            StringAssert.Contains(reason, "empty");
+        }
+
+        [TestMethod]
+        public void ValidateDisplayName_RejectsAtMaxPlusOne()
+        {
+            // Pin the cap exactly. Names at the boundary pass; one over fails.
+            var atCap = new string('a', AgencyMsgReader.MaxDisplayNameLength);
+            var overCap = new string('a', AgencyMsgReader.MaxDisplayNameLength + 1);
+
+            Assert.IsTrue(AgencyMsgReader.ValidateDisplayName(atCap, out _));
+            Assert.IsFalse(AgencyMsgReader.ValidateDisplayName(overCap, out var reason));
+            StringAssert.Contains(reason, "64");
+        }
+
+        [TestMethod]
+        public void ValidateDisplayName_RejectsConfigNodeHostileCharacters()
+        {
+            // Bare '=' / '{' / '}' / newline would corrupt the LunaConfigNode key=value
+            // disk format AgencyState writes through. Same rationale as the BUG-013
+            // reaction-wheel locale fix — the storage format is fragile, sanitise at
+            // the wire boundary.
+            string[] hostile = { "Foo=Bar", "Foo{Bar}", "Foo\nBar", "Foo\rBar" };
+            foreach (var name in hostile)
+            {
+                Assert.IsFalse(AgencyMsgReader.ValidateDisplayName(name, out var reason),
+                    $"expected '{name}' to be rejected");
+                StringAssert.Contains(reason, "illegal");
+            }
+        }
+
+        [TestMethod]
+        public void ValidateDisplayName_RejectsControlCharacters()
+        {
+            // char.IsControl catches the whole bash-history-corruption class of inputs
+            // (\t, \0, \b, etc) without us having to enumerate.
+            Assert.IsFalse(AgencyMsgReader.ValidateDisplayName("Foo\tBar", out var tabReason));
+            StringAssert.Contains(tabReason, "illegal");
+
+            Assert.IsFalse(AgencyMsgReader.ValidateDisplayName("Foo\0Bar", out var nullReason));
+            StringAssert.Contains(nullReason, "illegal");
+        }
+
+        [TestMethod]
+        public void ValidateDisplayName_AcceptsUnicodeAndSpaces()
+        {
+            // Cyrillic + emoji + multi-word names are all valid (under the 64-char cap).
+            // Pin that the validator doesn't accidentally constrain to ASCII.
+            Assert.IsTrue(AgencyMsgReader.ValidateDisplayName("Майор95 Space Agency", out _));
+            Assert.IsTrue(AgencyMsgReader.ValidateDisplayName("🚀 Rocket Co", out _));
         }
 
         [TestMethod]
