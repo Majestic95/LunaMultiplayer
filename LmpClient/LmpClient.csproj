@@ -122,6 +122,7 @@
     <Compile Include="Base\Interface\IWindow.cs" />
     <Compile Include="Base\LimitedQueue.cs" />
     <Compile Include="DebugDrawer.cs" />
+    <Compile Include="Diagnostics\VesselSyncDiagnostics.cs" />
     <Compile Include="Events\ActionGroupEvent.cs" />
     <Compile Include="Events\Base\LmpBaseEvent.cs" />
     <Compile Include="Events\EvaEvent.cs" />

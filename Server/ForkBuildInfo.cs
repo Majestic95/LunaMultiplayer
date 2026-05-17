@@ -26,6 +26,7 @@ namespace Server
             "BUG-008-A",   // Client-side PQS-aware spawn-altitude re-alignment (Phase A)
             "BUG-045",     // Breaking Ground deployable science vessels now sent to server (ported from upstream Release/0_29_2)
             "vessel-load-budget", // Per-tick proto-reload budget + VesselLoadOutcome enum + SPACECENTER/EDITOR fast path (ported from upstream Release/0_29_2)
+            "vessel-sync-log",    // Client-side append-only diagnostic trace at Logs/LMP/VesselSyncLog.txt + Reason wire field on VesselProtoMsgData (ported from upstream Release/0_29_2)
         };
     }
 }

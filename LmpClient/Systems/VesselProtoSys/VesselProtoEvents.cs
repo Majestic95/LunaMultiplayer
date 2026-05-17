@@ -28,7 +28,7 @@ namespace LmpClient.Systems.VesselProtoSys
             if (VesselCommon.IsSpectating || FlightGlobals.ActiveVessel == null || FlightGlobals.ActiveVessel.id == Guid.Empty)
                 return;
 
-            System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true);
+            System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true, reason: "flight ready (launch)");
         }
 
         /// <summary>
@@ -39,7 +39,7 @@ namespace LmpClient.Systems.VesselProtoSys
             if (HighLogic.LoadedSceneIsFlight && requestedScene != GameScenes.FLIGHT && !VesselCommon.IsSpectating)
             {
                 //When quitting flight send the vessel one last time
-                VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel);
+                VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, reason: "leaving flight scene");
             }
         }
 
@@ -55,7 +55,7 @@ namespace LmpClient.Systems.VesselProtoSys
                 if (subject != null)
                 {
                     LunaLog.Log("Detected a experiment transmission. Sending vessel definition to the server");
-                    System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true);
+                    System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true, reason: "science transmission");
 
                     ShareScienceSubjectSystem.Singleton.MessageSender.SendScienceSubjectMessage(subject);
                 }
@@ -74,7 +74,7 @@ namespace LmpClient.Systems.VesselProtoSys
                 if (subject != null)
                 {
                     LunaLog.Log("Detected a experiment stored. Sending vessel definition to the server");
-                    System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true);
+                    System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true, reason: "experiment stored");
 
                     ShareScienceSubjectSystem.Singleton.MessageSender.SendScienceSubjectMessage(subject);
                 }
@@ -89,7 +89,7 @@ namespace LmpClient.Systems.VesselProtoSys
             if (FlightGlobals.ActiveVessel != null && !VesselCommon.IsSpectating)
             {
                 LunaLog.Log("Detected a experiment reset. Sending vessel definition to the server");
-                System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true);
+                System.MessageSender.SendVesselMessage(FlightGlobals.ActiveVessel, true, reason: "experiment reset");
             }
         }
 
@@ -98,10 +98,10 @@ namespace LmpClient.Systems.VesselProtoSys
             if (VesselCommon.IsSpectating) return;
             if (!LockSystem.LockQuery.UpdateLockBelongsToPlayer(originalVessel.id, SettingsSystem.CurrentSettings.PlayerName)) return;
 
-            System.MessageSender.SendVesselMessage(part.vessel);
+            System.MessageSender.SendVesselMessage(part.vessel, reason: "part undocked (new vessel)");
 
             //As this method can be called several times in a short period (when staging) we delay the sending of the final vessel
-            System.DelayedSendVesselMessage(originalVessel.id, 0.5f);
+            System.DelayedSendVesselMessage(originalVessel.id, 0.5f, reason: "part undocked (original vessel, delayed)");
         }
 
         public void PartDecoupled(Part part, float breakForce, Vessel originalVessel)
@@ -109,10 +109,10 @@ namespace LmpClient.Systems.VesselProtoSys
             if (VesselCommon.IsSpectating || originalVessel == null) return;
             if (!LockSystem.LockQuery.UpdateLockBelongsToPlayer(originalVessel.id, SettingsSystem.CurrentSettings.PlayerName)) return;
 
-            System.MessageSender.SendVesselMessage(part.vessel);
+            System.MessageSender.SendVesselMessage(part.vessel, reason: "part decoupled (new vessel)");
 
             //As this method can be called several times in a short period (when staging) we delay the sending of the final vessel
-            System.DelayedSendVesselMessage(originalVessel.id, 0.5f);
+            System.DelayedSendVesselMessage(originalVessel.id, 0.5f, reason: "part decoupled (original vessel, delayed)");
         }
 
         public void PartCoupled(Part partFrom, Part partTo, Guid removedVesselId)
@@ -123,7 +123,7 @@ namespace LmpClient.Systems.VesselProtoSys
             if (!LockSystem.LockQuery.UpdateLockBelongsToPlayer(partFrom.vessel.id, SettingsSystem.CurrentSettings.PlayerName) &&
                 !LockSystem.LockQuery.UpdateLockBelongsToPlayer(removedVesselId, SettingsSystem.CurrentSettings.PlayerName)) return;
 
-            System.MessageSender.SendVesselMessage(partFrom.vessel);
+            System.MessageSender.SendVesselMessage(partFrom.vessel, reason: "part coupled (merged vessel)");
         }
 
         /// <summary>
@@ -135,7 +135,7 @@ namespace LmpClient.Systems.VesselProtoSys
             if (VesselCommon.IsSpectating) return;
             if (!LockSystem.LockQuery.UpdateLockBelongsToPlayer(vessel.id, SettingsSystem.CurrentSettings.PlayerName)) return;
 
-            System.MessageSender.SendVesselMessage(vessel);
+            System.MessageSender.SendVesselMessage(vessel, reason: "maneuver node added");
             WriteManeuverLog("ADDED", vessel, solver);
         }
 
@@ -148,7 +148,7 @@ namespace LmpClient.Systems.VesselProtoSys
             if (VesselCommon.IsSpectating) return;
             if (!LockSystem.LockQuery.UpdateLockBelongsToPlayer(vessel.id, SettingsSystem.CurrentSettings.PlayerName)) return;
 
-            System.MessageSender.SendVesselMessage(vessel);
+            System.MessageSender.SendVesselMessage(vessel, reason: "maneuver node removed");
             WriteManeuverLog("REMOVED", vessel, solver);
         }
 

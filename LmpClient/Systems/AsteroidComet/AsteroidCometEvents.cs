@@ -29,13 +29,13 @@ namespace LmpClient.Systems.AsteroidComet
         public void StartTrackingCometOrAsteroid(Vessel potato)
         {
             LunaLog.Log($"Started to track comet/asteroid {potato.id}");
-            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(potato, true);
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(potato, true, reason: "started tracking comet/asteroid");
         }
 
         public void StopTrackingCometOrAsteroid(Vessel potato)
         {
             LunaLog.Log($"Stopped to track comet/asteroid {potato.id}");
-            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(potato, true);
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(potato, true, reason: "stopped tracking comet/asteroid");
         }
 
         /// <summary>
@@ -44,7 +44,7 @@ namespace LmpClient.Systems.AsteroidComet
         public void NewVesselCreated(Vessel vessel)
         {
             if (vessel.IsCometOrAsteroid())
-                VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, true);
+                VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, true, reason: "new vessel: comet/asteroid spawned");
         }
     }
 }

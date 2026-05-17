@@ -11,13 +11,13 @@ namespace LmpClient.Systems.VesselEvaEditorSys
         public void EVAConstructionModePartAttached(Vessel vessel, Part part)
         {
             if (VesselCommon.IsSpectating) return;
-            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, reason: "EVA construction: part attached");
         }
 
         public void EVAConstructionModePartDetached(Vessel vessel, Part part)
         {
             if (VesselCommon.IsSpectating) return;
-            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, reason: "EVA construction: part detached");
         }
 
         public void VesselCreated(Vessel vessel)
@@ -44,11 +44,12 @@ namespace LmpClient.Systems.VesselEvaEditorSys
             LockSystem.Singleton.AcquireUpdateLock(vessel.id, true, true);
             LockSystem.Singleton.AcquireUnloadedUpdateLock(vessel.id, true, true);
 
-            LunaLog.Log(isEvaConstructionDrop
-                ? $"[fix:BUG-045] Sending new vessel {vessel.id} (EVA construction part drop)"
-                : $"[fix:BUG-045] Sending new vessel {vessel.id} (Breaking Ground deployable science placed)");
+            var reason = isEvaConstructionDrop
+                ? "EVA construction: new vessel from detached part"
+                : "Breaking Ground: deployable science placed";
+            LunaLog.Log($"[fix:BUG-045] Sending new vessel {vessel.id} ({reason})");
 
-            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel, reason: reason);
         }
 
         public void OnDroppingPart()
