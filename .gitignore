@@ -33,3 +33,7 @@ Server/packages
 
 # Per-session bug-review receipts written by .claude/hooks/require-bug-review.sh
 .claude/review-receipts/
+
+# Release script outputs (Scripts/build-release.ps1)
+FinalFiles/
+Releases/
