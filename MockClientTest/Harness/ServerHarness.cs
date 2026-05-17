@@ -143,6 +143,7 @@ namespace MockClientTest.Harness
             // here — that races with LoadSavedSubspace and causes silent TryAdd no-ops.
             WarpSystem.Reset();
             WarpRequestCache.Clear();
+            VesselStoreSystem.CurrentVessels.Clear();
         }
 
         private static int FindFreeUdpPort()

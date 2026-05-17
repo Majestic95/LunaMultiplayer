@@ -288,10 +288,11 @@ Mutating commands should default to non-destructive (precedent: `BackupCommand` 
 `LmpCommonTest/`:
 - `LunaNetUtilsTest`, `MessageStoreTest`, `SerializationTests`, `TimeTests`
 
-`MockClientTest/` (5 tests on `net10.0` via MSTest, Stage 4.9 v1 + 4.10):
+`MockClientTest/` (7 tests on `net10.0` via MSTest, Stage 4.9 v1 + 4.10):
 - `HandshakeSmokeTest` — proves the in-process harness wires up: `ServerHarness.Start` brings up a real Server on a free localhost port, `MockNetClient` connects via Lidgren and completes the LMP handshake, server registers the `ClientStructure`. Design + future work in `docs/research/04-mock-client-harness-design.md`.
 - `Bug051aDedupTest` — end-to-end BUG-051a coverage: duplicate `WarpNewSubspaceMsgData` with same `RequestSeq` returns the same subspace (no orphan); `RequestSeq=0` sentinel always mints (pre-fix client backward-compat).
 - `Bug001SoloBroadcastTest` — end-to-end BUG-001 coverage: `WarpSystem.RefreshSoloStatuses` flips a subspace's `Solo` flag and broadcasts `WarpSubspaceSoloStatusMsgData` to a connected mock client when occupancy transitions in either direction (1 occupant → solo, 2 occupants → non-solo). Drives `RefreshSoloStatuses` directly to avoid waiting on the periodic-task interval — per-subspace correctness is already covered by `WarpSoloDetectionTest`.
+- `Bug005SubspaceRejectTest` — end-to-end BUG-005/006 coverage: two mock clients in different subspaces, a planted vessel in `VesselStoreSystem.CurrentVessels`. Past-subspace client → future-auth vessel proto-update is rejected (stored vessel reference unchanged, no relay to the future client); future-subspace client → past-auth vessel is accepted (relay reaches the past client). Sample vessel ConfigNode is loaded from `ServerTest/XmlExampleFiles/Others/` via a relative-path walk-up — no fixture duplication.
 
 Gaps to close as we touch each subsystem: backup archive lifecycle, settings round-trip, `Share*` broadcast routing. Client-side regression coverage for BUG-003/004 (interp cap), BUG-051b (retry), and BUG-005/006 (restored `SendUnloadedSecondary*` routines) is still review + soak — those need either harness extensions (server-observable assertions) or a dedicated `LmpClientTest` (net472) project for client-internal logic.
 
@@ -377,7 +378,7 @@ Master plan (also tracked in conversation todos for active work):
   - ⏳ 3.8 Phase-2 + fixes for remaining top-10 — IN PROGRESS. ✅ BUG-013 fix shipped (`c5ab8fa5`, reaction-wheel `stateString` sanitiser). ✅ BUG-008 Phase-2 doc shipped ([`02-analysis/bug-008-pqs-spawn-altitude.md`](docs/research/02-analysis/bug-008-pqs-spawn-altitude.md)) — code pending. ✅ BUG-018 / BUG-019 / BUG-024 audit-closed via upstream PR #687. Remaining: BUG-010 / BUG-023 / BUG-025 / BUG-033 / BUG-045.
 - **Stage 4 — Mock-client test harness (2–4 weeks)** — IN PROGRESS
   - ✅ 4.9 Protocol harness v1 — `MockClientTest` project with `ServerHarness` (real Server in-process on a free localhost UDP port) + `MockNetClient` (Lidgren peer speaking the LMP wire protocol via the production factories). `HandshakeSmokeTest` proves the wiring end-to-end. Design at `docs/research/04-mock-client-harness-design.md`.
-  - ⏳ 4.10 Regression tests for shipped fixes — IN PROGRESS. ✅ BUG-051a (`Bug051aDedupTest`). ✅ BUG-001 (`Bug001SoloBroadcastTest`). Remaining: BUG-005/006 past-subspace proto rejection. Also surfaced + fixed [BUG-052](docs/research/01-bug-inventory.md) (vendored Lidgren `NetReliableSenderChannel.DestoreMessage` NRE on late-ACK during peer shutdown) while writing the first test. BUG-003/004 + BUG-051b are client-internal and need a separate `LmpClientTest` net472 project that references the now-buildable `LmpClient.dll`.
+  - ✅ 4.10 Regression tests for shipped fixes — server-observable bugs COMPLETE. ✅ BUG-051a (`Bug051aDedupTest`). ✅ BUG-001 (`Bug001SoloBroadcastTest`). ✅ BUG-005/006 (`Bug005SubspaceRejectTest`). Also surfaced + fixed [BUG-052](docs/research/01-bug-inventory.md) (vendored Lidgren `NetReliableSenderChannel.DestoreMessage` NRE on late-ACK during peer shutdown) while writing the first test. BUG-003/004 + BUG-051b are client-internal and need a separate `LmpClientTest` net472 project that references the now-buildable `LmpClient.dll`.
   - 4.11 CI integration
 - **Stage 5 — Per-agency career (2–4 months, separate branch)**
   - 5.12 Create `feature/per-agency`
