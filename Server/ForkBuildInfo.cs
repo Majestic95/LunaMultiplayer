@@ -24,6 +24,7 @@ namespace Server
             "BUG-005/006", // Cross-subspace lock keying + protocol bump
             "BUG-013",     // Reaction-wheel stateString locale-normalisation
             "BUG-008-A",   // Client-side PQS-aware spawn-altitude re-alignment (Phase A)
+            "BUG-045",     // Breaking Ground deployable science vessels now sent to server (ported from upstream Release/0_29_2)
         };
     }
 }

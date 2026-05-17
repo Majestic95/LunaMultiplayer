@@ -22,13 +22,33 @@ namespace LmpClient.Systems.VesselEvaEditorSys
 
         public void VesselCreated(Vessel vessel)
         {
-            if (System.DetachingPart)
-            {
-                LockSystem.Singleton.AcquireUpdateLock(vessel.id, true, true);
-                LockSystem.Singleton.AcquireUnloadedUpdateLock(vessel.id, true, true);
+            if (vessel == null || VesselCommon.IsSpectating) return;
 
-                VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
-            }
+            // Two creation paths route through GameEvents.onNewVesselCreated and both need to be
+            // sent to the server:
+            //   1. EVA Construction Mode part drops — gated by System.DetachingPart, which is set
+            //      by EVAConstructionEvent.onDroppingPart/onDroppedPart.
+            //   2. Breaking Ground deployable science placements (BUG-045) — the kerbal places a
+            //      science part from inventory and KSP spins up a new vessel of type
+            //      DeployedSciencePart / DeployedScienceController. This path raises NO
+            //      EVAConstructionEvent, so without this branch the vessel was created locally,
+            //      had its locks acquired by VesselLockSystem's bulk pass, but its proto was
+            //      never transmitted — leaving an orphan UnloadedUpdate lock on the server with
+            //      no matching vessel record. Ported from upstream Release/0_29_2 commit 2526e15a.
+            var isEvaConstructionDrop = System.DetachingPart;
+            var isDeployableScience = vessel.vesselType == VesselType.DeployedSciencePart
+                                   || vessel.vesselType == VesselType.DeployedScienceController;
+
+            if (!isEvaConstructionDrop && !isDeployableScience) return;
+
+            LockSystem.Singleton.AcquireUpdateLock(vessel.id, true, true);
+            LockSystem.Singleton.AcquireUnloadedUpdateLock(vessel.id, true, true);
+
+            LunaLog.Log(isEvaConstructionDrop
+                ? $"[fix:BUG-045] Sending new vessel {vessel.id} (EVA construction part drop)"
+                : $"[fix:BUG-045] Sending new vessel {vessel.id} (Breaking Ground deployable science placed)");
+
+            VesselProtoSystem.Singleton.MessageSender.SendVesselMessage(vessel);
         }
 
         public void OnDroppingPart()

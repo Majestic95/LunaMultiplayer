@@ -367,12 +367,13 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-045] Breaking Ground deployable science vanishes on reconnect
 - **Severity:** High (largest open ticket by reactions: 22)
-- **Status:** Open
+- **Status:** Fixed (Phase B.1, 2026-05-16; ported from upstream Release/0_29_2 commit `2526e15a`). Phase-2 doc: [bug-045-deployable-science.md](02-analysis/bug-045-deployable-science.md).
 - **Sources:** [#308](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/308)
 - **Evidence of frequency:** 22 reactions, 7 comments — the most-thumbsed open issue in the tracker. Multiple "still broken" follow-ups years apart.
 - **Symptoms:** Deployable science modules are placed, work, are visible at the tracking station; on reconnect the control station and panels disappear.
-- **Suspected subsystem(s):** Vessel-event hooks miss the Breaking Ground deployable-science creation events, so the client never tells the server about the vessel.
-- **Notes:** A third-party fork (`ItzPray/KSPMulti`) claims an in-progress fix; worth a read.
+- **Root cause:** `VesselEvaEditorEvents.VesselCreated` only fired the `SendVesselMessage` path when `System.DetachingPart` was set (the EVA Construction Mode part-drop signal). Breaking Ground deployables are spawned by `GameEvents.onNewVesselCreated` without raising any `EVAConstructionEvent`, so their protos were never transmitted to the server even though `VesselLockSystem`'s bulk pass still acquired locks for them. Vessel existed only in the placing player's local save.
+- **Fix:** Widen the `VesselCreated` gate to also accept `vesselType == VesselType.DeployedSciencePart || VesselType.DeployedScienceController`.
+- **Notes:** A third-party fork (`ItzPray/KSPMulti`) had also claimed an in-progress fix. Drew Banyai's upstream `Release/0_29_2` branch landed the actual fix as commit `2526e15a` (2026-05-05).
 
 #### [BUG-046] KSP Recall, VesselMover, BDArmory, USI-LS, Procedural Parts, Kerbal Konstructs are known broken or partial
 - **Severity:** Medium (workaround exists for most: use the listed fork mod, or disable)
