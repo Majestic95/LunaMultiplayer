@@ -228,6 +228,33 @@ namespace ServerTest
         }
 
         [TestMethod]
+        public void RegisterAgency_HealsStaleAgencyByPlayerName_WhenAgenciesRegistryMisses()
+        {
+            // Round-3 review regression test for the stale-index defensive heal in
+            // RegisterAgency. If AgencyByPlayerName points at a Guid that the Agencies
+            // registry doesn't have AND the disk doesn't have either, the new lookup
+            // unbinds the stale entry and mints a fresh agency rather than silently
+            // returning a missing agency or shadowing the orphan in future vessel stamps.
+            var staleGuid = Guid.NewGuid();
+            AgencySystem.AgencyByPlayerName["StaleAlice"] = staleGuid;
+            // Note: AgencySystem.Agencies does NOT contain staleGuid, and no on-disk file
+            // exists at Universe/Agencies/{staleGuid:N}.txt either. This is the exact
+            // post-crash state the heal path is designed for.
+
+            var freshState = AgencySystem.RegisterAgency("StaleAlice");
+
+            Assert.IsNotNull(freshState);
+            Assert.AreNotEqual(staleGuid, freshState.AgencyId,
+                "RegisterAgency must mint a NEW Guid when the stale-index target is missing from both registry and disk.");
+            Assert.AreEqual(freshState.AgencyId, AgencySystem.AgencyByPlayerName["StaleAlice"],
+                "Index must now point at the freshly minted agency, not the stale orphan.");
+            Assert.IsTrue(AgencySystem.Agencies.ContainsKey(freshState.AgencyId),
+                "Fresh agency must be registered in the Agencies dictionary.");
+            Assert.IsTrue(File.Exists(freshState.FilePath),
+                "RegisterAgency must persist to disk before the index flip — file should exist after return.");
+        }
+
+        [TestMethod]
         public void SaveAgency_AfterFieldMutation_PersistsNewValues()
         {
             // Stage 5.17b will route Share* mutations through SaveAgency. Pin the

@@ -59,11 +59,32 @@ namespace LmpCommon.Message.Data.Agency
             base.InternalDeserialize(lidgrenMsg);
 
             AgencyId = GuidUtil.Deserialize(lidgrenMsg);
-            OwningPlayerName = lidgrenMsg.ReadString();
-            DisplayName = lidgrenMsg.ReadString();
+            OwningPlayerName = ReadBoundedString(lidgrenMsg, nameof(OwningPlayerName));
+            DisplayName = ReadBoundedString(lidgrenMsg, nameof(DisplayName));
             Funds = lidgrenMsg.ReadDouble();
             Science = lidgrenMsg.ReadDouble();
             Reputation = lidgrenMsg.ReadDouble();
+        }
+
+        /// <summary>
+        /// Bounded ReadString wrapper. Lidgren peer-cap rules prevent oversized messages, but
+        /// a single string field inside a small message can still be inflated to ~MTU size
+        /// (~64 KB). State is a server-→-client subtype but its dictionary entry on the Cli
+        /// side (for wire-symmetry) means a misrouted/malicious inbound is reachable —
+        /// AgencyMsgReader log-drops the subtype but the deserialize allocation already
+        /// happened. Round-3 wire review: cap each string at MaxStringByteLength (much
+        /// larger than any legitimate value but small enough to make 100 of these per
+        /// second uninteresting).
+        /// </summary>
+        private static string ReadBoundedString(NetIncomingMessage lidgrenMsg, string fieldName)
+        {
+            var byteLength = (int)lidgrenMsg.ReadVariableUInt32();
+            if (byteLength < 0 || byteLength > MaxStringByteLength)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyState.{fieldName} byte length out of range: {byteLength} (allowed 0..{MaxStringByteLength})");
+            if (byteLength == 0)
+                return string.Empty;
+            return System.Text.Encoding.UTF8.GetString(lidgrenMsg.ReadBytes(byteLength));
         }
 
         internal override int InternalGetMessageSize()

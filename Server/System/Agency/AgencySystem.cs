@@ -319,6 +319,14 @@ namespace Server.System.Agency
         ///
         /// Returns null when the file (and its <c>.bak</c>) are absent — caller decides
         /// whether that means "skip" (LoadExistingAgencies) or "no such agency" (LoadAgency).
+        ///
+        /// **Locking (round-3 persistence review).** The heal <see cref="FileHandler.WriteAtomic"/>
+        /// is gated on the per-agency lock when the parsed state has a real AgencyId, so a
+        /// concurrent <see cref="SaveAgency"/> for the same agency cannot have its fresh
+        /// content silently overwritten by stale <c>.bak</c> content during runtime
+        /// <see cref="LoadAgency"/> calls. <see cref="LoadExistingAgencies"/> is boot-time
+        /// (before the server accepts connections) so the lock is uncontested there but the
+        /// guard is symmetric across both callers.
         /// </summary>
         private static AgencyState LoadAgencyFromFile(string filePath)
         {
@@ -335,7 +343,14 @@ namespace Server.System.Agency
             {
                 // .bak supplied the content — write it back to the canonical path so
                 // ReadAtomic stops surfacing the warning on every read after this one.
-                FileHandler.WriteAtomic(filePath, content);
+                // Hold the per-agency lock so a concurrent SaveAgency cannot land between
+                // our content snapshot and the heal write and have its fresh state
+                // silently rolled back to stale .bak. Stage 5.17b Share* writers will
+                // need this guarantee — see GetAgencyLock locking contract above.
+                lock (GetAgencyLock(state.AgencyId))
+                {
+                    FileHandler.WriteAtomic(filePath, content);
+                }
                 LunaLog.Normal($"[fix:per-agency-career] Healed canonical path after .bak recovery: {Path.GetFileName(filePath)}");
             }
 

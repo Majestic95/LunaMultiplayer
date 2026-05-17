@@ -19,6 +19,17 @@ namespace LmpCommon.Message.Data.Agency
 
         public virtual AgencyMessageType AgencyMessageType => throw new NotImplementedException();
 
+        /// <summary>
+        /// Maximum byte length of any string field carried by an Agency*MsgData on the wire.
+        /// Mirrors the server-side <c>AgencyMsgReader.MaxDisplayNameLength = 64</c> with
+        /// generous headroom (UTF-8 expansion + future-field tolerance). Round-3 wire review:
+        /// even on server-→-client subtypes (Handshake / CreateReply / State), the inbound
+        /// direction is reachable via misrouted CliMsg, and an unbounded ReadString allocation
+        /// from a malicious peer is a clear DoS amplification vector. Deserialize sites that
+        /// read string fields MUST bounds-check against this cap before reading.
+        /// </summary>
+        internal const int MaxStringByteLength = 512;
+
         internal override void InternalSerialize(NetOutgoingMessage lidgrenMsg)
         {
             //Nothing to implement here

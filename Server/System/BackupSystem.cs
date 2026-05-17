@@ -29,7 +29,15 @@ namespace Server.System
 
         // Directories/files inside <Universe>/ to include when an archive snapshot is taken.
         // Anything outside these lists (Screenshots, Flags, log files, _archives itself) is intentionally excluded.
-        private static readonly string[] SnapshotDirs = { "Vessels", "Kerbals", "Groups", "Crafts", "Scenarios" };
+        //
+        // "Agencies" added in Stage 5.16b (round-3 persistence review) — per-agency career
+        // state under PerAgencyCareer=true lives in Universe/Agencies/{guid}.txt files. An
+        // archive snapshot that omits this folder would, on restore, leave every vessel
+        // stamped with an lmpOwningAgency referring to an agency whose state file no longer
+        // exists, effectively re-initialising the entire per-agency economy to defaults on
+        // first reconnect. Under PerAgencyCareer=false the folder exists (CheckUniverse
+        // creates it) but stays empty, so the include is harmless in dual-mode-disabled.
+        private static readonly string[] SnapshotDirs = { "Vessels", "Kerbals", "Groups", "Crafts", "Scenarios", "Agencies" };
         private static readonly string[] SnapshotFiles = { "Subspace.txt", "StartTime.txt" };
 
         public static string ArchivesPath => Path.Combine(ServerContext.UniverseDirectory, "_archives");

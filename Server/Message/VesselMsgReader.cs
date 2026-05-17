@@ -184,6 +184,18 @@ namespace Server.Message
             }
 
             VesselDataUpdater.RawConfigNodeInsertOrUpdate(msgData.VesselId, Encoding.UTF8.GetString(msgData.Data, 0, msgData.NumBytes), client.Subspace, senderAgencyId);
+
+            //[Stage 5.16b — round-3 persistence review] Relay-vs-store divergence: the
+            //relayed bytes below are the ORIGINAL wire bytes the sending client supplied,
+            //including whatever lmpOwningAgency value they may have spoofed. The
+            //server-stored copy (CurrentVessels + disk) was server-authoritatively scrubbed
+            //by RawConfigNodeInsertOrUpdate; the relayed bytes were NOT. Stage 5.18a client
+            //mirrors MUST treat the relayed lmpOwningAgency as advisory and re-derive
+            //ownership from VesselSync replies (which serialise from the server's
+            //authoritative store via GetVesselInConfigNodeFormat) or from
+            //AgencyVisibilityMsgData (Stage 5.18c). The server-side LockSystem rejection
+            //in Stage 5.17a reads from the authoritative store, so cross-agency lock
+            //decisions are safe regardless of relay content.
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, msgData);
         }
 

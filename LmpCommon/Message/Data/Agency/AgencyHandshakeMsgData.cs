@@ -33,9 +33,15 @@ namespace LmpCommon.Message.Data.Agency
 
             GuidUtil.Serialize(AssignedAgencyId, lidgrenMsg);
             lidgrenMsg.Write(OtherAgencyCount);
+            // Null-guard symmetric with InternalGetMessageSize: a pooled instance can carry
+            // a stale OtherAgencies array longer than OtherAgencyCount, and a caller that
+            // resizes OtherAgencyCount without replacing the array would leave nulls in
+            // 0..count-1. Round-3 wire review caught the asymmetry where GetMessageSize
+            // guards but Serialize doesn't — pick one policy and apply it everywhere.
             for (var i = 0; i < OtherAgencyCount; i++)
             {
-                OtherAgencies[i].Serialize(lidgrenMsg);
+                if (OtherAgencies[i] != null)
+                    OtherAgencies[i].Serialize(lidgrenMsg);
             }
         }
 

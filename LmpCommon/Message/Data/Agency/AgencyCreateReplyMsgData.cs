@@ -40,9 +40,27 @@ namespace LmpCommon.Message.Data.Agency
             base.InternalDeserialize(lidgrenMsg);
 
             AgencyId = GuidUtil.Deserialize(lidgrenMsg);
-            DisplayName = lidgrenMsg.ReadString();
+            DisplayName = ReadBoundedString(lidgrenMsg, nameof(DisplayName));
             Success = lidgrenMsg.ReadBoolean();
-            Reason = lidgrenMsg.ReadString();
+            Reason = ReadBoundedString(lidgrenMsg, nameof(Reason));
+        }
+
+        /// <summary>
+        /// Same bounded-read rationale as <c>AgencyStateMsgData.ReadBoundedString</c> — CreateReply
+        /// is server-→-client but listed in the CliMsg dictionary for wire-symmetry, so a misrouted
+        /// inbound is reachable and the deserialize allocation happens before the AgencyMsgReader
+        /// log-drop fires. Cap each string at <see cref="MaxStringByteLength"/> to prevent allocation
+        /// amplification.
+        /// </summary>
+        private static string ReadBoundedString(NetIncomingMessage lidgrenMsg, string fieldName)
+        {
+            var byteLength = (int)lidgrenMsg.ReadVariableUInt32();
+            if (byteLength < 0 || byteLength > MaxStringByteLength)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyCreateReply.{fieldName} byte length out of range: {byteLength} (allowed 0..{MaxStringByteLength})");
+            if (byteLength == 0)
+                return string.Empty;
+            return System.Text.Encoding.UTF8.GetString(lidgrenMsg.ReadBytes(byteLength));
         }
 
         internal override int InternalGetMessageSize()
