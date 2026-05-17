@@ -124,5 +124,52 @@ namespace LmpClientTest
             Assert.AreEqual(0.1, PqsAlignmentRoutine.DefaultStabilityDeltaMeters);
             Assert.AreEqual(5f, PqsAlignmentRoutine.MaxPollSeconds);
         }
+
+        // ---------- IsSaneAltitudeSample ----------
+
+        [TestMethod]
+        public void IsSaneAltitudeSample_TypicalKerbinTerrain_True()
+        {
+            // Stock KSP terrain altitudes are in the ±10 km range; the sanity envelope is
+            // 1000 km, generous enough to never reject a legitimate sample.
+            Assert.IsTrue(PqsAlignmentRoutine.IsSaneAltitudeSample(0.0));
+            Assert.IsTrue(PqsAlignmentRoutine.IsSaneAltitudeSample(6_764.0));   // top of Mt. Everest-equivalent on Kerbin
+            Assert.IsTrue(PqsAlignmentRoutine.IsSaneAltitudeSample(-50.0));     // underwater
+        }
+
+        [TestMethod]
+        public void IsSaneAltitudeSample_OffByBodyRadius_False()
+        {
+            // The load-bearing wrong-API case: GetSurfaceHeight returning altitude-above-sea
+            // directly (no body.Radius to subtract) produces roughly -600 km for a vessel
+            // landed on Kerbin (`altitude - body.Radius` ~= `~0 - 600_000`). The 100 km
+            // envelope must reject this. Tested for both sign conventions.
+            Assert.IsFalse(PqsAlignmentRoutine.IsSaneAltitudeSample(-600_000.0));
+            Assert.IsFalse(PqsAlignmentRoutine.IsSaneAltitudeSample(600_000.0));
+            // Mun-class (~200 km wrong) and Duna-class (~320 km wrong) too.
+            Assert.IsFalse(PqsAlignmentRoutine.IsSaneAltitudeSample(-200_000.0));
+            Assert.IsFalse(PqsAlignmentRoutine.IsSaneAltitudeSample(-320_000.0));
+        }
+
+        [TestMethod]
+        public void IsSaneAltitudeSample_NaN_False()
+        {
+            Assert.IsFalse(PqsAlignmentRoutine.IsSaneAltitudeSample(double.NaN));
+        }
+
+        [TestMethod]
+        public void IsSaneAltitudeSample_Infinity_False()
+        {
+            Assert.IsFalse(PqsAlignmentRoutine.IsSaneAltitudeSample(double.PositiveInfinity));
+            Assert.IsFalse(PqsAlignmentRoutine.IsSaneAltitudeSample(double.NegativeInfinity));
+        }
+
+        [TestMethod]
+        public void IsSaneAltitudeSample_ExactlyAtEnvelope_True()
+        {
+            // Inclusive at the boundary.
+            Assert.IsTrue(PqsAlignmentRoutine.IsSaneAltitudeSample(PqsAlignmentRoutine.SanityMaxAbsAltitudeMeters));
+            Assert.IsTrue(PqsAlignmentRoutine.IsSaneAltitudeSample(-PqsAlignmentRoutine.SanityMaxAbsAltitudeMeters));
+        }
     }
 }

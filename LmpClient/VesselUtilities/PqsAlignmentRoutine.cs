@@ -1,3 +1,4 @@
+using LmpClient.Systems.VesselRemoveSys;
 using System;
 using System.Collections;
 using UnityEngine;
@@ -41,6 +42,17 @@ namespace LmpClient.VesselUtilities
         /// is needed for that body / lat-lng.</summary>
         public const float MaxPollSeconds = 5f;
 
+        /// <summary>Sanity threshold on a single PQS sample. Stock KSP bodies have terrain
+        /// peaks well under 10 km; a sample whose magnitude exceeds this almost certainly
+        /// indicates a KSP API mismatch (e.g. <c>PQS.GetSurfaceHeight</c> returning
+        /// altitude-above-sea directly rather than the radial distance we subtract
+        /// <c>body.Radius</c> from — that produces ~-600 km for Kerbin-class bodies).
+        /// 100 km is generous for any real terrain, tight enough to catch the
+        /// off-by-radius case for every PQS-bearing body in the stock system except Gilly
+        /// and Minmus (60 km radius and below). Small-moon mistakes would slip through
+        /// here; in-KSP soak is the backstop.</summary>
+        public const double SanityMaxAbsAltitudeMeters = 100_000d;
+
         /// <summary>Pure: returns true when the absolute difference between the stored and
         /// PQS-reported altitudes exceeds <paramref name="thresholdMeters"/>. NaN inputs
         /// always return false (no realignment) — we never act on incomplete data.</summary>
@@ -65,6 +77,16 @@ namespace LmpClient.VesselUtilities
             return Math.Abs(currentSample - previousSample) <= stabilityDeltaMeters;
         }
 
+        /// <summary>Pure: returns true when a single PQS altitude sample is within the
+        /// sanity envelope. NaN or out-of-range values fail the check so the runtime
+        /// driver can bail before snapping a vessel to a physically-impossible position.</summary>
+        public static bool IsSaneAltitudeSample(double altitudeAboveSea)
+        {
+            if (double.IsNaN(altitudeAboveSea) || double.IsInfinity(altitudeAboveSea))
+                return false;
+            return Math.Abs(altitudeAboveSea) <= SanityMaxAbsAltitudeMeters;
+        }
+
         /// <summary>
         /// Runtime entry. Inspects the freshly-loaded vessel, runs the PQS-alignment
         /// coroutine when needed, and invokes <paramref name="onAligned"/> exactly once
@@ -72,6 +94,10 @@ namespace LmpClient.VesselUtilities
         /// API failure or non-applicable situation (orbiting vessel, body without PQS),
         /// the callback fires immediately — bug-fix code must never block a successful
         /// load just because the auxiliary alignment couldn't run.
+        ///
+        /// <para>Note: the callback may fire up to <see cref="MaxPollSeconds"/> after this
+        /// returns when an alignment is required. Subscribers to
+        /// <c>VesselLoadEvent.onLmpVesselLoaded</c> must remain idempotent.</para>
         /// </summary>
         public static void AlignAndThen(Vessel vessel, Action onAligned)
         {
@@ -91,8 +117,17 @@ namespace LmpClient.VesselUtilities
 
                 var pqs = vessel.mainBody.pqsController;
                 var pqsSurfaceHeight = QueryPqsSurfaceHeight(vessel.mainBody, pqs, vessel.latitude, vessel.longitude);
-                var stored = vessel.terrainAltitude;
 
+                if (!IsSaneAltitudeSample(pqsSurfaceHeight))
+                {
+                    LunaLog.LogError($"[fix:BUG-008] PQS sample for vessel {vessel.id} on body {vessel.mainBody.bodyName} " +
+                                     $"is outside the sanity envelope ({pqsSurfaceHeight} m); skipping alignment. " +
+                                     $"This usually means the KSP PQS API returns altitude-above-sea directly — the `- body.Radius` step is wrong for this build.");
+                    onAligned?.Invoke();
+                    return;
+                }
+
+                var stored = vessel.terrainAltitude;
                 if (!NeedsRealignment(stored, pqsSurfaceHeight, DefaultThresholdMeters))
                 {
                     onAligned?.Invoke();
@@ -134,14 +169,37 @@ namespace LmpClient.VesselUtilities
             return pqs.GetSurfaceHeight(radial) - body.Radius;
         }
 
+        /// <summary>Returns true when the vessel is still alive and not queued for
+        /// removal. Unity's destroyed-object operator overload makes <c>vessel == null</c>
+        /// return true post-destroy, so the check is reliable; the kill-list check covers
+        /// the in-progress case where <c>VesselRemoveSystem</c> has flagged the vessel
+        /// but hasn't yet destroyed the GameObject.</summary>
+        private static bool IsAlive(Vessel vessel, Guid vesselId)
+        {
+            if (vessel == null) return false;
+            if (VesselRemoveSystem.Singleton != null && VesselRemoveSystem.Singleton.VesselWillBeKilled(vesselId)) return false;
+            return true;
+        }
+
         private static IEnumerator StabiliseAndAlignCoroutine(Vessel vessel, Action onAligned)
         {
             var startTime = Time.realtimeSinceStartup;
             var previousSample = double.NaN;
             var pqs = vessel.mainBody.pqsController;
+            var vesselId = vessel.id;
 
             while (true)
             {
+                // Vessel may have been killed (out of safety bubble, ownership transfer,
+                // VesselRemoveSystem.KillVessel) while we were polling. If so, abandon
+                // without firing the load event — subscribers like KerbalEvents.OnVesselLoaded
+                // would try to dereference a destroyed Unity object and throw.
+                if (!IsAlive(vessel, vesselId))
+                {
+                    LunaLog.Log($"[fix:BUG-008] vessel {vesselId} was removed during PQS poll; abandoning alignment without firing load event");
+                    yield break;
+                }
+
                 double currentSample;
                 try
                 {
@@ -149,7 +207,14 @@ namespace LmpClient.VesselUtilities
                 }
                 catch (Exception ex)
                 {
-                    LunaLog.LogError($"[fix:BUG-008] PQS poll threw on vessel {vessel.id}; firing load event without alignment. Details: {ex}");
+                    LunaLog.LogError($"[fix:BUG-008] PQS poll threw on vessel {vesselId}; firing load event without alignment. Details: {ex}");
+                    onAligned?.Invoke();
+                    yield break;
+                }
+
+                if (!IsSaneAltitudeSample(currentSample))
+                {
+                    LunaLog.LogError($"[fix:BUG-008] PQS sample for vessel {vesselId} outside sanity envelope ({currentSample} m); aborting alignment");
                     onAligned?.Invoke();
                     yield break;
                 }
@@ -159,10 +224,18 @@ namespace LmpClient.VesselUtilities
 
                 if (stable || timedOut)
                 {
+                    // Re-check before any KSP property access in the snap path — vessel
+                    // could have been killed between the previous IsAlive and now.
+                    if (!IsAlive(vessel, vesselId))
+                    {
+                        LunaLog.Log($"[fix:BUG-008] vessel {vesselId} removed just before snap; abandoning");
+                        yield break;
+                    }
+
                     if (timedOut && !stable)
-                        LunaLog.Log($"[fix:BUG-008] PQS alignment timed out after {MaxPollSeconds}s for vessel {vessel.id}; applying best-effort snap at {currentSample:F2} m");
+                        LunaLog.Log($"[fix:BUG-008] PQS alignment timed out after {MaxPollSeconds}s for vessel {vesselId}; applying best-effort snap at {currentSample:F2} m");
                     else
-                        LunaLog.Log($"[fix:BUG-008] PQS stabilised for vessel {vessel.id} at {currentSample:F2} m; snapping vessel");
+                        LunaLog.Log($"[fix:BUG-008] PQS stabilised for vessel {vesselId} at {currentSample:F2} m; snapping vessel");
 
                     TrySnapToSurface(vessel, currentSample);
                     onAligned?.Invoke();
@@ -174,25 +247,32 @@ namespace LmpClient.VesselUtilities
             }
         }
 
+        /// <summary>
+        /// Actually move the vessel rigidbody to the new altitude. Setting
+        /// <c>vessel.altitude</c> alone is a bookkeeping field write that KSP overwrites
+        /// from the rigidbody position on the next <c>Vessel.UpdateCaches()</c>; the
+        /// real move happens via <c>body.GetWorldSurfacePosition</c> + <c>vessel.SetPosition</c>
+        /// (the same idiom used by <c>Harmony/OrbitDriver_UpdateFromParameters.cs</c>).
+        /// Bookkeeping fields are updated alongside so any LMP system reading
+        /// <c>vessel.altitude</c> / <c>vessel.terrainAltitude</c> before the next physics
+        /// tick sees consistent values.
+        /// </summary>
         private static void TrySnapToSurface(Vessel vessel, double pqsSurfaceHeight)
         {
             try
             {
-                // Preserve the vessel's height above terrain (the proto's intent); only re-base
-                // the terrain reference itself. Then re-sync the orbit driver so KSP's cached
-                // position is consistent with the new altitude.
                 var heightAboveTerrain = vessel.altitude - vessel.terrainAltitude;
                 var newAltitude = pqsSurfaceHeight + heightAboveTerrain;
 
+                var newWorldPos = vessel.mainBody.GetWorldSurfacePosition(vessel.latitude, vessel.longitude, newAltitude);
+                vessel.SetPosition(newWorldPos);
+
                 vessel.altitude = newAltitude;
                 vessel.terrainAltitude = pqsSurfaceHeight;
-
-                if (vessel.orbitDriver != null)
-                    vessel.orbitDriver.updateFromParameters();
             }
             catch (Exception ex)
             {
-                LunaLog.LogError($"[fix:BUG-008] snap-to-surface threw on vessel {vessel.id}; continuing without snap. Details: {ex}");
+                LunaLog.LogError($"[fix:BUG-008] snap-to-surface threw on vessel {vessel?.id}; continuing without snap. Details: {ex}");
             }
         }
     }
