@@ -221,7 +221,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-023] Astronaut Complex desyncs with assigned kerbals, breaks hiring
 - **Severity:** Critical (no in-game recovery)
-- **Status:** Open
+- **Status:** ✅ Fixed on fork (2026-05-17, session 9, commit `5a240c32`). Three-part port from upstream Release/0_29_2 (Drew Banyai, d3223931 + 138c2b3e): `VesselLoader.ScrubInvalidProtoCrew` strips null entries in lockstep with `protoCrewNames`; `VesselProtoSystem.CheckVesselsToLoad` drains queued `KerbalProto` before each vessel-load batch; `Part_RegisterCrew` + `KnowledgeBase_GetVesselCrewByAvailablePart` Harmony patches as defense-in-depth for autosave Save+Load round-trip. See [Phase-2 analysis](02-analysis/bug-023-astronaut-complex-desync.md).
 - **Sources:** [#576](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/576), [#603](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/603)
 - **Evidence of frequency:** Two separate reports, screenshots showing 10/12 capacity but no hire-able slots.
 - **Symptoms:** A kerbal from a particular craft "does not exist in the astronaut complex" per debug console; terminating that craft fixes it.
@@ -235,7 +235,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-025] R&D node researchable multiple times by separate clients
 - **Severity:** High (game-breaking economy bug in shared-career play)
-- **Status:** Open
+- **Status:** ✅ Fixed on fork (2026-05-17, session 9, commit `83905d4d`). Server-side synchronous check-and-claim under the per-scenario writer lock + new `ShareProgressTechnologyRejectedMsgData` server-to-client rejection + client-side `ShareScienceSystem.IgnoreEvents`-bracketed `AddScience` refund. Additive wire enum (`TechnologyRejected = 11`); no protocol bump. See [Phase-2 analysis](02-analysis/bug-025-rd-double-purchase.md).
 - **Sources:** [#667](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/667)
 - **Evidence of frequency:** Filed 2026-05-07 against a self-compiled latest-main build, so the bug exists on the current head.
 - **Symptoms:** Two clients with the node details panel already open can both purchase the same node; the right-pane state never invalidates and science is charged each time.
@@ -433,12 +433,14 @@ These are my picks for the first wave of Phase 2 code analysis, ranked by a comb
 4. ~~**[BUG-018] Docking destroys ports and kicks players**~~ — ✅ FIXED IN MASTER via upstream PRs [#660](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/660) + [#687](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/687) (commit `4c124f11`). Adopted verbatim.
 5. ~~**[BUG-013] Localized stateString NRE spam**~~ — ✅ FIXED ON FORK (`c5ab8fa5`). Defensive `VesselSanitizer` rewrites localised reaction-wheel `stateString` back to canonical English on ingest.
 6. ~~**[BUG-010] Disconnect destroys craft within rendering distance of another player**~~ — ✅ FIXED ON FORK (session 7). Part A: server-broadcasts `VesselPinned`; remaining clients hold the leaver's vessels immortal via `VesselPinnedSys` until any player takes the helm. Part B: client flushes a fresh proto for owned vessels before `Disconnect`. See [`docs/research/02-analysis/bug-010-disconnect-vessel-handoff.md`](02-analysis/bug-010-disconnect-vessel-handoff.md).
-7. **[BUG-025] R&D node researchable multiple times in shared career** — OPEN. Clean repro, easy to triage, and shared career is one of the few KSP draws that depends on this being right.
+7. ~~**[BUG-025] R&D node researchable multiple times in shared career**~~ — ✅ FIXED ON FORK (`83905d4d`). Server-side check-and-claim + rejection message + client-side science refund (wrapped in ShareScienceSystem event-suppression to avoid the runaway broadcast loop).
 8. **[BUG-045] Breaking Ground deployable science vanishes on reconnect** — OPEN. Highest reaction count in the open tracker (22), one of the few bug families with a clear hypothesis (missing game-event hook) and no upstream PR in flight.
 9. ~~**[BUG-033] Backup race in `ScenarioStoreSystem.CurrentScenarios`**~~ — ✅ FIXED ON FORK (`87105f41`). Per-scenario writer lock now also covers backup-side `ConfigNode.ToString()`; AB-BA deadlock vs `ScenarioPartPurchaseDataUpdater` avoided by dropping the redundant outer `BackupLock` from this path.
-10. **[BUG-023] Astronaut Complex desync** — OPEN. Game-breaking and unrecoverable in-game; small reaction count but huge severity-per-occurrence.
+10. ~~**[BUG-023] Astronaut Complex desync**~~ — ✅ FIXED ON FORK (`5a240c32`, ported from Drew Banyai's Release/0_29_2). Three-part fix: load-time `ScrubInvalidProtoCrew` + `KerbalsToProcess` drain race-closer + Harmony patches for the autosave round-trip.
 
-**Fork-closed bugs not originally in the top-10:** [BUG-006] (cross-subspace lock, capstone `d64acf66`), [BUG-014] (audit-closed via upstream PR #628, `7f1393f4`), [BUG-019] + [BUG-024] (closed by upstream PR #687, audit `4c124f11`), [BUG-051a/b] (warp limbo, `9732fc7e` + `25303e7d`), [BUG-003/004] (interp cap, `cd551859`).
+**All ten top-10 bugs are closed as of 2026-05-17 (session 9).** Eight fixed on the fork, two adopted from upstream PRs. Closure marks Stages 3 + 4 of the campaign complete.
+
+**Fork-closed bugs not originally in the top-10:** [BUG-006] (cross-subspace lock, capstone `d64acf66`), [BUG-014] (audit-closed via upstream PR #628, `7f1393f4`), [BUG-019] + [BUG-024] (closed by upstream PR #687, audit `4c124f11`), [BUG-051a/b] (warp limbo, `9732fc7e` + `25303e7d`), [BUG-003/004] (interp cap, `cd551859`), [BUG-052] (vendored Lidgren NRE on late-ACK during peer shutdown, `b7a51ae1`).
 
 ## Open questions
 
