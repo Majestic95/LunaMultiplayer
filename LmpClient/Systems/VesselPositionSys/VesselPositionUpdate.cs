@@ -71,10 +71,26 @@ namespace LmpClient.Systems.VesselPositionSys
         //speed, appearing frozen until a fresher update arrived. Capping the future side at
         //a finite multiple causes a visible skip to the latest known pose instead of a crawl.
         //See docs/research/02-analysis/bug-003-004-frozen-vessel-interp-cap.md.
-        private const int MaxFutureInterpolationMultiplier = 10;
+        public const int MaxFutureInterpolationMultiplier = 10;
 
-        private double MaxInterpolationDuration => TimeSpan.FromMilliseconds(SettingsSystem.ServerSettings.SecondaryVesselUpdatesMsInterval).TotalSeconds
-            * (WarpSystem.Singleton.SubspaceIsEqualOrInThePast(Target.SubspaceId) ? 2 : MaxFutureInterpolationMultiplier);
+        public const int PastOrEqualInterpolationMultiplier = 2;
+
+        /// <summary>
+        /// [Stage 4.10] Pure helper for the BUG-003/004 interpolation cap math. Exposed as
+        /// <c>public static</c> so <c>LmpClientTest</c> can pin the multiplier-selection logic
+        /// without going through the singletons. The instance property <see cref="MaxInterpolationDuration"/>
+        /// is the single production call site.
+        /// </summary>
+        public static double ComputeMaxInterpolationDuration(int intervalMs, bool subspaceIsEqualOrInThePast)
+        {
+            var baseSeconds = TimeSpan.FromMilliseconds(intervalMs).TotalSeconds;
+            var multiplier = subspaceIsEqualOrInThePast ? PastOrEqualInterpolationMultiplier : MaxFutureInterpolationMultiplier;
+            return baseSeconds * multiplier;
+        }
+
+        private double MaxInterpolationDuration => ComputeMaxInterpolationDuration(
+            SettingsSystem.ServerSettings.SecondaryVesselUpdatesMsInterval,
+            WarpSystem.Singleton.SubspaceIsEqualOrInThePast(Target.SubspaceId));
 
         private int MessageCount => VesselPositionSystem.TargetVesselUpdateQueue.TryGetValue(VesselId, out var queue) ? queue.Count : 0;
         public double TimeDifference { get; private set; }

@@ -174,15 +174,36 @@ namespace LmpClient.Systems.Warp
         /// </summary>
         private void CheckSteadyStateRetry()
         {
-            if (CurrentSubspace != -1) return;
-            if (!WaitingSubspaceIdFromServer) return;
-            if (TimeWarp.CurrentRateIndex != 0) return;
-            if (Math.Abs(TimeWarp.CurrentRate - 1) >= 0.1f) return;
-            if (_currentRequestSeq == 0) return; //should not happen — RequestNewSubspace allocates before sending — but guard anyway
+            if (!ShouldSteadyStateRetry(CurrentSubspace, WaitingSubspaceIdFromServer,
+                    TimeWarp.CurrentRateIndex, TimeWarp.CurrentRate, _currentRequestSeq))
+                return;
 
             LunaLog.Log($"[fix:BUG-051b] stuck-at-warp steady-state retry — resending NewSubspace seq={_currentRequestSeq}");
             MessageSender.SendNewSubspace(_currentRequestSeq);
             _stoppedWarpingTimeStamp = LunaComputerTime.UtcNow;
+        }
+
+        /// <summary>
+        /// [Stage 4.10] Pure helper for the BUG-051b retry predicate. Exposed as
+        /// <c>public static</c> so <c>LmpClientTest</c> can pin the predicate without
+        /// constructing the full <see cref="WarpSystem"/> singleton and without depending on
+        /// KSP's <c>TimeWarp</c> static.
+        ///
+        /// Returns <c>true</c> when ALL of: (a) the client has no current subspace assignment,
+        /// (b) the client is actively waiting for a server-side assignment, (c) the KSP time-warp
+        /// rate is back at 1x (rate index 0 and rate within 0.1 of 1.0), and (d) a non-zero
+        /// request sequence is in flight (sequence 0 is the sentinel "no request" value used
+        /// by the BUG-051a dedup cache).
+        /// </summary>
+        public static bool ShouldSteadyStateRetry(int currentSubspace, bool waitingSubspaceIdFromServer,
+            int timeWarpRateIndex, float timeWarpRate, uint currentRequestSeq)
+        {
+            if (currentSubspace != -1) return false;
+            if (!waitingSubspaceIdFromServer) return false;
+            if (timeWarpRateIndex != 0) return false;
+            if (Math.Abs(timeWarpRate - 1) >= 0.1f) return false;
+            if (currentRequestSeq == 0) return false; //sentinel — RequestNewSubspace allocates before sending
+            return true;
         }
 
         /// <summary>
