@@ -30,3 +30,6 @@ Server/*.csproj.user
 LmpGlobal/*.csproj.user
 
 Server/packages
+
+# Per-session bug-review receipts written by .claude/hooks/require-bug-review.sh
+.claude/review-receipts/

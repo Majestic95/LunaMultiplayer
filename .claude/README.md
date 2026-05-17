@@ -8,7 +8,7 @@ When opening an upstream PR: use `git add` with explicit paths, **never** `git a
 
 ## Hooks (Automated)
 
-Two hooks run automatically every time a file is edited or written:
+Three hooks run automatically. Two on every Edit/Write, one on every Bash invocation:
 
 ### 1. File Size Checker (`hooks/check-file-size.sh`)
 - Warns at **600 lines** (soft cap)
@@ -35,6 +35,28 @@ Caps are higher than CE's 400/500 because C# is more verbose than TypeScript. Ex
 | `/LmpCommon/` (non-Message) | Shared protocol | `network-review.md` |
 | `CLAUDE.md`, `/docs/`, `/Documentation/` | Architecture | `architecture-review.md` |
 | Everything else | General | `review-prompt.md` |
+
+### 3. Bug-Review Gate (`hooks/require-bug-review.sh`)
+- Fires on **PreToolUse** for `Bash`. No-ops for commands that don't contain `git commit`.
+- Reads `git diff --cached`, filters to production source paths, and **blocks the commit (exit 2)** unless a matching review receipt exists.
+- A "review receipt" is a file in `.claude/review-receipts/<sha1-of-staged-diff>.txt` — written by Claude after running the appropriate review-agent on the staged content. Receipts are gitignored (per-session markers).
+- Exempt paths bypass the gate entirely: `docs/`, `Documentation/`, `.claude/`, `CLAUDE.md`, `README.md`, `.gitignore`, `.editorconfig`, `*.csproj`, `*.sln`, `*.props`, `*.targets`, all `/Test/` projects, `AssemblyInfo.cs`, `.Designer.cs`, `.g.cs`, `Test*.cs`. Docs / scaffolding / test commits proceed without the gate.
+
+#### Workflow for production commits
+
+1. Stage the production files (`git add <paths>`).
+2. Run the appropriate review-agent on the staged content (see classifier table below — or use the routing hint that `classify-change.sh` already emitted on Edit/Write).
+3. Address `[MUST FIX]` findings; iterate.
+4. When the staged set is final, write the receipt:
+   ```bash
+   echo "reviewed by <agent-name> on $(date -u +%FT%TZ); findings: <summary>" \
+     > .claude/review-receipts/$(git diff --cached | sha1sum | awk '{print $1}').txt
+   ```
+5. `git commit`. Hook sees the receipt, allows the commit.
+
+Any further `git add` invalidates the receipt (different staged diff → different sha → no matching receipt) and requires a fresh review pass.
+
+This rule exists because the upstream community has reverted AI-attributed contributions before and because BUG-008 Phase A shipped with two ship-blocking correctness issues that only the post-hoc review caught (see commit `078cef31`). **Nothing gets skipped.**
 
 ### Stop Hook
 At session end, prints a reminder to update `CLAUDE.md` if conventions or systems changed, and a reminder **not** to push to upstream.
