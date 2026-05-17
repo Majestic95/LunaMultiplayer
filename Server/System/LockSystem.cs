@@ -1,6 +1,8 @@
 ﻿using LmpCommon.Locks;
 using Server.Client;
 using Server.Log;
+using Server.Settings.Structures;
+using Server.System.Agency;
 using System;
 using System.Linq;
 
@@ -39,6 +41,63 @@ namespace Server.System
                 LunaLog.Debug($"[fix:BUG-005/006] refusing {lockDef.Type} lock on {lockDef.VesselId} for {lockDef.PlayerName} " +
                               $"(requester subspace {requesterSubspace} is past vessel auth subspace {vessel.AuthoritativeSubspaceId})");
                 return false;
+            }
+
+            //[Stage 5.17a] Cross-agency rejection. When per-agency career is on, refuse a
+            //vessel-scoped lock acquire when the requester's agency does not match the vessel's
+            //OwningAgencyId. Bypass-only cases:
+            //  - Gate off: agency surface is invisible; never reject (spec §11).
+            //  - Non-vessel-scoped lock type (AsteroidComet / Contract / Kerbal / Spectator):
+            //    no vessel dimension, no agency boundary to enforce.
+            //  - lockDef.VesselId == Guid.Empty: caller didn't pin a vessel; cannot compare.
+            //  - Vessel.OwningAgencyId == Guid.Empty: spec §10 Q3 Unassigned-sentinel — any
+            //    agency may interact. Operator transferagency (Stage 5.18d) flips this on
+            //    individual vessels when ownership becomes definite.
+            //  - Requester has no agency registered: defensive bypass for direct test
+            //    AcquireLock(force:true) calls (e.g. Bug010PinnedBroadcastTest plants locks).
+            //    Production path is safe: HandshakeSystem sets Authenticated=true and runs
+            //    OnPlayerAuthenticated (which calls RegisterAgency) on the same Lidgren receive
+            //    thread before returning; per-connection Lidgren message ordering then ensures
+            //    the next CliMsg from this player cannot arrive in the gap.
+            //
+            //Reject-rather-than-bypass case (closes the ingest-vs-acquire race documented
+            //in round-1 consumer-lens review):
+            //  - Vessel not yet in CurrentVessels under gate=on: the proto-ingest path
+            //    (VesselDataUpdater.RawConfigNodeInsertOrUpdate) stamps the owning agency
+            //    inside a fire-and-forget Task.Run, but MessageQueuer.RelayMessage broadcasts
+            //    the original wire bytes synchronously on the receive thread. A malicious
+            //    Bob receiving Alice's relayed proto could race a LockAcquireMsgData against
+            //    Alice's stamp Task and win the bypass before the vessel lands in the store.
+            //    Defensively refuse the acquire — legitimate clients delay LockAcquire until
+            //    after VesselSync (standard KSP flight init flow), so the rejection only bites
+            //    racing peers. Symmetric with the spec's "server is authoritative" stance.
+            //
+            //**Force-vs-agency interaction (Stage 5.18d transferagency forward-note).** The
+            //force:true flag at line ~107 below only overrides existing-holder conflicts; it
+            //does NOT bypass this cross-agency authority check (test pinned). When 5.18d's
+            //transferagency admin command lands, it must mutate Vessel.OwningAgencyId AND
+            //the affected players' AgencyByPlayerName entries directly (not via this lock
+            //path), then call ReleasePlayerLocks for cross-agency-now-violating holders on
+            //the transferred vessel. Do NOT extend force:true to bypass — that would be
+            //weaponisable by any client passing force=true on a LockAcquireMsgData.
+            if (GameplaySettings.SettingsStore.PerAgencyCareer
+                && IsVesselScopedLockType(lockDef.Type)
+                && lockDef.VesselId != Guid.Empty)
+            {
+                if (!VesselStoreSystem.CurrentVessels.TryGetValue(lockDef.VesselId, out var vesselForAgency))
+                {
+                    LunaLog.Debug($"[fix:per-agency-career] refusing {lockDef.Type} lock on {lockDef.VesselId} for {lockDef.PlayerName} " +
+                                  $"(vessel not yet in store under gate=on; closes ingest-vs-acquire race)");
+                    return false;
+                }
+                if (vesselForAgency.OwningAgencyId != Guid.Empty
+                    && AgencySystem.AgencyByPlayerName.TryGetValue(lockDef.PlayerName, out var requesterAgencyId)
+                    && requesterAgencyId != vesselForAgency.OwningAgencyId)
+                {
+                    LunaLog.Debug($"[fix:per-agency-career] refusing {lockDef.Type} lock on {lockDef.VesselId} for {lockDef.PlayerName} " +
+                                  $"(requester agency {requesterAgencyId:N} != vessel owning agency {vesselForAgency.OwningAgencyId:N})");
+                    return false;
+                }
             }
 
             //Player tried to acquire a lock that they already own

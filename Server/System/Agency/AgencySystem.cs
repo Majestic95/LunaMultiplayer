@@ -2,6 +2,7 @@ using Server.Log;
 using Server.Settings.Structures;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 
 namespace Server.System.Agency
@@ -125,6 +126,47 @@ namespace Server.System.Agency
             }
 
             LunaLog.Normal($"[fix:per-agency-career] Loaded {loadedCount} per-agency career state(s) from disk");
+
+            // [Stage 5.17a round-1 upgrade-lens review] Per-orphan-agency vessel warning.
+            // If a vessel's lmpOwningAgency points at an agency-id that didn't load (file
+            // corrupted + per-file isolation skip; manual delete from Universe/Agencies/;
+            // .bak rotation lost; etc.), the owning player on reconnect will mint a NEW
+            // agency under a DIFFERENT id — and Stage 5.17a's cross-agency rejection will
+            // lock them out of their own vessels. Loud diagnostic at boot lets the operator
+            // recover (restore .bak, transferagency, or accept the loss before it bites).
+            //
+            // Walk the already-loaded vessel set (LoadExistingVessels ran first at boot per
+            // MainServer ordering). Deduplicate per orphan agency id and report the vessel
+            // count. Quiet when no orphans found.
+            WarnAboutOrphanedVessels();
+        }
+
+        /// <summary>
+        /// Operator-facing boot diagnostic: scan <see cref="VesselStoreSystem.CurrentVessels"/>
+        /// for any vessel stamped with an <c>OwningAgencyId</c> that is not present in the
+        /// <see cref="Agencies"/> registry. Each orphan id produces one warning line listing
+        /// the affected vessel count. Stage 5.17a hardening: without this, a corrupted agency
+        /// file (per-file isolation skip in <see cref="LoadExistingAgencies"/>) silently locks
+        /// the affected player out of their own vessels at next reconnect.
+        /// </summary>
+        private static void WarnAboutOrphanedVessels()
+        {
+            var orphanCounts = new Dictionary<Guid, int>();
+            foreach (var vessel in VesselStoreSystem.CurrentVessels.Values)
+            {
+                var ownerId = vessel.OwningAgencyId;
+                if (ownerId == Guid.Empty)
+                    continue; // Unassigned-sentinel per spec §10 Q3 — not orphan.
+                if (Agencies.ContainsKey(ownerId))
+                    continue;
+                orphanCounts.TryGetValue(ownerId, out var count);
+                orphanCounts[ownerId] = count + 1;
+            }
+
+            foreach (var kvp in orphanCounts)
+            {
+                LunaLog.Warning($"[fix:per-agency-career] {kvp.Value} vessel(s) reference agency {kvp.Key:N} which did not load. The owning player will mint a new agency on reconnect and be locked out of these vessels by the cross-agency check. Restore Universe/Agencies/{kvp.Key:N}.txt(.bak) or admin transferagency to recover.");
+            }
         }
 
         /// <summary>
