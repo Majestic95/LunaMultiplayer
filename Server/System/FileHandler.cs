@@ -77,6 +77,94 @@ namespace Server.System
         }
 
         /// <summary>
+        /// Thread-safe atomic write: writes to <c>path.tmp</c>, rotates any existing <c>path</c>
+        /// to <c>path.bak</c> (single-generation, overwriting a stale .bak), then renames
+        /// <c>path.tmp</c> to <c>path</c>. Crash-tolerant: an operator power-loss during the
+        /// brief window where <c>path</c> has been rotated but <c>path.tmp</c> has not yet been
+        /// renamed leaves the canonical path missing but the previous-good content recoverable
+        /// from <c>path.bak</c>. Pairs with <see cref="ReadAtomic"/>, which falls back to
+        /// <c>path.bak</c> when the canonical path is absent.
+        ///
+        /// Added Stage 5.14c (spec §3, Q7 sign-off) for the per-agency career file format —
+        /// <c>Universe/Agencies/{GUID}.txt</c> holds the player's career, so a half-written
+        /// file from a server kill is unacceptable. Use this path for any state where the
+        /// canonical "must not be half-written" property matters; the existing
+        /// <see cref="WriteToFile(string,string)"/> remains the default for write-once /
+        /// regenerable files.
+        ///
+        /// Note: not fsync'd. A kernel write-buffer that hasn't flushed will still lose the
+        /// most recent write on power-loss; the rotation only guards against process kill /
+        /// crash and against a partially-flushed <c>path</c>.
+        /// </summary>
+        /// <param name="path">Canonical path. Must include a filename — bare directory paths
+        /// trip the underlying <see cref="GetLockSemaphore"/> guard.</param>
+        /// <param name="text">UTF-8 text to write.</param>
+        public static void WriteAtomic(string path, string text)
+        {
+            var tmpPath = path + ".tmp";
+            var bakPath = path + ".bak";
+
+            lock (GetLockSemaphore(path))
+            {
+                try
+                {
+                    File.WriteAllText(tmpPath, text, Encoding.UTF8);
+
+                    if (File.Exists(path))
+                    {
+                        if (File.Exists(bakPath))
+                            File.Delete(bakPath);
+                        File.Move(path, bakPath);
+                    }
+
+                    File.Move(tmpPath, path);
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Error($"Error writing atomically to file: {path}, Exception: {e}");
+
+                    // Best-effort cleanup of a leftover .tmp so the next write isn't surprised
+                    // by a stale name when the rotation logic re-runs. Swallowed — if cleanup
+                    // fails, the next WriteAtomic will overwrite the .tmp on its own first step.
+                    if (File.Exists(tmpPath))
+                    {
+                        try { File.Delete(tmpPath); }
+                        catch { }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Thread-safe atomic read companion to <see cref="WriteAtomic"/>. Reads <c>path</c>
+        /// if it exists; otherwise falls back to <c>path.bak</c> (the prior generation kept
+        /// by the rotation). Logs a warning when recovering from <c>.bak</c> so operators see
+        /// that the last atomic write was interrupted. Returns <see cref="string.Empty"/> when
+        /// neither file exists (first-ever read on an empty state).
+        ///
+        /// Does NOT read <c>path.tmp</c>. A leftover <c>.tmp</c> could be a partially-flushed
+        /// in-progress write; treating it as authoritative could resurrect a corrupt payload.
+        /// </summary>
+        public static string ReadAtomic(string path)
+        {
+            var bakPath = path + ".bak";
+
+            lock (GetLockSemaphore(path))
+            {
+                if (File.Exists(path))
+                    return File.ReadAllText(path);
+
+                if (File.Exists(bakPath))
+                {
+                    LunaLog.Warning($"Atomic read recovered from .bak (canonical path missing): {path}");
+                    return File.ReadAllText(bakPath);
+                }
+
+                return string.Empty;
+            }
+        }
+
+        /// <summary>
         /// Thread safe file creating method. It won't create the file if it already exists!
         /// </summary>
         /// <param name="path">Path to the file</param>
