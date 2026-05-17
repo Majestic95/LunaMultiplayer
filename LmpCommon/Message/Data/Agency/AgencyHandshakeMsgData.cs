@@ -33,15 +33,17 @@ namespace LmpCommon.Message.Data.Agency
 
             GuidUtil.Serialize(AssignedAgencyId, lidgrenMsg);
             lidgrenMsg.Write(OtherAgencyCount);
-            // Null-guard symmetric with InternalGetMessageSize: a pooled instance can carry
-            // a stale OtherAgencies array longer than OtherAgencyCount, and a caller that
-            // resizes OtherAgencyCount without replacing the array would leave nulls in
-            // 0..count-1. Round-3 wire review caught the asymmetry where GetMessageSize
-            // guards but Serialize doesn't — pick one policy and apply it everywhere.
+            // Caller contract: OtherAgencies[0..OtherAgencyCount-1] must be non-null.
+            // No null-skip here — a sender that skipped nulls while emitting the original
+            // count would desync with the receiver (which reads OtherAgencyCount entries
+            // unconditionally), corrupting subsequent bytes on channel 22. Matches the
+            // "trust the caller" convention used by every other *MsgData in this folder;
+            // production caller AgencySystemSender.SendHandshakeTo builds the array via
+            // others.ToArray() so nulls are not reachable from production code. Round-4
+            // review reverted a Round-3 null-skip that produced this wire desync.
             for (var i = 0; i < OtherAgencyCount; i++)
             {
-                if (OtherAgencies[i] != null)
-                    OtherAgencies[i].Serialize(lidgrenMsg);
+                OtherAgencies[i].Serialize(lidgrenMsg);
             }
         }
 
@@ -79,15 +81,13 @@ namespace LmpCommon.Message.Data.Agency
 
         internal override int InternalGetMessageSize()
         {
-            // Null-guard on individual entries: the message-data pool can return an instance
-            // with a stale OtherAgencies array longer than OtherAgencyCount, and a caller that
-            // resizes OtherAgencyCount without replacing the array would leave null entries
-            // in 0..OtherAgencyCount-1. Round-2 wire review hardening.
+            // Caller contract (see InternalSerialize): OtherAgencies[0..OtherAgencyCount-1]
+            // must be non-null. Symmetric with Serialize — if either method tolerated nulls
+            // unilaterally, sender/receiver byte counts would diverge and corrupt the channel.
             var arraySize = 0;
             for (var i = 0; i < OtherAgencyCount; i++)
             {
-                if (OtherAgencies[i] != null)
-                    arraySize += OtherAgencies[i].GetByteCount();
+                arraySize += OtherAgencies[i].GetByteCount();
             }
 
             return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize;
