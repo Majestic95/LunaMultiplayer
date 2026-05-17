@@ -13,7 +13,11 @@ namespace Server.System
     /// </summary>
     public static class WarpRequestCache
     {
-        public static TimeSpan EntryTtl = TimeSpan.FromSeconds(60);
+        // Encapsulated against the retro-review S2 finding — mutable public statics are
+        // an attack surface for plugins loaded via LmpPluginHandler. The setter stays
+        // public to keep the existing test escape hatch (no tests use it today, but the
+        // contract was already published).
+        public static TimeSpan EntryTtl { get; set; } = TimeSpan.FromSeconds(60);
 
         private static readonly ConcurrentDictionary<(string Player, uint Seq), CacheEntry> Entries =
             new ConcurrentDictionary<(string, uint), CacheEntry>();

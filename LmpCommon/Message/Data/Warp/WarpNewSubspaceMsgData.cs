@@ -17,9 +17,11 @@ namespace LmpCommon.Message.Data.Warp
         /// <summary>
         /// Client-assigned identifier for this request. The server uses (PlayerCreator, RequestSeq)
         /// to dedupe retried subspace-creation requests so a stuck client cannot mint orphan subspaces.
-        /// Pre-fix clients send 0 (sentinel — "do not dedupe"); the server falls through to the legacy
-        /// always-mint path. Deserialize is defensive so a pre-fix payload missing the trailing 4 bytes
-        /// still parses cleanly.
+        /// Value 0 is the no-dedupe sentinel — the server's <see cref="Server.System.WarpRequestCache"/>
+        /// ignores it and always falls through to the always-mint path. The defensive read below
+        /// (zero when trailing 4 bytes are missing) historically supported pre-fix clients; after
+        /// the protocol bump to 0.30.0 those peers cannot complete the handshake at all, so the
+        /// defensive read now serves only replay-log / offline-tooling parsing of historical captures.
         /// </summary>
         public uint RequestSeq;
 
@@ -42,7 +44,11 @@ namespace LmpCommon.Message.Data.Warp
             PlayerCreator = lidgrenMsg.ReadString();
             SubspaceKey = lidgrenMsg.ReadInt32();
             ServerTimeDifference = lidgrenMsg.ReadDouble();
-            RequestSeq = lidgrenMsg.LengthBytes - lidgrenMsg.PositionInBytes >= sizeof(uint) ? lidgrenMsg.ReadUInt32() : 0u;
+            // Bit-aligned remainder check: Lidgren's read position is bit-indexed (LengthBits / Position),
+            // so the byte-aligned form `LengthBytes - PositionInBytes` could be off by up to 7 bits if
+            // an upstream serializer ever wrote a sub-byte field before this one. None do today, but the
+            // bit form is the unambiguous contract.
+            RequestSeq = (lidgrenMsg.LengthBits - lidgrenMsg.Position) >= 32 ? lidgrenMsg.ReadUInt32() : 0u;
         }
 
         internal override int InternalGetMessageSize()

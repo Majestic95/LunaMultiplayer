@@ -205,6 +205,19 @@ namespace Server.Message
         {
             var msgData = (VesselCoupleMsgData)message;
 
+            //BUG-005/006 (retro S3): a couple is destructive — it removes the weaker vessel,
+            //rewrites the dominant's AuthoritativeSubspaceId, and broadcasts a remove to all
+            //clients. A past-subspace initiator must not perform any of those mutations against
+            //a future-subspace vessel. Reject the entire couple BEFORE the relay so other
+            //clients never see the stale message.
+            if (VesselStoreSystem.CurrentVessels.TryGetValue(msgData.VesselId, out var existingDominant)
+                && WarpSystem.IsStrictlyPast(client.Subspace, existingDominant.AuthoritativeSubspaceId))
+            {
+                LunaLog.Debug($"[fix:BUG-005/006] rejecting Couple for {msgData.VesselId} from {client.PlayerName} " +
+                              $"(client subspace {client.Subspace} is past dominant vessel authority subspace {existingDominant.AuthoritativeSubspaceId})");
+                return;
+            }
+
             LunaLog.Debug($"Coupling message received! Dominant vessel: {msgData.VesselId}");
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, msgData);
 
