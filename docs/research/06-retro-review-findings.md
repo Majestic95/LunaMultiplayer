@@ -19,26 +19,28 @@ land here for later triage.
 
 | # | Domain | Finding | Resolution commit |
 |---|--------|---------|---------|
-| M1 | Network | `WarpNewSubspaceMsgData.cs:45` defensive read uses byte-aligned arithmetic on a bit-indexed reader (`LengthBytes - PositionInBytes`). Should be `LengthBits - Position >= 32`. | TBD |
-| M2 | Server | `Server/Web/Structures/ForkInformation.cs` aliases `ForkBuildInfo.ActiveFixes` array by reference — mutation through the property leaks into the registry. | TBD |
-| M3 | Persistence | `BackupSystem.RestoreFromArchive` overwrites canonical Universe without a pre-restore safety snapshot. Operator picking the wrong timestamp loses prior state irrecoverably. | TBD |
-| M4 | Persistence | `BackupSystem.RestoreFromArchive` is not crash-safe mid-copy. Failure between subtrees leaves a half-restored Universe with no recovery path. | TBD |
-| M5 | Server | `VesselMsgReader.HandleMessage` Position/Update/Flightstate/Resource/PartSync\*/ActionGroup/Fairing branches relay without an `IsStrictlyPast` check. With the restored client-side `SendUnloadedSecondaryVessel*` senders, a past-subspace client can corrupt a future-subspace vessel's state by changing subspace after acquiring an UnloadedUpdate lock. BUG-005/006 is partially regressed for unloaded vessels. | TBD |
+| M1 | Network | `WarpNewSubspaceMsgData.cs:45` defensive read uses byte-aligned arithmetic on a bit-indexed reader (`LengthBytes - PositionInBytes`). Should be `LengthBits - Position >= 32`. | `e83fb241` |
+| M2 | Server | `Server/Web/Structures/ForkInformation.cs` aliases `ForkBuildInfo.ActiveFixes` array by reference — mutation through the property leaks into the registry. | `e7a827a8` |
+| M3 | Persistence | `BackupSystem.RestoreFromArchive` overwrites canonical Universe without a pre-restore safety snapshot. Operator picking the wrong timestamp loses prior state irrecoverably. | `4322ad95` |
+| M4 | Persistence | `BackupSystem.RestoreFromArchive` is not crash-safe mid-copy. Failure between subtrees leaves a half-restored Universe with no recovery path. | `4322ad95` |
+| M5 | Server | `VesselMsgReader.HandleMessage` Position/Update/Flightstate/Resource/PartSync\*/ActionGroup/Fairing branches relay without an `IsStrictlyPast` check. With the restored client-side `SendUnloadedSecondaryVessel*` senders, a past-subspace client can corrupt a future-subspace vessel's state by changing subspace after acquiring an UnloadedUpdate lock. BUG-005/006 is partially regressed for unloaded vessels. | `fc21d56d` |
 
 ## [SHOULD FIX] — addressed inline
 
 | # | Domain | Finding | Resolution commit |
 |---|--------|---------|---------|
-| S1 | Network | `WarpNewSubspaceMsgData.cs` defensive-read comment is stale ("pre-fix clients send 0") — pre-fix clients cannot connect at all after the protocol bump to 0.30.0. Either delete the read or update the comment. | TBD |
-| S2 | Network | `WarpRequestCache.EntryTtl` is a mutable `public static` field. Encapsulate (private setter or test-only entry point). | TBD |
-| S3 | Network | `VesselMsgReader.HandleVesselCouple` stamps `AuthoritativeSubspaceId` whenever `client.Subspace > 0` — no `IsStrictlyPast` rewind guard. A past-subspace initiator can rewind authority via a couple message. | TBD |
-| S4 | Server | `VesselDataUpdater.RawConfigNodeInsertOrUpdate` reads `CurrentVessels` for the auth-preserve branch OUTSIDE the per-vessel semaphore. Concurrent updates can race. | TBD |
-| S5 | Server | `VesselDataUpdater.Semaphore` `ConcurrentDictionary<Guid, object>` grows without bound. Add cleanup hook off `VesselStoreSystem.RemoveVessel`. | TBD |
-| S6 | Server | The fire-and-forget `Task.Run` body in `RawConfigNodeInsertOrUpdate` has no top-level try/catch. Exceptions surface only via `TaskScheduler.UnobservedTaskException` at GC. | TBD |
-| S7 | Persistence | `BackupSystem` bypasses `FileHandler` for archive IO (raw `Directory.*` / `File.*`). Either route through `FileHandler` helpers or document the exception at top of file. | TBD |
-| S8 | Persistence | `Directory.Delete(dest, recursive: true)` in restore + retention paths has no Universe-root assertion. Misconfigured `UniverseDirectory` could fire a recursive delete against an arbitrary CWD-relative path. | TBD |
-| S9 | Persistence | `RunArchiveBackup` uses second-precision timestamps. Two backups in the same second can have the second's failure trigger a `Directory.Delete(archiveDir, recursive)` that destroys the first run's archive. | TBD |
-| S10 | Persistence | `RunArchiveBackup` holds `LockObj` for the entire `CopyUniverseSnapshot` — periodic `RunBackup` flush is blocked for the duration. Snapshot the flush under the lock then drop it before the copy. | TBD |
+| S1 | Network | `WarpNewSubspaceMsgData.cs` defensive-read comment is stale ("pre-fix clients send 0") — pre-fix clients cannot connect at all after the protocol bump to 0.30.0. Either delete the read or update the comment. | `e83fb241` |
+| S2 | Network | `WarpRequestCache.EntryTtl` is a mutable `public static` field. Encapsulate (private setter or test-only entry point). | `e83fb241` |
+| S3 | Network | `VesselMsgReader.HandleVesselCouple` stamps `AuthoritativeSubspaceId` whenever `client.Subspace > 0` — no `IsStrictlyPast` rewind guard. A past-subspace initiator can rewind authority via a couple message. | `e83fb241` |
+| S4 | Server | `VesselDataUpdater.RawConfigNodeInsertOrUpdate` reads `CurrentVessels` for the auth-preserve branch OUTSIDE the per-vessel semaphore. Concurrent updates can race. | `e7a827a8` |
+| S5 | Server | `VesselDataUpdater.Semaphore` `ConcurrentDictionary<Guid, object>` grows without bound. Add cleanup hook off `VesselStoreSystem.RemoveVessel`. | `e7a827a8` |
+| S6 | Server | The fire-and-forget `Task.Run` body in `RawConfigNodeInsertOrUpdate` has no top-level try/catch. Exceptions surface only via `TaskScheduler.UnobservedTaskException` at GC. | `e7a827a8` |
+| S7 | Persistence | `BackupSystem` bypasses `FileHandler` for archive IO (raw `Directory.*` / `File.*`). Either route through `FileHandler` helpers or document the exception at top of file. | `4322ad95` (documented exception path) |
+| S8 | Persistence | `Directory.Delete(dest, recursive: true)` in restore + retention paths has no Universe-root assertion. Misconfigured `UniverseDirectory` could fire a recursive delete against an arbitrary CWD-relative path. | `4322ad95` |
+| S9 | Persistence | `RunArchiveBackup` uses second-precision timestamps. Two backups in the same second can have the second's failure trigger a `Directory.Delete(archiveDir, recursive)` that destroys the first run's archive. | `4322ad95` |
+| S10 | Persistence | `RunArchiveBackup` holds `LockObj` for the entire `CopyUniverseSnapshot` — periodic `RunBackup` flush is blocked for the duration. Snapshot the flush under the lock then drop it before the copy. | `4322ad95` |
+
+All MUST and SHOULD findings closed. CONSIDER items below remain deferred.
 
 ## [CONSIDER] — deferred
 
