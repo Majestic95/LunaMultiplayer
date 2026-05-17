@@ -36,7 +36,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-001] Server forces solo subspace players to "catch up" to server time, teleporting craft
 - **Severity:** Critical
-- **Status:** Open
+- **Status:** Fixed on fork — commit `0f10b2d3`. Server detects solo subspaces and broadcasts `WarpSubspaceSoloStatusMsgData`; client's `TimeSyncSystem.CheckGameTime` early-bails when in a solo subspace. Documented residual: solo→non-solo rejoin may snap once because the server's `Subspaces[id].time` is stale relative to the solo player's UT (tracked under CLAUDE.md "Known Limitations"; follow-up has the client report its UT delta on rejoin). Phase-2 doc: [`02-analysis/bug-001-solo-subspace-catchup.md`](02-analysis/bug-001-solo-subspace-catchup.md).
 - **Sources:** [#469](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/469); related symptom in [#400](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/400) (ship "goes back in time" after relog)
 - **Evidence of frequency:** 2 reactions, 4 comments, repro is just "play on any server with a slow PC". Reporter quotes a server log line proving the catch-up math: `[LMP] Adjusted time from: 361950631.564869 to: 361950635.080549 due to error: -3515.68102836609`.
 - **Symptoms:** When the local client falls behind server time (slow PC, busy scene), the server snaps the vessel forward along its predicted trajectory, often into the ground. Reporter notes there is no reason for this to happen when the player is the only one in their subspace.
@@ -73,7 +73,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-005] Vessels disappear or duplicate seemingly at random after sync/rollback
 - **Severity:** Critical
-- **Status:** Open
+- **Status:** Fixed on fork — commit `d64acf66` (BUG-005/006 capstone, protocol bump 0.30.0). Server-side `AuthoritativeSubspaceId` per vessel rejects proto updates from past subspaces; restored `SendUnloadedSecondary*` client broadcasts are safe behind the auth check; `RemoveSubspace` refuses removal when any vessel still holds the subspace. Phase-2 doc: [`02-analysis/bug-005-006-cross-subspace-lock.md`](02-analysis/bug-005-006-cross-subspace-lock.md).
 - **Sources:** [#421](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/421), [#483](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/483), [#506](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/506), [#481](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/481); see also `godarklight/DarkMultiPlayer#373` ("DMP's sillyness that causes vessels to disappear or explode").
 - **Evidence of frequency:** Four distinct issues describing the same symptom over four years; consistently the top complaint on the forum search snippets ("disappearing and teleporting ships … ghost ships existing only on one client").
 - **Symptoms:** Crafts vanish from the tracking station, sometimes only on one client; duplicates of the same vessel appear; reverting/recovering can trigger ghost copies; spec said "use vanilla version … all players leave for >15 min … craft go delet".
@@ -82,7 +82,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-006] Player takes UnloadedUpdate lock on vessels in a different subspace, leading to drift and destruction
 - **Severity:** High
-- **Status:** Needs verification (closed 2019 with no clearly mapped fix; the reporter did a partial analysis but no PR was merged)
+- **Status:** Fixed on fork — commit `d64acf66` (BUG-005/006 capstone). `LockSystem.AcquireLock` now rejects cross-subspace acquires of `Control`/`Update`/`UnloadedUpdate` from past subspaces; the requester is told no without disturbing the current holder. Phase-2 doc: [`02-analysis/bug-005-006-cross-subspace-lock.md`](02-analysis/bug-005-006-cross-subspace-lock.md).
 - **Sources:** [#292](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/292)
 - **Evidence of frequency:** 6 comments, detailed source-code-level analysis from the reporter.
 - **Symptoms:** Vessels owned by another player and in another subspace receive updates from the local client, causing derailment.
@@ -182,16 +182,15 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-018] Docking with another player kicks one player and destroys ports
 - **Severity:** Critical (docking is a flagship feature)
-- **Status:** Likely fixed in master (or close to it)
-- **Sources:** [#380](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/380), [#422](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/422); architectural ancestor in `godarklight/DarkMultiPlayer#373` ("Fix docking — Possibly use lock-system to make sure dockings are deterministic"); open PR [#660](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/660) directly attacks the symptoms.
+- **Status:** Fixed in master — verified by fork audit (2026-05-16, session 5). Upstream PR [#687](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/687) commit `4c124f11` adds `DockingPortUtil.EnsureRecoverableForUndock` plus Harmony shims on `ModuleDockingNode_Undock` / `_UndockSameVessel` / `Part_Undock` that (a) pre-validate FSM state, (b) recover transient states before undock proceeds, and (c) rehydrate the docking pair from part-tree / `dockedPartUId` data when FSM reports an unexpected state. PR [#660](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/660) covers the same family on the coupling side. Adoption decision: verbatim (AdmiralRadish-owned turf per fork-master strategy; no fork edits needed).
+- **Sources:** [#380](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/380), [#422](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/422); architectural ancestor in `godarklight/DarkMultiPlayer#373` ("Fix docking — Possibly use lock-system to make sure dockings are deterministic").
 - **Evidence of frequency:** "Seems happen every time on our private server." Recurring across multiple years.
 - **Symptoms:** Docking ports explode, occupant kerbals are lost, sometimes one player is kicked.
 - **Suspected subsystem(s):** VesselCoupleSystem, VesselCoupleEvents, lock arbitration during the couple event.
-- **Related upstream activity:** Open PR [#660](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/660) ("fix: vessel coupling system for synchronized docking") explicitly covers NRE during coupling, control-loss after dock, and spectator visual desync. Merged PR [#687](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/687) ("docking local diffs need the same repair as remote docking diffs", 2026-05-16) tightens the local-side path. Worth verifying whether the multi-player repro is fully covered after #660 lands.
 
 #### [BUG-019] Undock button disappears after warp / scene change on docked craft
 - **Severity:** High (no in-game recovery — requires manual XML edits)
-- **Status:** Needs verification (issue filed three days before #687 merged; reporter and a commenter both speculate #660 / #687 cover it)
+- **Status:** Fixed in master — verified by fork audit (2026-05-16, session 5). Upstream PR [#687](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/687) `EnsureRecoverableForUndock` rehydrates the docking pair from part-tree / `dockedPartUId` data when FSM reports a stuck state, which is exactly the reporter's failure mode. PR [#639](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/639) ("Validate docking port FSM state before processing undocking") is the prereq. Adoption decision: verbatim.
 - **Sources:** [#679](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/679)
 - **Symptoms:** Undock UI button silently disappears; only workaround documented is editing vessel files to zero out docking ports plus a separate undock-forcing mod.
 - **Suspected subsystem(s):** Docking port FSM state; vessel proto round-trip not preserving the docked-pair relationship across warp/scene transitions. AdmiralRadish's [#639](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/639) ("Validate docking port FSM state before processing undocking") is in the same area.
@@ -408,27 +407,29 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-051] Client stuck in `CurrentSubspace = -1` limbo after time warp ends
 - **Severity:** High (hard failure — no game time advances, no position updates accepted during the gap)
-- **Status:** Open. Surfaced during the Phase-2 read of TimeSync / Warp; not previously catalogued.
-- **Sources:** No specific upstream issue. 15-second `CheckStuckAtWarp` watchdog at [LmpClient/Systems/Warp/WarpSystem.cs:126-134](../../LmpClient/Systems/Warp/WarpSystem.cs#L126-L134) is the only current mitigation.
-- **Symptoms:** Client drops to `CurrentSubspace = -1` when time warp ends. If the server's subspace-assign broadcast is lost, the `WaitingSubspaceIdFromServer` flag stays true; `CheckWarpStopped` is gated on `!WaitingSubspaceIdFromServer` so it cannot re-fire; the watchdog re-requests after 15s. During the gap the client is in limbo.
-- **Suspected subsystem(s):** Server `WarpSystemReceiver.HandleNewSubspace` (no request idempotency — every retry mints a fresh subspace ID), client `WarpSystem` (edge-triggered handshake).
-- **Notes:** Load-bearing critic observation: any naive client retry creates orphan subspaces at the retry cadence. Server-side dedup must ship before the client can be made more aggressive. Split into BUG-051a (server dedup, ships first) and BUG-051b (client predicate, ships after).
+- **Status:** Fixed on fork — split into two deliverables that shipped in commit order:
+  - **BUG-051a (server-side request dedup, commit `9732fc7e`):** new `WarpRequestCache` keyed on `(player, RequestSeq)` with 60s TTL. `WarpSystemReceiver.HandleNewSubspace` consults the cache and replays the original subspace assignment to the requester on a hit, so a retry can never mint an orphan. Wire change: `WarpNewSubspaceMsgData` gains optional `uint RequestSeq` (defensive deserialize — pre-fix clients sending no trailing 4 bytes parse as 0).
+  - **BUG-051b (client steady-state retry, commit `25303e7d`):** new `CheckSteadyStateRetry` predicate at 500ms — when `CurrentSubspace==-1 && WaitingSubspaceIdFromServer && TimeWarp idle`, resends the cached `_currentRequestSeq`. Server dedup engages, returning the cached subspace assignment.
+- **Sources:** No specific upstream issue. 15-second `CheckStuckAtWarp` watchdog at [LmpClient/Systems/Warp/WarpSystem.cs:126-134](../../LmpClient/Systems/Warp/WarpSystem.cs#L126-L134) is retained as defense-in-depth.
+- **Symptoms (historical):** Client drops to `CurrentSubspace = -1` when time warp ends. If the server's subspace-assign broadcast is lost, the `WaitingSubspaceIdFromServer` flag stays true; `CheckWarpStopped` is gated on `!WaitingSubspaceIdFromServer` so it cannot re-fire; the watchdog re-requests after 15s. During the gap the client is in limbo.
 - **Phase-2 doc:** [`02-analysis/bug-051-stuck-warp-limbo.md`](02-analysis/bug-051-stuck-warp-limbo.md)
 
 ## Top-10 priority list
 
-These are my picks for the first wave of Phase 2 code analysis, ranked by a combination of severity, frequency, and how much they unlock for other work.
+These are my picks for the first wave of Phase 2 code analysis, ranked by a combination of severity, frequency, and how much they unlock for other work. **Status as of 2026-05-16 session 5** is annotated inline so the picklist doubles as a quick gap view.
 
-1. **[BUG-001] Forced-catch-up teleporting solo subspace players** — fundamental subspace correctness bug; the fix is small in scope; resolving it makes the rest of the time-sync work testable.
-2. **[BUG-005] Vessels disappear or duplicate at random** — the most-reported destruction-of-progress class, spans four-plus years and many open issues, and the obvious shared-physics consequence of unresolved subspace/lock arbitration.
-3. **[BUG-008] Polygons-scrambled / craft-underground on spawn** — known PQS-timing class from DMP days; fixing it would also retire a chunk of [BUG-009] and [BUG-021] symptoms.
-4. **[BUG-018] Docking destroys ports and kicks players** — flagship-feature failure; PR [#660](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/660) is in flight and worth either landing or extending in the fork.
-5. **[BUG-013] Localized stateString NRE spam** — single misbehaving player can take the whole server unplayable; the defensive sanitize is small and high-value.
-6. **[BUG-010] Disconnect destroys craft within rendering distance of another player** — silent progress destruction in a very common play pattern; root cause likely the same missing ownership-handoff machinery as [BUG-018].
-7. **[BUG-025] R&D node researchable multiple times in shared career** — clean repro, easy to triage, and shared career is one of the few KSP draws that depends on this being right.
-8. **[BUG-045] Breaking Ground deployable science vanishes on reconnect** — highest reaction count in the open tracker (22), one of the few bug families with a clear hypothesis (missing game-event hook) and no upstream PR in flight.
-9. **[BUG-033] Backup race in `ScenarioStoreSystem.CurrentScenarios`** — server crash class with a code-level write-up already done; cheap to fix, expensive to ignore.
-10. **[BUG-023] Astronaut Complex desync** — game-breaking and unrecoverable in-game; small reaction count but huge severity-per-occurrence.
+1. ~~**[BUG-001] Forced-catch-up teleporting solo subspace players**~~ — ✅ FIXED ON FORK (`0f10b2d3`). Documented rejoin-race residual is the only remaining tail.
+2. ~~**[BUG-005] Vessels disappear or duplicate at random**~~ — ✅ FIXED ON FORK (`d64acf66`, BUG-005/006 capstone + protocol bump 0.30.0).
+3. **[BUG-008] Polygons-scrambled / craft-underground on spawn** — OPEN. Known PQS-timing class from DMP days; fixing it would also retire a chunk of [BUG-009] and [BUG-021] symptoms. Phase-2 doc next.
+4. ~~**[BUG-018] Docking destroys ports and kicks players**~~ — ✅ FIXED IN MASTER via upstream PRs [#660](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/660) + [#687](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/687) (commit `4c124f11`). Adopted verbatim.
+5. **[BUG-013] Localized stateString NRE spam** — OPEN. Single misbehaving player can take the whole server unplayable; the defensive sanitize is small and high-value. Picked next.
+6. **[BUG-010] Disconnect destroys craft within rendering distance of another player** — OPEN. Silent progress destruction in a very common play pattern; root cause likely the same missing ownership-handoff machinery as the now-closed [BUG-018].
+7. **[BUG-025] R&D node researchable multiple times in shared career** — OPEN. Clean repro, easy to triage, and shared career is one of the few KSP draws that depends on this being right.
+8. **[BUG-045] Breaking Ground deployable science vanishes on reconnect** — OPEN. Highest reaction count in the open tracker (22), one of the few bug families with a clear hypothesis (missing game-event hook) and no upstream PR in flight.
+9. **[BUG-033] Backup race in `ScenarioStoreSystem.CurrentScenarios`** — OPEN. Server crash class with a code-level write-up already done; cheap to fix, expensive to ignore.
+10. **[BUG-023] Astronaut Complex desync** — OPEN. Game-breaking and unrecoverable in-game; small reaction count but huge severity-per-occurrence.
+
+**Fork-closed bugs not originally in the top-10:** [BUG-006] (cross-subspace lock, capstone `d64acf66`), [BUG-014] (audit-closed via upstream PR #628, `7f1393f4`), [BUG-019] + [BUG-024] (closed by upstream PR #687, audit `4c124f11`), [BUG-051a/b] (warp limbo, `9732fc7e` + `25303e7d`), [BUG-003/004] (interp cap, `cd551859`).
 
 ## Open questions
 
@@ -436,7 +437,7 @@ These are the bugs I could not pin down with public sources alone; Phase 2 shoul
 
 - **Is [BUG-002] really still present after the 2026-04 packed-vessel and interpolation fixes?** The issue was closed without a fix commit, but symptom overlap with PRs [#628](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/628), [#633](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/633), [#649](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/649) is high. Needs a clean repro on current master.
 - **How much of [BUG-011] is still observable after [#608](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/608) and [#656](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/656)?** The Fierce-Cat analysis identifies three distinct NRE causes; only some have explicit fixes.
-- **Are [BUG-018] and [BUG-019] separate bugs or one bug with two presentations?** Both touch the docking-port FSM, both have PRs in the same area, and the "undock button disappears" symptom may simply be the steady-state form of "docking completed without consistent state".
+- ~~**Are [BUG-018] and [BUG-019] separate bugs or one bug with two presentations?**~~ Resolved 2026-05-16, session 5: upstream PR #687's `EnsureRecoverableForUndock` rehydrates the docking pair from `dockedPartUId` when FSM is stuck, which is the BUG-019 symptom; the same util is called from the BUG-018 multi-player coupling path. Two presentations of one underlying FSM-state-management problem; both now closed.
 - **Does the open PR [#662](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/662) "Time Paradoxes Fix" subsume [BUG-001] and parts of [BUG-004]?** The PR description claims a broad rework of vessel-message handlers to drop future-state updates; the implementation is large and unreviewed at the time of writing.
 - **Is the Linux memory leak [BUG-035] a server-only issue or a symptom of [BUG-011]'s NRE spam holding objects alive on the server side?** Both bugs report monotonic memory growth.
 
