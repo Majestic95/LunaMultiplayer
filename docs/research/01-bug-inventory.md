@@ -289,7 +289,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-033] Race condition serializing `ScenarioStoreSystem.CurrentScenarios` during backup
 - **Severity:** Critical when triggered (uncaught thread-pool exception → server crash)
-- **Status:** Open
+- **Status:** ✅ Fixed on fork (2026-05-17, session 8, commit `87105f41`). `ScenarioStoreSystem.BackupScenarios` now serializes each scenario under the matching per-scenario writer lock via `ScenarioDataUpdater.GetSemaphore`. Disk write moved outside the lock. `BackupLock` dropped from this code path to avoid AB-BA deadlock with `ScenarioPartPurchaseDataUpdater`'s recursive call. See [Phase-2 analysis](02-analysis/bug-033-backup-race.md).
 - **Sources:** [#509](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/509)
 - **Evidence of frequency:** Detailed code-level analysis in the report.
 - **Symptoms:** Backup task reads the scenarios dictionary while a writer (under a different semaphore) is mutating it; concurrent modification exception terminates the worker.
@@ -435,7 +435,7 @@ These are my picks for the first wave of Phase 2 code analysis, ranked by a comb
 6. ~~**[BUG-010] Disconnect destroys craft within rendering distance of another player**~~ — ✅ FIXED ON FORK (session 7). Part A: server-broadcasts `VesselPinned`; remaining clients hold the leaver's vessels immortal via `VesselPinnedSys` until any player takes the helm. Part B: client flushes a fresh proto for owned vessels before `Disconnect`. See [`docs/research/02-analysis/bug-010-disconnect-vessel-handoff.md`](02-analysis/bug-010-disconnect-vessel-handoff.md).
 7. **[BUG-025] R&D node researchable multiple times in shared career** — OPEN. Clean repro, easy to triage, and shared career is one of the few KSP draws that depends on this being right.
 8. **[BUG-045] Breaking Ground deployable science vanishes on reconnect** — OPEN. Highest reaction count in the open tracker (22), one of the few bug families with a clear hypothesis (missing game-event hook) and no upstream PR in flight.
-9. **[BUG-033] Backup race in `ScenarioStoreSystem.CurrentScenarios`** — OPEN. Server crash class with a code-level write-up already done; cheap to fix, expensive to ignore.
+9. ~~**[BUG-033] Backup race in `ScenarioStoreSystem.CurrentScenarios`**~~ — ✅ FIXED ON FORK (`87105f41`). Per-scenario writer lock now also covers backup-side `ConfigNode.ToString()`; AB-BA deadlock vs `ScenarioPartPurchaseDataUpdater` avoided by dropping the redundant outer `BackupLock` from this path.
 10. **[BUG-023] Astronaut Complex desync** — OPEN. Game-breaking and unrecoverable in-game; small reaction count but huge severity-per-occurrence.
 
 **Fork-closed bugs not originally in the top-10:** [BUG-006] (cross-subspace lock, capstone `d64acf66`), [BUG-014] (audit-closed via upstream PR #628, `7f1393f4`), [BUG-019] + [BUG-024] (closed by upstream PR #687, audit `4c124f11`), [BUG-051a/b] (warp limbo, `9732fc7e` + `25303e7d`), [BUG-003/004] (interp cap, `cd551859`).
