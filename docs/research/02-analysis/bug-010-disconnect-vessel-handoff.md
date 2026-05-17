@@ -1,6 +1,6 @@
 # BUG-010 — Craft explodes on disconnect / game exit when within rendering distance of another player
 
-**Phase-2 analysis. Status: Open (design walkthrough pending, no fix shipped yet).**
+**Phase-2 analysis. Status: Fixed (Parts A + B, 2026-05-16, session 7).**
 
 Upstream tracker: [#654](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/654). High-severity silent progress destruction in a very common play pattern (camped-on-a-lake floatplane sessions). Paired in this doc with the dock-then-logoff handoff scenario per [near-term-todos.md](../../near-term-todos.md) item 2 — they share the same missing-machinery root cause.
 
@@ -84,19 +84,26 @@ The framing word is **pinned**, not "abandoned": the original pilot may reconnec
 
 4. **Existing lock-acquire flow runs unchanged** while a vessel is pinned, but the immortal flip is suppressed. Net effect: the vessel sits inert in the remaining player's scene, indestructible, until someone takes the helm.
 
-### Part B — graceful-disconnect handshake → server commits final-pose proto
+### Part B — graceful-disconnect proto-flush → server's on-disk snapshot reflects exact final pose
 
-The bigger, lower-priority fix that addresses Variant B's stale-undock-child-pose problem and tightens Variant A's persisted state to "actual final moment" rather than "last proto, up to 30 s stale". Ship after Part A is soaked.
+Pairs with Part A to tighten Variant B's stale-undock-child-pose problem and Variant A's persisted state. Only fires on clean disconnects (user clicks Disconnect / Quit to Main Menu); ungraceful drops never reach this code path and rely on Part A alone.
 
-1. **Client (in `MainSystem.DisconnectFromGame`, after `SendScenarioModules`, before `NetworkConnection.Disconnect`):**
-   - For each vessel the local player holds the Control or Update lock on, build a `VesselProtoMsgData` from the current `ProtoVessel.Save(...)` representation. Use the same path `VesselProtoSystem.MessageSender.SendVesselMessage` uses today, with a new `reason: "graceful-disconnect"` to thread through `VesselSyncDiagnostics` and the wire `Reason` field added in Phase B.3.
-   - Wait up to ~2 seconds for server ack (a counter incremented on each `VesselProto` confirmation handler). 2 s is the proposed default — generous enough for a typical 100 ms RTT × handful of vessels, short enough that a user clicking Disconnect doesn't hang noticeably. After timeout, proceed with disconnect anyway (better to lose perfect pose than block the user from quitting).
+1. **Client (`MainSystem.DisconnectFromGame`, after `SendScenarioModules`, before `NetworkConnection.Disconnect`):**
+   - `VesselProtoSystem.MessageSender.SendOwnedVesselsForDisconnect("graceful disconnect")` iterates `FlightGlobals.Vessels`, filters to vessels where the local player holds the Control or Update lock, and synchronously serializes + ships each proto on the Unity main thread. Per-vessel work: `vessel.BackupVessel()` → `VesselSerializer.SerializeVesselToArray` → `NetworkMain.ClientConnection.SendMessage(...)`. After the loop, one `FlushSendQueue` push. The `reason` string flows through `VesselSyncDiagnostics` and shows up in the receiving client's `VesselSyncLog.txt` ARRIVED line as `senderReason="graceful disconnect"` — so post-mortem grep can answer "was this proto the leaver's final flush, or just a periodic broadcast?"
+   - **Synchronous on purpose.** The normal periodic-broadcast path (`SendVesselMessage`) offloads serialization to `TaskFactory.StartNew` to avoid stalling Unity, then enqueues onto `NetworkSender.OutgoingMessages` for the send thread to drain. At disconnect time that path is fatally racy: `NetworkConnection.Disconnect → ResetConnectionStaticsAndQueues` wipes the queue microseconds later. The disconnect-flush path bypasses the async pipeline entirely — Lingoona-safe (we're on the Unity main thread per the historical comment on `PrepareAndSendProtoVessel`), and when `SendOwnedVesselsForDisconnect` returns, every proto is in Lidgren's outgoing buffer and survives the wipe.
+   - No ack handshake needed. Lidgren reliable-ordered guarantees the server processes the proto before the disconnect packet. Same trust as upstream's `SendScenarioModules` precedent (`6bb056ff`).
 
-2. **Server (no new handler — re-use `HandleVesselProto`):** the proto is ingested via the existing path. `VesselDataUpdater.RawConfigNodeInsertOrUpdate` writes the canonical pose to `Universe/Vessels/<guid>.txt`. The Part A "freeze" broadcast then goes out (it doesn't need to wait for the proto to be persisted — they're independent on the remaining client's side).
+2. **Server (no new handler — re-uses `HandleVesselProto`):** the proto is ingested via the existing path. `VesselDataUpdater.RawConfigNodeInsertOrUpdate` writes the canonical pose to `Universe/Vessels/<guid>.txt` and the BUG-005/006 cross-subspace guards apply unchanged. The Part A pin broadcast fires moments later from the same `DisconnectClient` flow on the server side.
 
-3. **Server side authority handoff:** when the leaving subspace is about to be torn down by `WarpSystem.RemoveSubspace(client.Subspace)`, the BUG-005/006 guard already refuses to drop a subspace that still holds vessel authority (see `WarpSystem.RemoveSubspace`). The leaving player's subspace will linger as a "ghost" subspace. Two follow-up options, both deferred to a future change:
-   - (a) Accept the ghost subspace. Cheap; no behavioural surprise for the remaining player; eventually flushed on server restart.
-   - (b) Rewrite every leaving-player-authored vessel's `AuthoritativeSubspaceId` to the remaining client's subspace at handshake time. Cleaner long-term, lets `RemoveSubspace` succeed. The per-agency Stage 5 work will likely subsume this with an `OwningAgency` field anyway, so a deeper rewrite now is wasted effort.
+3. **Server side authority handoff:** when the leaving subspace is about to be torn down by `WarpSystem.RemoveSubspace(client.Subspace)`, the BUG-005/006 guard already refuses to drop a subspace that still holds vessel authority. The leaving player's subspace lingers as a "ghost" subspace. Two follow-up options, both deferred:
+   - (a) Accept the ghost subspace. Cheap; no behavioural surprise; eventually flushed on server restart.
+   - (b) Rewrite every leaving-player-authored vessel's `AuthoritativeSubspaceId` to the remaining client's subspace at handshake time. Cleaner long-term. The per-agency Stage 5 work will likely subsume this with an `OwningAgency` field anyway, so a deeper rewrite now is wasted effort.
+
+4. **Where Part B does NOT help:**
+   - Ungraceful drops (network died, KSP process killed): the client code never runs. Server's on-disk proto stays as stale-as-last-periodic-broadcast. Part A's pin broadcast still fires, so the loud explosion is still suppressed; the quiet undock-child-pose drift persists for this case.
+   - Spectating clients: short-circuit (no owned vessels to flush).
+   - **`OnExit` / `OnApplicationQuit` (window close / Alt-F4 / Unity shutdown):** these go straight to `NetworkConnection.Disconnect("Quit game")` without routing through `DisconnectFromGame`. Adding the flush there is risky because Unity is mid-teardown — `vessel.BackupVessel()` paths may interact badly with KSP destroying GameObjects. The user-visible cost is "I closed the window while flying and my pose was up to 30 s stale" — Part A still suppresses the explosion, and the periodic broadcast cadence keeps the drift bounded. Revisit only if a Variant-B-on-window-close regression is reported.
+   - Vessels whose `orbitDriver` isn't ready: skipped (the existing `SendVesselMessage` async path would defer with a coroutine retry; the sync disconnect path doesn't have that luxury).
 
 ### What we explicitly are NOT doing
 
@@ -117,12 +124,13 @@ The bigger, lower-priority fix that addresses Variant B's stale-undock-child-pos
 
 - `dotnet build` clean (no new warnings beyond the 30 pre-existing).
 - `dotnet test ServerTest/ServerTest.csproj`, `LmpCommonTest/LmpCommonTest.csproj`, `MockClientTest/MockClientTest.csproj`, `LmpClientTest/LmpClientTest.csproj` all pass.
-- **New `MockClientTest` regression** (Stage 4.10 follow-up — Part A only, since Part B requires a client-side proto-build path the harness doesn't yet have):
-  - Two mock clients in the same subspace, a planted vessel with the leaving client as Control owner. Mock client #2 connects with a listener for `VesselSrvMsg(VesselPinned)`. Mock client #1 disconnects gracefully. Assert: mock client #2 receives a Pinned message naming the planted vessel id within 500 ms, BEFORE the lock-release messages for that vessel id arrive. Reuses the `Bug005SubspaceRejectTest` pattern of planting a vessel in `VesselStoreSystem.CurrentVessels` from `ServerTest/XmlExampleFiles/Others/`.
-- **Manual KSP verification (required for client-side fix — the harness can't drive KSP physics):**
+- **`MockClientTest/Bug010PinnedBroadcastTest` covers Part A.** Two cases: positive (two locked vessels both produce pin broadcasts with correct `AbsentPlayerName` + non-empty `Reason`) and negative (unauthenticated peer drop emits no pin).
+- **Part B has no harness regression test.** The proto-flush requires KSP-resident `vessel.BackupVessel()` + `ProtoVessel.Save(...)` paths that the in-process harness can't drive without a synthesised KSP-vessel-graph stand-in (~half day of harness work). Deferred — manual KSP verification covers it.
+- **Manual KSP verification (required for client-side fixes — the harness can't drive KSP physics):**
   - Variant A: Two-player session, both with floatplanes on KSC's beach. P2 disconnects. P1's floatplane stays intact, immortal until P1 explicitly switches to it from the tracking station.
   - Variant A drop case: P2 kills the KSP process. Same outcome (server detects timeout the same way as clean disconnect; same broadcast path).
-  - Variant B: P1 docks to P2's station. P1 disconnects. P2 sees no joint flex; merged vessel stays stable. P2 undocks; child vessel (P1's craft) reconstructs from on-disk proto. On Part A-only this is the broadcast-stale-proto case; on Part A + Part B the undocked child reflects the actual moment-of-disconnect pose.
+  - Variant B: P1 docks to P2's station. P1 clicks Disconnect. P2 sees no joint flex; merged vessel stays stable. P2 undocks; child vessel (P1's craft) reconstructs from the **moment-of-disconnect** pose (Part B), not the up-to-30s-stale last-periodic-broadcast pose (Part A only).
+  - Variant B drop case (Part A only — Part B doesn't run on drops): P1's network dies post-dock. P2's experience matches Variant B clean — merged vessel stable, undock works — but the reconstructed child's pose is whatever was in the server's on-disk snapshot, up to 30s stale. Acceptable: the dock event itself triggers a proto send, so the staleness is bounded by the time between dock and drop.
 
 ## Provenance
 
@@ -133,5 +141,5 @@ The bigger, lower-priority fix that addresses Variant B's stale-undock-child-pos
 | Pre-disconnect send-order precedent | Upstream `6bb056ff` (AdmiralRadish) — scenario sync now sent before disconnect; same pattern as Part B's proposed proto-flush. |
 | Initiator-wins couple authority | Our [BUG-005/006 fix](../bug-005-006-cross-subspace-lock.md) sets merged-vessel authority at couple time. The dock-then-logoff Variant B inherits this. |
 | `VesselSyncDiagnostics` `Reason` field | Phase B.3 of Strategy B (ported from upstream `Release/0_29_2:4733081d`). Reused as the diagnostic carrier for the new graceful-disconnect proto flush. |
-| Active fixes registry | [Server/ForkBuildInfo.cs](../../../Server/ForkBuildInfo.cs) — `BUG-010` will be appended when Part A lands. |
+| Active fixes registry | [Server/ForkBuildInfo.cs](../../../Server/ForkBuildInfo.cs) — `"BUG-010"` (Part A) + `"BUG-010-B"` (Part B) entries. |
 | Plan | This doc + [docs/near-term-todos.md](../../near-term-todos.md) item 1 + [memory: project-stages-3-4-campaign](../../../../C:/Users/austi/.claude/projects/f--luna-multiplayer/memory/project_stages_3_4_campaign.md). |

@@ -15,6 +15,7 @@ using LmpClient.Systems.ModApi;
 using LmpClient.Systems.Network;
 using LmpClient.Systems.Scenario;
 using LmpClient.Systems.SettingsSys;
+using LmpClient.Systems.VesselProtoSys;
 using LmpClient.Systems.Warp;
 using LmpClient.Utilities;
 using LmpClient.Windows;
@@ -331,6 +332,21 @@ namespace LmpClient
         {
             ForceQuit = true;
             ScenarioSystem.Singleton.SendScenarioModules();
+
+            //BUG-010 Part B: ship a fresh proto for every locally-owned vessel BEFORE
+            //tearing the connection down so the server's on-disk snapshot reflects the
+            //actual moment-of-disconnect pose, not the last periodic broadcast (~30s
+            //stale by default). Matters for the dock-then-logoff case: the remaining
+            //player's later undock reconstructs the child vessel from this proto.
+            //SendOwnedVesselsForDisconnect serializes synchronously on this thread,
+            //hands the bytes directly to Lidgren via ClientConnection.SendMessage, and
+            //FlushSendQueues internally — so when it returns, the protos are committed
+            //to Lidgren's outgoing buffer and survive the immediately-following
+            //ResetConnectionStaticsAndQueues queue-wipe. Pairs with Part A (ungraceful
+            //drops never reach this code path and rely on Part A alone). See
+            //docs/research/02-analysis/bug-010-disconnect-vessel-handoff.md.
+            VesselProtoSystem.Singleton.MessageSender.SendOwnedVesselsForDisconnect("graceful disconnect");
+
             NetworkConnection.Disconnect("Quit");
         }
 

@@ -27,7 +27,8 @@ namespace Server
             "BUG-045",     // Breaking Ground deployable science vessels now sent to server (ported from upstream Release/0_29_2)
             "vessel-load-budget", // Per-tick proto-reload budget + VesselLoadOutcome enum + SPACECENTER/EDITOR fast path (ported from upstream Release/0_29_2)
             "vessel-sync-log",    // Client-side append-only diagnostic trace at Logs/LMP/VesselSyncLog.txt + Reason wire field on VesselProtoMsgData (ported from upstream Release/0_29_2)
-            "BUG-010",     // Disconnect handshake: server broadcasts VesselPinned for each lock-owned vessel before fanning out lock releases; remaining clients hold the vessel immortal until the original pilot reconnects or another player takes the helm
+            "BUG-010",     // Disconnect handshake Part A: server broadcasts VesselPinned for each lock-owned vessel before fanning out lock releases; remaining clients hold the vessel immortal until the original pilot reconnects or another player takes the helm
+            "BUG-010-B",   // Disconnect handshake Part B: client flushes a fresh proto for every locally-owned vessel before NetworkConnection.Disconnect, so server's on-disk snapshot reflects the actual moment-of-disconnect pose (matters for dock-then-logoff -> undock-child-pose). Clean disconnects only; ungraceful drops rely on Part A alone.
         };
     }
 }
