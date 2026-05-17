@@ -146,19 +146,56 @@ namespace MockClientTest
         }
 
         [TestMethod]
-        public void WireSuppliedOwningAgency_IsScrubbed_WhenSenderHasNone()
+        public void PerAgencyCareerDisabled_CleanProto_LeavesOwningAgencyFieldAbsent()
         {
-            // Spoof defense: a client that ships an lmpOwningAgency field in its proto bytes
-            // (faking ownership of a vessel) must NOT have that value persisted by the server
-            // when the sender's own agency is empty. The server is authoritative; the wire is
-            // not trusted. Stage 5.17a's LockSystem cross-agency rejection will gate on this
-            // field with real consequences, so the scrub is load-bearing.
-            //
-            // Setup: PerAgencyCareer off → senderAgencyId = Guid.Empty → no preserve branch
-            // (no existing) → fall-through scrubs.
+            // Dual-mode silence (spec §11): with PerAgencyCareer=false, the entire
+            // OwningAgency stamp block in VesselDataUpdater is skipped — the field is
+            // neither written nor read by per-agency logic. A clean proto (no
+            // lmpOwningAgency in wire bytes) must round-trip with the field still
+            // absent from vessel.Fields, so nothing gets persisted to disk and
+            // GetVesselInConfigNodeFormat doesn't leak the field on the wire to other
+            // clients. Round-2 review caught the prior implementation writing
+            // "00000000000000000000000000000000" to every ingested vessel under gate=off.
+            Assert.IsFalse(GameplaySettings.SettingsStore.PerAgencyCareer,
+                "Test pre-condition: reset must leave PerAgencyCareer=false.");
+
+            const string playerName = "h-016b-silnt";
+            SeedSubspace(1, time: 100d);
+
+            using (var client = new MockNetClient())
+            {
+                Assert.IsTrue(client.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
+                HandshakeNoAgency(client, playerName);
+                SetClientSubspace(playerName, 1);
+
+                var vesselId = Guid.NewGuid();
+                SendProto(client, vesselId, SampleVesselText.Value);
+
+                var stored = WaitForVesselAuthStamp(vesselId, expectedAuthSubspace: 1,
+                    TimeSpan.FromSeconds(3));
+                Assert.IsNotNull(stored, "Vessel was never stored.");
+                Assert.IsFalse(stored.Fields.Exists(Server.System.Vessel.Classes.Vessel.OwningAgencyFieldName),
+                    "Under PerAgencyCareer=false, the lmpOwningAgency field must remain absent " +
+                    "from vessel.Fields — the gate-off path is a true no-op (spec §11 dual-mode silence).");
+                Assert.AreEqual(Guid.Empty, stored.OwningAgencyId,
+                    "Getter on missing field must return Guid.Empty.");
+            }
+        }
+
+        [TestMethod]
+        public void PerAgencyCareerDisabled_SpoofedProtoBytes_PassThroughUnchanged()
+        {
+            // Documents the dual-mode-silence corollary: with PerAgencyCareer=false, the
+            // VesselDataUpdater stamp block is a no-op, so a client that spoofs lmpOwningAgency
+            // in its proto bytes has that value pass through to the store unchanged. This is
+            // not a security issue because (a) no LockSystem/scenario-projection consumer
+            // honors the field under gate=off, and (b) the gate is set-once-before-universe-
+            // populated per spec §11 — a future flip to gate=on requires a fresh universe.
+            // The test pins this behavior so a future "let's scrub on gate-off too" refactor
+            // sees the dual-mode no-op contract is intentional.
             Assert.IsFalse(GameplaySettings.SettingsStore.PerAgencyCareer);
 
-            const string playerName = "h-016b-spoof";
+            const string playerName = "h-016b-pass";
             SeedSubspace(1, time: 100d);
 
             var spoofedAgency = Guid.NewGuid();
@@ -176,41 +213,13 @@ namespace MockClientTest
                 var stored = WaitForVesselAuthStamp(vesselId, expectedAuthSubspace: 1,
                     TimeSpan.FromSeconds(3));
                 Assert.IsNotNull(stored, "Vessel was never stored.");
-                Assert.AreEqual(Guid.Empty, stored.OwningAgencyId,
-                    "Wire-supplied lmpOwningAgency must be scrubbed when the server cannot " +
-                    "attribute the proto to a real agency (gate off OR sender has none).");
-                Assert.AreNotEqual(spoofedAgency, stored.OwningAgencyId);
+                Assert.AreEqual(spoofedAgency, stored.OwningAgencyId,
+                    "Under PerAgencyCareer=false the stamp block is a no-op; wire-supplied " +
+                    "lmpOwningAgency passes through unchanged. (Not a security issue — no consumer " +
+                    "honors the field under gate=off, and gate flip mid-universe is disallowed by spec §11.)");
             }
         }
 
-        [TestMethod]
-        public void PerAgencyCareerDisabled_FirstProto_DoesNotStamp()
-        {
-            // Dual-mode silence: with the gate off, the lmpOwningAgency field must never be
-            // written, even though a vessel proto goes through the same ingest path. The
-            // shared-agency career model remains the authority.
-            Assert.IsFalse(GameplaySettings.SettingsStore.PerAgencyCareer,
-                "Test pre-condition: reset must leave PerAgencyCareer=false.");
-
-            const string playerName = "h-016b-off";
-            SeedSubspace(1, time: 100d);
-
-            using (var client = new MockNetClient())
-            {
-                Assert.IsTrue(client.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
-                HandshakeNoAgency(client, playerName);
-                SetClientSubspace(playerName, 1);
-
-                var vesselId = Guid.NewGuid();
-                SendProto(client, vesselId, SampleVesselText.Value);
-
-                var stored = WaitForVesselAuthStamp(vesselId, expectedAuthSubspace: 1,
-                    TimeSpan.FromSeconds(3));
-                Assert.IsNotNull(stored);
-                Assert.AreEqual(Guid.Empty, stored.OwningAgencyId,
-                    "Per-agency career is off — lmpOwningAgency must remain unset on first ingest.");
-            }
-        }
 
         private static Guid HandshakeAndGetAgencyId(MockNetClient client, string playerName)
         {

@@ -101,6 +101,25 @@ namespace ServerTest
         }
 
         [TestMethod]
+        public void OwningAgencyId_AcceptsLenientGuidFormatsOnRead()
+        {
+            // Round-2 review: lenient on read so an operator hand-editing the vessel file
+            // can type the hyphenated "D" form (the human-comfortable default) and have it
+            // parse correctly — the next save normalises to "N". This test pins each of the
+            // five standard Guid formats Guid.TryParse accepts.
+            var canonical = new Guid("0123456789abcdef0123456789abcdef");
+
+            foreach (var format in new[] { "N", "D", "B", "P", "X" })
+            {
+                var vessel = LoadSampleVessel();
+                vessel.OwningAgencyId = Guid.NewGuid();  // ensure field exists
+                vessel.Fields.Update(Vessel.OwningAgencyFieldName, canonical.ToString(format));
+                Assert.AreEqual(canonical, vessel.OwningAgencyId,
+                    $"Lenient getter did not accept Guid format '{format}'.");
+            }
+        }
+
+        [TestMethod]
         public void OwningAgencyId_MalformedFieldValueParsesAsEmpty()
         {
             // A bare string "not-a-guid" written into the lmpOwningAgency field (e.g. via a

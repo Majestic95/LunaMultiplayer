@@ -154,10 +154,24 @@ namespace Server.System.Agency
             // agency instead of minting a parallel one.
             lock (PlayerNameLocks.GetOrAdd(playerName, _ => new object()))
             {
-                if (AgencyByPlayerName.TryGetValue(playerName, out var existingId)
-                    && Agencies.TryGetValue(existingId, out var existing))
+                if (AgencyByPlayerName.TryGetValue(playerName, out var existingId))
                 {
-                    return existing;
+                    if (Agencies.TryGetValue(existingId, out var existing))
+                        return existing;
+
+                    // Stale-index defensive heal (round-2 review): the player-name index
+                    // points at a Guid that's missing from the Agencies registry. Try the
+                    // disk fallback (covers the .bak-recovery path); if that also misses,
+                    // unbind the stale name so the mint path below runs cleanly instead of
+                    // silently shadowing an orphan that lives forever in vessel stamps.
+                    var healed = LoadAgency(existingId);
+                    if (healed != null)
+                    {
+                        AgencyByPlayerName[playerName] = healed.AgencyId;
+                        return healed;
+                    }
+                    AgencyByPlayerName.TryRemove(playerName, out _);
+                    LunaLog.Warning($"[fix:per-agency-career] Healed stale AgencyByPlayerName entry for {playerName} (pointed at missing agency {existingId:N})");
                 }
 
                 var state = new AgencyState
@@ -180,9 +194,22 @@ namespace Server.System.Agency
                         $"GUID collision on AgencyId {state.AgencyId:N} while registering player {playerName}");
                 }
 
+                // Persistence-before-index ordering (round-2 review). The XML doc on
+                // AgencyByPlayerName guarantees: persist via SaveAgency BEFORE flipping the
+                // index. Prior order (flip-then-save) created a crash window between the
+                // index write and the disk write where a server crash left the index pointing
+                // at a GUID with no on-disk file. After restart, LoadExistingAgencies couldn't
+                // find it; the player reconnected and minted a new agency; any vessel stamped
+                // with the orphan GUID was disconnected from any active agency. By calling
+                // SaveAgency first, a crash before the index flip simply means the player
+                // reconnects, mints a new agency, and the orphan-on-disk is unreferenced and
+                // safe to operator-delete. The vessel proto path (HandleVesselProto) reads
+                // AgencyByPlayerName, so a crash here leaves vessels unstamped (Guid.Empty)
+                // until next proto — also safe.
+                SaveAgency(state.AgencyId);
+
                 AgencyByPlayerName[playerName] = state.AgencyId;
 
-                SaveAgency(state.AgencyId);
                 LunaLog.Normal($"[fix:per-agency-career] Registered new agency '{state.DisplayName}' ({state.AgencyId:N}) for player {playerName}");
                 return state;
             }

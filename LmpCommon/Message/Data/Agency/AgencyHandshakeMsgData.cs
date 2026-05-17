@@ -39,12 +39,26 @@ namespace LmpCommon.Message.Data.Agency
             }
         }
 
+        /// <summary>
+        /// Upper bound on <see cref="OtherAgencyCount"/> on the wire. Realistic agency counts
+        /// are bounded by <c>GeneralSettings.MaxPlayers</c> (typically &lt;=16, hard cap &lt;=128
+        /// historically) so 1024 is generous headroom while still preventing an attacker
+        /// from forcing an OOM allocation: an unbounded <c>int</c> from the wire lets a
+        /// malicious peer ship <c>int.MaxValue</c> and force a 16 GB array allocation.
+        /// Round-2 wire review caught this DoS vector.
+        /// </summary>
+        internal const int MaxOtherAgencyCount = 1024;
+
         internal override void InternalDeserialize(NetIncomingMessage lidgrenMsg)
         {
             base.InternalDeserialize(lidgrenMsg);
 
             AssignedAgencyId = GuidUtil.Deserialize(lidgrenMsg);
             OtherAgencyCount = lidgrenMsg.ReadInt32();
+            if (OtherAgencyCount < 0 || OtherAgencyCount > MaxOtherAgencyCount)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyHandshake OtherAgencyCount out of range: {OtherAgencyCount} (allowed 0..{MaxOtherAgencyCount})");
+
             if (OtherAgencies.Length < OtherAgencyCount)
                 OtherAgencies = new AgencyInfo[OtherAgencyCount];
 
@@ -59,10 +73,15 @@ namespace LmpCommon.Message.Data.Agency
 
         internal override int InternalGetMessageSize()
         {
+            // Null-guard on individual entries: the message-data pool can return an instance
+            // with a stale OtherAgencies array longer than OtherAgencyCount, and a caller that
+            // resizes OtherAgencyCount without replacing the array would leave null entries
+            // in 0..OtherAgencyCount-1. Round-2 wire review hardening.
             var arraySize = 0;
             for (var i = 0; i < OtherAgencyCount; i++)
             {
-                arraySize += OtherAgencies[i].GetByteCount();
+                if (OtherAgencies[i] != null)
+                    arraySize += OtherAgencies[i].GetByteCount();
             }
 
             return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize;

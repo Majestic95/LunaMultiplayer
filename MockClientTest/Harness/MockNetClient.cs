@@ -62,9 +62,18 @@ namespace MockClientTest.Harness
         /// <summary>
         /// Connects to the in-process harness server and blocks until Lidgren
         /// reports <see cref="NetConnectionStatus.Connected"/> or times out.
+        ///
+        /// Single-shot: throws if called more than once on the same instance. A second
+        /// Connect would spawn a parallel <see cref="ReceiveLoop"/> against the same
+        /// <see cref="NetClient"/>, causing the two loops to race on <c>ReadMessage()</c>
+        /// and split messages between two <see cref="_received"/> append paths — tests
+        /// would silently lose messages with no clear signal. Round-2 wire review.
         /// </summary>
         public bool Connect(int port, TimeSpan timeout)
         {
+            if (_receiveTask != null)
+                throw new InvalidOperationException("MockNetClient.Connect was already called on this instance; create a fresh instance instead.");
+
             _client.Connect("127.0.0.1", port);
             _receiveTask = Task.Run(ReceiveLoop);
 

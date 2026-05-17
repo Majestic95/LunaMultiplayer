@@ -104,23 +104,38 @@ namespace Server.System.Vessel
                         //AuthSubspace preserve branch — the existing-read must be inside the lock to
                         //avoid a TOCTOU between TryGetValue and AddOrUpdate.
                         //
-                        //Fall-through (no existing owner, no sender agency) scrubs the wire-supplied
-                        //OwningAgencyId to Guid.Empty. The server is authoritative here, so a wire
-                        //payload with a spoofed lmpOwningAgency cannot land in the store — important
-                        //because Stage 5.17a's LockSystem cross-agency rejection will gate on this
-                        //field, and there is no inbound equivalent of RejectIfPastSubspace to catch a
-                        //bogus value at the protocol boundary.
-                        if (existingStored != null && existingStored.OwningAgencyId != Guid.Empty)
+                        //Dual-mode silence (spec §11): the entire stamp block is gated on PerAgencyCareer.
+                        //With the gate off, the field is left untouched — i.e. NOT written, NOT scrubbed.
+                        //Pre-0.31 vessels stay clean; new vessels get no lmpOwningAgency field on disk.
+                        //Round-2 review caught the prior version's terminal scrub-to-Empty branch as a
+                        //dual-mode-silence violation: it wrote the all-zero 32-char hex to every freshly
+                        //ingested vessel under PerAgencyCareer=false, leaking the field onto the wire (via
+                        //GetVesselInConfigNodeFormat sync replies) and onto disk (via BackupVessels).
+                        //
+                        //Wire-payload scrub (server-authoritative on incoming protos): when the gate IS
+                        //on, the wire-supplied OwningAgencyId is replaced with the server's authoritative
+                        //value (existing owner if any, else sender's agency, else Guid.Empty). A
+                        //misbehaving client cannot spoof ownership — important because Stage 5.17a's
+                        //LockSystem cross-agency rejection will gate on this field with real consequences,
+                        //and there is no inbound equivalent of RejectIfPastSubspace to catch a bogus value
+                        //at the protocol boundary. The gate-on scrub fall-through to Empty is for the
+                        //case where the server cannot attribute the proto to any agency (sender just
+                        //connected mid-flight and hasn't registered yet — should be impossible given the
+                        //auth-then-OnPlayerAuthenticated ordering, but defensive).
+                        if (GameplaySettings.SettingsStore.PerAgencyCareer)
                         {
-                            vessel.OwningAgencyId = existingStored.OwningAgencyId;
-                        }
-                        else if (senderOwningAgencyId != Guid.Empty)
-                        {
-                            vessel.OwningAgencyId = senderOwningAgencyId;
-                        }
-                        else
-                        {
-                            vessel.OwningAgencyId = Guid.Empty;
+                            if (existingStored != null && existingStored.OwningAgencyId != Guid.Empty)
+                            {
+                                vessel.OwningAgencyId = existingStored.OwningAgencyId;
+                            }
+                            else if (senderOwningAgencyId != Guid.Empty)
+                            {
+                                vessel.OwningAgencyId = senderOwningAgencyId;
+                            }
+                            else
+                            {
+                                vessel.OwningAgencyId = Guid.Empty;
+                            }
                         }
                         VesselStoreSystem.CurrentVessels.AddOrUpdate(vesselId, vessel, (key, existingVal) => vessel);
                     }

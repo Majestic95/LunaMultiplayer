@@ -75,7 +75,12 @@ namespace Server.System.Vessel.Classes
         /// </summary>
         public Guid OwningAgencyId
         {
-            get => Guid.TryParseExact(Fields.GetSingle(OwningAgencyFieldName)?.Value, "N", out var v) ? v : Guid.Empty;
+            // Lenient on read (Guid.TryParse accepts "N", "D", "B", "P", "X" formats),
+            // strict on write ("N" — 32-char hex, matching Universe/Agencies/{guid}.txt
+            // filenames). The lenient read lets an operator hand-editing a vessel file
+            // type the hyphenated "D" form (the human-comfortable default) and have it
+            // round-trip cleanly — the next SaveAgency normalises to "N". Round-2 review.
+            get => Guid.TryParse(Fields.GetSingle(OwningAgencyFieldName)?.Value, out var v) ? v : Guid.Empty;
             set
             {
                 var asString = value.ToString("N", CultureInfo.InvariantCulture);

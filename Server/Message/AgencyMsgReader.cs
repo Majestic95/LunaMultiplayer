@@ -83,19 +83,26 @@ namespace Server.Message
                 return;
             }
 
-            // Hold the per-agency lock per the SaveAgency locking contract (see
-            // AgencySystem.GetAgencyLock doc). Stage 5.17b Share* writers will follow
-            // the same pattern when mutating field values.
+            // Hold the per-agency lock across the entire mutate → persist → reply →
+            // state-send sequence so that:
+            //   (a) SaveAgency serialises a consistent DisplayName (existing contract),
+            //   (b) the CreateReply.DisplayName value matches the persisted value (no
+            //       racing CreateRequests for the same agency can have one's persisted
+            //       value reported in the other's reply — round-2 wire review),
+            //   (c) the State broadcast carries the same DisplayName as the reply.
+            // Stage 5.17b Share* writers will follow the same pattern for field mutations.
+            string capturedDisplayName;
             lock (AgencySystem.GetAgencyLock(state.AgencyId))
             {
                 state.DisplayName = msg.DisplayName;
+                AgencySystem.SaveAgency(state.AgencyId);
+                capturedDisplayName = state.DisplayName;
             }
-            AgencySystem.SaveAgency(state.AgencyId);
 
             // Confirm to the requester, then send their full state so their local UI
             // mirror picks up the new name. Other clients learn about the rename later
             // via the Stage 5.18c visibility surface — not in scope here.
-            AgencySystemSender.SendCreateReplyTo(client, state.AgencyId, state.DisplayName, success: true, reason: string.Empty);
+            AgencySystemSender.SendCreateReplyTo(client, state.AgencyId, capturedDisplayName, success: true, reason: string.Empty);
             AgencySystemSender.SendStateTo(client, state);
         }
 
