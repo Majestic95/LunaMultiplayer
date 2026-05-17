@@ -32,6 +32,9 @@ namespace Server.Settings.Definition
         [XmlComment(Value = "Allow Other launch sites (for users that have the Making History DLC)")]
         public bool AllowOtherLaunchSites { get; set; }
 
+        [XmlComment(Value = "Enable per-agency career mode (each player has independent funds/science/reputation/tech/contracts). Default false preserves shared-agency behaviour. Cannot be changed mid-save: pick a value before the universe is first populated.")]
+        public bool PerAgencyCareer { get; set; }
+
         //Game systems
 
         [XmlComment(Value = "Re-Entry Heating")]
@@ -144,6 +147,7 @@ namespace Server.Settings.Definition
             IndestructibleFacilities = true;
             AllowStockVessels = true;
             AllowOtherLaunchSites = true;
+            PerAgencyCareer = false;
 
             //Game systems
             ReentryHeatScale = 0.5f;
@@ -195,6 +199,7 @@ namespace Server.Settings.Definition
             IndestructibleFacilities = false;
             AllowStockVessels = false;
             AllowOtherLaunchSites = true;
+            PerAgencyCareer = false;
 
             //Game systems
             ReentryHeatScale = 1.0f;
@@ -246,6 +251,7 @@ namespace Server.Settings.Definition
             IndestructibleFacilities = false;
             AllowStockVessels = false;
             AllowOtherLaunchSites = true;
+            PerAgencyCareer = false;
 
             //Game systems
             ReentryHeatScale = 1.0f;
@@ -297,6 +303,7 @@ namespace Server.Settings.Definition
             IndestructibleFacilities = false;
             AllowStockVessels = false;
             AllowOtherLaunchSites = true;
+            PerAgencyCareer = false;
 
             //Game systems
             ReentryHeatScale = 1.0f;
