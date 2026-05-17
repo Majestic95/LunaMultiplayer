@@ -144,6 +144,10 @@ namespace MockClientTest.Harness
             WarpSystem.Reset();
             WarpRequestCache.Clear();
             VesselStoreSystem.CurrentVessels.Clear();
+            // [fix:BUG-025] Bug025RejectionTest seeds a tech ID into the canonical
+            // R&D scenario before running. Clear here so a follow-on test sees
+            // the boot-default empty state, not the prior test's seed.
+            ScenarioStoreSystem.CurrentScenarios.Clear();
         }
 
         private static int FindFreeUdpPort()

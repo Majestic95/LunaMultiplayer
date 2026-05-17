@@ -13,5 +13,9 @@
         FacilityUpgrade = 8,
         PartPurchase = 9,
         ExperimentalPart = 10,
+        // [fix:BUG-025] Server-to-client rejection of a duplicate tech purchase.
+        // The sender deducted science locally before broadcasting; the server saw
+        // the tech was already unlocked and tells the sender to refund.
+        TechnologyRejected = 11,
     }
 }

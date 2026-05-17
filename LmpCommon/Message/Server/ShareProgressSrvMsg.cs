@@ -30,6 +30,8 @@ namespace LmpCommon.Message.Server
             [(ushort)ShareProgressMessageType.FacilityUpgrade] = typeof(ShareProgressFacilityUpgradeMsgData),
             [(ushort)ShareProgressMessageType.PartPurchase] = typeof(ShareProgressPartPurchaseMsgData),
             [(ushort)ShareProgressMessageType.ExperimentalPart] = typeof(ShareProgressExperimentalPartMsgData),
+            // [fix:BUG-025] Server-to-client only — there is no inbound rejection from the client side.
+            [(ushort)ShareProgressMessageType.TechnologyRejected] = typeof(ShareProgressTechnologyRejectedMsgData),
         };
 
         public override ServerMessageType MessageType => ServerMessageType.ShareProgress;
