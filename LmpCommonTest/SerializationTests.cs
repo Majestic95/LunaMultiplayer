@@ -1,9 +1,11 @@
 ﻿using Lidgren.Network;
 using LmpCommon.Message;
 using LmpCommon.Message.Client;
+using LmpCommon.Enums;
 using LmpCommon.Message.Data.Agency;
 using LmpCommon.Message.Data.Chat;
 using LmpCommon.Message.Data.Kerbal;
+using LmpCommon.Message.Data.Settings;
 using LmpCommon.Message.Data.ShareProgress;
 using LmpCommon.Message.Data.Vessel;
 using LmpCommon.Message.Server;
@@ -285,6 +287,74 @@ namespace LmpCommonTest
             Assert.AreEqual(25_000.5, roundTripped.Funds);
             Assert.AreEqual(12.25, roundTripped.Science);
             Assert.AreEqual(7.125, roundTripped.Reputation);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeSettingsReplyMsg_PerAgencyCareerEnabled_True()
+        {
+            // [Stage 5.17e-2] The PerAgencyCareerEnabled field is the tail-positional
+            // bool that lets the 5.18a client mirror gate its agency UI / wire on the
+            // server's functionally-active state (combined PerAgencyCareer + GameMode
+            // check). Round-trip a representative payload with the flag ON to pin the
+            // wire layout — if a future serializer regression drops the tail byte or
+            // miscounts InternalGetMessageSize, this catches it.
+            var msgData = BuildRepresentativeSettingsReply();
+            msgData.PerAgencyCareerEnabled = true;
+
+            var roundTripped = RoundTripServer<SetingsSrvMsg, SettingsReplyMsgData>(msgData);
+
+            Assert.IsTrue(roundTripped.PerAgencyCareerEnabled,
+                "PerAgencyCareerEnabled=true must round-trip through Serialize/Deserialize.");
+            // Sanity that the rest of the payload didn't shift one byte left/right.
+            Assert.AreEqual(GameMode.Career, roundTripped.GameMode);
+            Assert.AreEqual("test-server", roundTripped.ConsoleIdentifier);
+            Assert.AreEqual(true, roundTripped.PrintMotdInChat,
+                "PrintMotdInChat (the previous tail field) must remain stable when a new tail field is appended.");
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeSettingsReplyMsg_PerAgencyCareerEnabled_FalseIsDefault()
+        {
+            // Mirror with the flag OFF. Default-initialised payload should round-trip
+            // false → false; serializer must not coerce to true. This is the gate=off
+            // and the misconfig (PerAgencyCareer=true + non-Career) case from the
+            // server's perspective.
+            var msgData = BuildRepresentativeSettingsReply();
+            msgData.PerAgencyCareerEnabled = false;
+
+            var roundTripped = RoundTripServer<SetingsSrvMsg, SettingsReplyMsgData>(msgData);
+
+            Assert.IsFalse(roundTripped.PerAgencyCareerEnabled,
+                "PerAgencyCareerEnabled=false must round-trip through Serialize/Deserialize.");
+            Assert.AreEqual(GameMode.Career, roundTripped.GameMode);
+            Assert.AreEqual("test-server", roundTripped.ConsoleIdentifier);
+        }
+
+        private static SettingsReplyMsgData BuildRepresentativeSettingsReply()
+        {
+            // Fill enough fields to make the round-trip meaningful — most importantly
+            // ConsoleIdentifier (string with byte-count) and a recognisable tail value
+            // (PrintMotdInChat) so a wire-layout shift would surface immediately.
+            var msgData = Factory.CreateNewMessageData<SettingsReplyMsgData>();
+            msgData.WarpMode = WarpMode.Subspace;
+            msgData.GameMode = GameMode.Career;
+            msgData.TerrainQuality = TerrainQuality.High;
+            msgData.AllowCheats = false;
+            msgData.AllowAdmin = true;
+            msgData.AllowSackKerbals = false;
+            msgData.MaxNumberOfAsteroids = 12;
+            msgData.MaxNumberOfComets = 3;
+            msgData.ConsoleIdentifier = "test-server";
+            msgData.GameDifficulty = GameDifficulty.Normal;
+            msgData.SafetyBubbleDistance = 100f;
+            msgData.MaxVesselParts = 1000;
+            msgData.VesselUpdatesMsInterval = 100;
+            msgData.SecondaryVesselUpdatesMsInterval = 500;
+            msgData.StartingFunds = 25000f;
+            msgData.StartingReputation = 0f;
+            msgData.StartingScience = 0f;
+            msgData.PrintMotdInChat = true;
+            return msgData;
         }
 
         /// <summary>

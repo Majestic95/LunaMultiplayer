@@ -70,6 +70,22 @@ namespace LmpCommon.Message.Data.Settings
         public int MinCraftLibraryRequestIntervalMs;
         public bool PrintMotdInChat;
 
+        /// <summary>
+        /// [Stage 5.17e-2] Server's per-agency career active state — true iff
+        /// <c>GameplaySettings.PerAgencyCareer</c>=true AND <c>GameMode</c>=Career
+        /// (Stage 5.17e-1 Career-only product decision, spec §10 Q-Mode). Lets the
+        /// client behave mode-aware without sniffing protocol version: the future
+        /// Stage 5.18a <c>LmpClient/Systems/Agency</c> mirror gates its CreateRequest
+        /// send / UI surface / write-path interception on this field, so a 0.31.x
+        /// client connecting to a server with the gate off (or a misconfigured Science/
+        /// Sandbox+true server) stays silent on the agency wire instead of hanging
+        /// waiting for a Handshake/State the server will never send. New field at the
+        /// tail of the positional wire layout preserves backward read-compat within
+        /// 0.31.x — older 0.31.0 servers don't ship the byte, but the protocol bump
+        /// from 0.30.x already isolates the audience.
+        /// </summary>
+        public bool PerAgencyCareerEnabled;
+
         public override string ClassName { get; } = nameof(SettingsReplyMsgData);
 
         internal override void InternalSerialize(NetOutgoingMessage lidgrenMsg)
@@ -134,6 +150,7 @@ namespace LmpCommon.Message.Data.Settings
             lidgrenMsg.Write(MaxScreenshotHeight);
             lidgrenMsg.Write(MinCraftLibraryRequestIntervalMs);
             lidgrenMsg.Write(PrintMotdInChat);
+            lidgrenMsg.Write(PerAgencyCareerEnabled);
         }
 
         internal override void InternalDeserialize(NetIncomingMessage lidgrenMsg)
@@ -198,12 +215,14 @@ namespace LmpCommon.Message.Data.Settings
             MaxScreenshotHeight = lidgrenMsg.ReadInt32();
             MinCraftLibraryRequestIntervalMs = lidgrenMsg.ReadInt32();
             PrintMotdInChat = lidgrenMsg.ReadBoolean();
+            PerAgencyCareerEnabled = lidgrenMsg.ReadBoolean();
         }
 
         internal override int InternalGetMessageSize()
         {
+            // bool count went from 24 → 25 with Stage 5.17e-2 PerAgencyCareerEnabled tail field.
             return base.InternalGetMessageSize() + sizeof(WarpMode) + sizeof(GameMode) + sizeof(TerrainQuality) + sizeof(GameDifficulty) +
-                sizeof(bool) * 24 + sizeof(int) * 9 + sizeof(float) * 19 + ConsoleIdentifier.GetByteCount();
+                sizeof(bool) * 25 + sizeof(int) * 9 + sizeof(float) * 19 + ConsoleIdentifier.GetByteCount();
         }
     }
 }

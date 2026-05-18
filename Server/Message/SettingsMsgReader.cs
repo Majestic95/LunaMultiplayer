@@ -7,6 +7,7 @@ using Server.Context;
 using Server.Message.Base;
 using Server.Server;
 using Server.Settings.Structures;
+using Server.System.Agency;
 
 namespace Server.Message
 {
@@ -37,6 +38,14 @@ namespace Server.Message
             msgData.MaxScreenshotHeight = ScreenshotSettings.SettingsStore.MaxScreenshotHeight;
             msgData.MinCraftLibraryRequestIntervalMs = CraftSettings.SettingsStore.MinCraftLibraryRequestIntervalMs;
             msgData.PrintMotdInChat = GeneralSettings.SettingsStore.PrintMotdInChat;
+
+            // [Stage 5.17e-2] Per-agency career active state. Use the combined check
+            // (PerAgencyCareer=true AND GameMode=Career) so the client sees the
+            // functionally-active state, not the raw operator setting. A 0.31.x client
+            // mirror (Stage 5.18a) gates its CreateRequest send + agency UI on this
+            // field. Set unconditionally outside the GameDifficulty=Custom block
+            // because the gate is independent of difficulty preset.
+            msgData.PerAgencyCareerEnabled = AgencySystem.PerAgencyEnabled;
 
             if (GeneralSettings.SettingsStore.GameDifficulty == GameDifficulty.Custom && GameplaySettings.SettingsStore != null)
             {
