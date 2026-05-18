@@ -15,5 +15,10 @@ namespace LmpCommon.Message.Types
         State = 3,
         Contract = 4,
         Visibility = 5,
+        // [Phase 3 Slice B] MKS kolonization per-agency state. Used both directions:
+        // owner-only S→C echo + connect catch-up, AND C→S mutation emit from the
+        // KolonizationManager.TrackLogEntry postfix. Server ignores wire-supplied
+        // AgencyId on inbound; derives from authenticated sender.
+        KolonyState = 6,
     }
 }

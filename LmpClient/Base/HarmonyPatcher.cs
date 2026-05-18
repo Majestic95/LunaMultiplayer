@@ -21,6 +21,7 @@ namespace LmpClient.Base
             SuppressClickThroughBlockerPopup();
             PatchContractPreLoader();
             PatchModuleLogisticsConsumer();
+            PatchKolonizationManager();
         }
 
         /// <summary>
@@ -115,6 +116,55 @@ namespace LmpClient.Base
             catch (Exception e)
             {
                 LunaLog.LogWarning($"[LMP]: [fix:MKS-R0] Could not patch USITools.ModuleLogisticsConsumer: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice B] MKS-R2 — Patches
+        /// <c>KolonyTools.KolonizationManager.TrackLogEntry(KolonizationEntry)</c>
+        /// with a postfix that mirrors every kolony research mutation into the
+        /// per-agency wire when <c>SettingsSystem.ServerSettings.PerAgencyCareerEnabled</c>
+        /// is true. See
+        /// <see cref="LmpClient.Harmony.KolonizationManager_TrackLogEntryPostfix"/>
+        /// for the full mechanism + Q1 resolution
+        /// (<c>ModuleColonyRewards.CheckRewards</c> at line 33 also calls
+        /// <c>KolonizationManager.Instance.TrackLogEntry</c>, so the single
+        /// manager-anchored postfix catches every entry source uniformly).
+        ///
+        /// Imperative registration (rather than <c>[HarmonyPatch]</c> attributes)
+        /// because <c>KolonyTools</c> is not a compile-time dependency. Graceful
+        /// no-op + <c>[fix:MKS-R2]</c> log line when MKS isn't installed; warning
+        /// (not error) when MKS is installed but the method signature has moved
+        /// (operator can grep for <c>[fix:MKS-R2]</c> alongside R0 / R1 to spot
+        /// version mismatches).
+        /// </summary>
+        internal static void PatchKolonizationManager()
+        {
+            try
+            {
+                var kmType = HarmonyLib.AccessTools.TypeByName("KolonyTools.KolonizationManager");
+                if (kmType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:MKS-R2] KolonyTools.KolonizationManager type not found — MKS not installed, skipping per-agency kolony postfix.");
+                    return;
+                }
+
+                var trackMethod = HarmonyLib.AccessTools.Method(kmType, "TrackLogEntry");
+                if (trackMethod == null)
+                {
+                    LunaLog.LogWarning("[LMP]: [fix:MKS-R2] KolonyTools.KolonizationManager.TrackLogEntry not found — MKS version mismatch? Per-agency kolony routing NOT active; shared-mode kolony broadcast continues but per-agency partition will not see runtime mutations.");
+                    return;
+                }
+
+                var postfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.KolonizationManager_TrackLogEntryPostfix),
+                    nameof(LmpClient.Harmony.KolonizationManager_TrackLogEntryPostfix.Postfix));
+                HarmonyInstance.Patch(trackMethod, postfix: postfix);
+                LunaLog.Log("[LMP]: [fix:MKS-R2] Patched KolonyTools.KolonizationManager.TrackLogEntry — per-agency kolony routing active under PerAgencyCareerEnabled.");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:MKS-R2] Could not patch KolonyTools.KolonizationManager.TrackLogEntry: {e.Message}");
             }
         }
 

@@ -48,6 +48,8 @@ namespace LmpCommon.Message.Server
             [(ushort)AgencyMessageType.State] = typeof(AgencyStateMsgData),
             [(ushort)AgencyMessageType.Contract] = typeof(AgencyContractMsgData),
             [(ushort)AgencyMessageType.Visibility] = typeof(AgencyVisibilityMsgData),
+            // [Phase 3 Slice B] MUST stay in lockstep with AgencyCliMsg.cs — BUG-010 wire-symmetry rule.
+            [(ushort)AgencyMessageType.KolonyState] = typeof(AgencyKolonyStateMsgData),
         };
 
         public override ServerMessageType MessageType => ServerMessageType.Agency;

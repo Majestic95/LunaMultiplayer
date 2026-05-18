@@ -1,3 +1,4 @@
+using LmpCommon.Message.Data.Agency;
 using LunaConfigNode.CfgNode;
 using Server.Client;
 using Server.Log;
@@ -74,6 +75,10 @@ namespace Server.System.Agency
             "StrategySystem",
             "ProgressTracking",
             "ScenarioUpgradeableFacilities",
+            // [Phase 3 Slice B] MKS kolonization research projection. Strip-then-splice
+            // pattern same as STRATEGIES — each agency's projected scenario carries ONLY
+            // their own KOLONY_ENTRY records under the KOLONIZATION container.
+            "KolonizationScenario",
         };
 
         // Precompiled regexes — one per key. Re-using compiled instances across every
@@ -156,6 +161,12 @@ namespace Server.System.Agency
                     return SpliceAgencyAchievementsIntoScenario(serializedText, targetAgency);
                 case "ScenarioUpgradeableFacilities":
                     return OverrideFacilityLevelsInScenario(serializedText, targetAgency);
+                // [Phase 3 Slice B] MKS kolonization scenario splice. Strip all
+                // shared KOLONY_ENTRY children under KOLONIZATION; splice in
+                // per-agency entries from AgencyState.KolonyEntries. Each agency
+                // sees ONLY their own kolony research — spec §10 Q1.
+                case "KolonizationScenario":
+                    return SpliceAgencyKolonyEntries(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
@@ -536,6 +547,119 @@ namespace Server.System.Agency
                 // an empty-ExpParts re-create cycle).
                 if (expPartsNode.GetAllValues().Count > 0)
                     node.AddNode(expPartsNode);
+            }
+
+            return node.ToString();
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice B] Strip shared <c>KOLONIZATION → KOLONY_ENTRY</c> child
+        /// nodes and splice in per-agency entries. KolonizationScenario shape (verified
+        /// against MKS <c>KolonyTools/Kolonization/KolonizationPersistance.cs</c> at SHA
+        /// <c>ed0f6aa6</c>):
+        /// <code>
+        /// KolonizationScenario {
+        ///     KOLONIZATION {
+        ///         KOLONY_ENTRY { BodyIndex=... VesselId=... LastUpdate=... ... }
+        ///         KOLONY_ENTRY { ... }
+        ///     }
+        /// }
+        /// </code>
+        ///
+        /// <para><b>Strip-then-splice</b> matches the <see cref="SpliceAgencyStrategiesIntoScenario"/>
+        /// pattern (line 173-220). Each agency's projected scenario contains ONLY
+        /// their own <c>KOLONY_ENTRY</c> records — the shared scenario's
+        /// pre-existing entries are stripped out so an upgrade-in-place universe
+        /// doesn't bleed its accumulated shared kolony research into every fresh
+        /// per-agency client. The boot-time
+        /// <see cref="AgencySystem.WarnAboutSharedKolonyOnUpgrade"/> + the
+        /// <see cref="AgencySystem.RefuseStartupIfUpgradeHazardWithoutOverride"/>
+        /// hazard-gate (Phase 3 Slice B item 11) protect operators from silent
+        /// data loss; the override flag is the documented opt-in.</para>
+        ///
+        /// <para><b>Field-name mapping.</b> The per-agency
+        /// <see cref="AgencyKolonyEntry"/> uses <c>Reputation</c> (matching LMP
+        /// naming conventions); MKS' on-disk <c>KOLONY_ENTRY</c> uses <c>Rep</c>.
+        /// The splice emits the MKS-side names (<c>Rep</c>, not <c>Reputation</c>)
+        /// so KSP-side <c>KolonizationPersistance.ImportStatusNodeList</c> /
+        /// <c>ResourceUtilities.LoadNodeProperties&lt;KolonizationEntry&gt;</c>
+        /// reads the values into the right fields. The other 12 fields map 1:1.</para>
+        ///
+        /// <para><b>Locale</b>: all doubles emit via
+        /// <c>CultureInfo.InvariantCulture</c> + <c>"R"</c> round-trip specifier so
+        /// a comma-decimal server locale doesn't corrupt the on-wire format.
+        /// Mirrors the per-agency <see cref="AgencyState"/> persistence convention
+        /// (AgencyState.cs:433-443).</para>
+        ///
+        /// <para><b>Per-entry isolation</b>: a malformed entry's failure is
+        /// logged + skipped, siblings continue. Whole-scenario parse failure
+        /// falls back to the input unchanged + logs at Error level (same
+        /// pattern as <see cref="SpliceAgencyTechIntoResearchAndDevelopment"/>
+        /// line 393-407) so a hung handshake never blocks the player.</para>
+        /// </summary>
+        private static string SpliceAgencyKolonyEntries(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "KolonizationScenario" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:MKS-R2] KolonizationScenario projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Find or create KOLONIZATION container, strip its KOLONY_ENTRY children,
+            // splice in per-agency entries. Same shape as STRATEGIES strip-and-splice.
+            var kolonyContainer = node.GetNode("KOLONIZATION")?.Value;
+            if (kolonyContainer == null)
+            {
+                kolonyContainer = new ConfigNode("") { Name = "KOLONIZATION" };
+                node.AddNode(kolonyContainer);
+            }
+            else
+            {
+                // .ToArray() snapshots the enumeration so RemoveNode during iteration
+                // doesn't invalidate the cursor (same pattern as STRATEGY strip at
+                // line 194-195).
+                foreach (var existing in kolonyContainer.GetNodes("KOLONY_ENTRY").ToArray())
+                    kolonyContainer.RemoveNode(existing.Value);
+            }
+
+            AgencyKolonyEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+            {
+                snapshot = targetAgency.KolonyEntries.Values.ToArray();
+            }
+
+            foreach (var entry in snapshot)
+            {
+                if (entry == null)
+                    continue;
+                try
+                {
+                    var kNode = new ConfigNode("") { Name = "KOLONY_ENTRY" };
+                    // Field order matches MKS' KolonizationPersistance.Save (line 62-76).
+                    // Field NAME mapping: Reputation→Rep; all other names match 1:1.
+                    kNode.CreateValue(new CfgNodeValue<string, string>("BodyIndex", entry.BodyIndex.ToString(CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("VesselId", entry.VesselId ?? string.Empty));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("LastUpdate", entry.LastUpdate.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("KolonyDate", entry.KolonyDate.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("GeologyResearch", entry.GeologyResearch.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("BotanyResearch", entry.BotanyResearch.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("KolonizationResearch", entry.KolonizationResearch.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("FundsBoosters", entry.FundsBoosters.ToString(CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("ScienceBoosters", entry.ScienceBoosters.ToString(CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("RepBoosters", entry.RepBoosters.ToString(CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("Science", entry.Science.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("Rep", entry.Reputation.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("Funds", entry.Funds.ToString("R", CultureInfo.InvariantCulture)));
+                    kolonyContainer.AddNode(kNode);
+                }
+                catch (Exception)
+                {
+                    // Per-entry isolation — drop this entry, keep others.
+                }
             }
 
             return node.ToString();

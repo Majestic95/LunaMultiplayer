@@ -1,3 +1,4 @@
+using LmpCommon.Message.Data.Agency;
 using LunaConfigNode.CfgNode;
 using Server.Context;
 using Server.Log;

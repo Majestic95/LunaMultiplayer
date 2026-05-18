@@ -267,6 +267,130 @@ namespace Server.System.Agency
         /// emitted them, so a deleteagency cascade against an agency with thousands
         /// of vessels lands deterministically.</para>
         /// </summary>
+        /// <summary>
+        /// [Phase 3 Slice B] Owner-only echo of a per-agency kolony entry batch.
+        /// Emitted by <see cref="AgencyKolonyRouter.TryRoute"/> after a successful
+        /// upsert + persist. Peers never receive another agency's per-agency kolony
+        /// entries (spec §10 Q1 PrivateAgencyResources=true) — projection through
+        /// <see cref="AgencyScenarioProjector"/>'s <c>KolonizationScenario</c> case
+        /// (Slice B) is the only path by which cross-agency awareness leaks into
+        /// the read-side, and projection happens per-target-client at scene-load
+        /// time.
+        ///
+        /// <para>No-op when:</para>
+        /// <list type="bullet">
+        ///   <item><see cref="AgencySystem.PerAgencyEnabled"/> is false — gate=off
+        ///        OR non-Career game mode. Dual-mode silence preserved.</item>
+        ///   <item>The owner client is null (call from a code path with no source
+        ///        client — should not happen for the router, defensive).</item>
+        ///   <item>The batch is null or empty.</item>
+        /// </list>
+        ///
+        /// <para><b>Caller contract on <paramref name="entries"/>:</b> the sender
+        /// filters out null entries (round-1 general-lens SHOULD-FIX S2) so a
+        /// caller building a list across a fallible upsert loop doesn't desync the
+        /// wire's <c>EntryCount</c> vs the non-null slot count. Slice E migration
+        /// callers passing pre-snapshotted lists from inside their per-agency lock
+        /// critical section satisfy the non-null contract by construction, but the
+        /// defensive filter here is the load-bearing line for ad-hoc callers.</para>
+        ///
+        /// <para><b>Sender-naming convention</b> (consumer-lens Lens-2 SF1):
+        /// Slice C's <c>AgencyPlanetarySender</c> and Slice D's
+        /// <c>AgencyOrbitalSender</c> are client-side siblings of
+        /// <see cref="LmpClient.Systems.Agency.AgencyKolonySender"/> — one
+        /// per-mutation-surface. Do NOT consolidate them into a single
+        /// <c>AgencyMessageSender</c> — per-router profiling + future per-batch
+        /// coalescing (pre-spec §11 Q6) need the per-surface boundary. The
+        /// server-side outbound (this class) appends per-router echo + catch-up
+        /// methods directly here — one class, multiple <c>Send*StateToOwner</c>
+        /// methods.</para>
+        /// </summary>
+        public static void SendKolonyStateToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<AgencyKolonyEntry> entries)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (owner == null || entries == null || entries.Count == 0)
+                return;
+
+            // [Round-1 general-lens SHOULD-FIX S2] Filter nulls so EntryCount
+            // matches the non-null slot count on the wire. The router's `accepted`
+            // list is null-free in practice (line 105 skips nulls before append),
+            // but the public API contract must not trust the caller — a future
+            // Slice E migration caller could pass a list assembled with nulls.
+            var nonNull = new List<AgencyKolonyEntry>(entries.Count);
+            for (var i = 0; i < entries.Count; i++)
+            {
+                if (entries[i] != null) nonNull.Add(entries[i]);
+            }
+            if (nonNull.Count == 0) return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyKolonyStateMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.EntryCount = nonNull.Count;
+            msgData.Entries = nonNull.ToArray();
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice B] Connect-time catch-up: ships the owner's persisted
+        /// <c>AgencyState.KolonyEntries</c> dictionary as a single batch
+        /// <see cref="AgencyKolonyStateMsgData"/>. Wired into
+        /// <c>HandshakeSystem.HandleHandshakeRequest</c> immediately after the
+        /// Stage 5.17d <see cref="SendContractCatchupTo"/> call so the
+        /// pre-5.18-series client mirror lands with a complete per-agency kolony
+        /// view before any mid-session mutation arrives.
+        ///
+        /// <para><b>Sends unconditionally under gate=on, even for empty
+        /// dictionaries.</b> A pre-Slice-B client mirror author needs the empty
+        /// state to distinguish "no per-agency kolony yet" from "server didn't
+        /// send catch-up." Same shape as the Stage 5.17d contract catch-up
+        /// pre-spec contract.</para>
+        ///
+        /// <para><b>No defensive copy needed</b> — unlike contract entries,
+        /// kolony entries have no mutable byte-array fields. We snapshot the
+        /// dict's <c>.Values</c> array under the per-agency lock so a concurrent
+        /// router upsert can't tear our iteration, then ship the snapshot.</para>
+        /// </summary>
+        public static void SendKolonyCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (client == null || state == null)
+                return;
+
+            AgencyKolonyEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(state.AgencyId))
+            {
+                // .Values.ToArray() under the lock — concurrent router mutations
+                // are serialized against this read so the snapshot is coherent.
+                // The per-agency lock contract on AgencyState.KolonyEntries
+                // (AgencyState.cs:166-169) requires this read pattern.
+                snapshot = new AgencyKolonyEntry[state.KolonyEntries.Count];
+                var i = 0;
+                foreach (var kvp in state.KolonyEntries)
+                {
+                    if (kvp.Value == null) continue;
+                    snapshot[i++] = kvp.Value;
+                }
+                // Resize down if any null values were skipped (defensive — the
+                // dict should not hold null values under the router's contract).
+                if (i < snapshot.Length)
+                    Array.Resize(ref snapshot, i);
+            }
+
+            // Always send under gate=on, even with zero entries. The pre-Slice-B
+            // client mirror author note in AgencyKolonyStateMsgData XML calls this
+            // out — empty state distinguishes "no per-agency kolony yet" from
+            // "unsynced".
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyKolonyStateMsgData>();
+            msgData.AgencyId = state.AgencyId;
+            msgData.EntryCount = snapshot.Length;
+            msgData.Entries = snapshot;
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+        }
+
         public static void BroadcastVisibilityChange(IReadOnlyList<VesselOwnershipChange> changes)
         {
             if (!AgencySystem.PerAgencyEnabled)

@@ -275,6 +275,15 @@ namespace Server.System.Agency
             // Facility scenarios — same shape and recovery workflow.
             WarnAboutSharedProgressFacilityOnUpgrade();
 
+            // [Phase 3 Slice B / MKS-R2] Sibling diagnostic for MKS' shared
+            // KolonizationScenario. The projector splice strips ALL pre-
+            // existing KOLONY_ENTRY children from the projected scenario per
+            // requesting agency; an upgrade-in-place universe with accumulated
+            // shared kolony research would silently vanish from every per-
+            // agency client's view on first scene-load. Same fresh-start-only
+            // operator workflow as the existing 5.17e diagnostics.
+            WarnAboutSharedKolonyOnUpgrade();
+
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
             // accepted-loss path, refuse to keep running. The accumulated shared
@@ -377,6 +386,19 @@ namespace Server.System.Agency
                     // sentinel list here.
                     var progContainer = progScn.GetNode("Progress")?.Value;
                     if (progContainer != null && progContainer.GetAllNodes().Any()) hasHazard = true;
+                }
+            }
+            // [Phase 3 Slice B / MKS-R2] Kolony hazard predicate. Mirrors the
+            // WarnAboutSharedKolonyOnUpgrade helper — any shared KOLONY_ENTRY
+            // child under KOLONIZATION means the projector will strip on first
+            // per-agency connect, deleting operator-visible kolony research.
+            // Same fail-closed posture as the other hazards in this method.
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("KolonizationScenario", out var kolonyScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("KolonizationScenario"))
+                {
+                    var kolonyContainer = kolonyScn.GetNode("KOLONIZATION")?.Value;
+                    if (kolonyContainer != null && kolonyContainer.GetNodes("KOLONY_ENTRY").Any()) hasHazard = true;
                 }
             }
             if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScn))
@@ -594,6 +616,69 @@ namespace Server.System.Agency
         }
 
         /// <summary>
+        /// [Phase 3 Slice B / MKS-R2] Upgrade-lens diagnostic for MKS' shared
+        /// <c>KolonizationScenario</c>. Fires when (a) gate=on, (b) zero
+        /// agencies loaded (fresh-mint upcoming), (c) the universe is non-
+        /// pristine (vessels exist — signals in-place upgrade), (d) the shared
+        /// scenario has at least one <c>KOLONY_ENTRY</c> child under its
+        /// <c>KOLONIZATION</c> container. Under those conditions, the Slice B
+        /// projector strips ALL shared <c>KOLONY_ENTRY</c> children from the
+        /// projected scenario before splicing in per-agency entries — so an
+        /// upgrade-in-place universe with accumulated MKS research would
+        /// silently lose every entry on first per-agency scene-load. Spec §10
+        /// fresh-start-only sign-off applies; operator workflow is archive +
+        /// restart, or stamp the destination vessels' <c>lmpOwningAgency</c>
+        /// before first connect (Slice E ships <c>setvesselagency</c> as a
+        /// thin wrapper for that recovery path).
+        ///
+        /// <para>Counted via <see cref="ScenarioStoreSystem.CurrentScenarios"/>
+        /// + the per-scenario lock the projector uses to read. The
+        /// <c>KolonizationScenario</c>'s on-disk shape is
+        /// <c>KOLONIZATION { KOLONY_ENTRY { ... } ... }</c> per MKS'
+        /// <c>KolonizationPersistance.Save</c> at SHA <c>ed0f6aa6</c>.</para>
+        /// </summary>
+        private static void WarnAboutSharedKolonyOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint agency on a new universe is fine.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("KolonizationScenario", out var scenario))
+                return;
+
+            int entryCount;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("KolonizationScenario"))
+            {
+                var kolonyContainer = scenario.GetNode("KOLONIZATION")?.Value;
+                entryCount = kolonyContainer?.GetNodes("KOLONY_ENTRY").Count() ?? 0;
+            }
+
+            if (entryCount == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:MKS-R2] PerAgencyCareer=true on an upgrade universe carries " +
+                $"{entryCount} shared-agency KOLONY_ENTRY record(s) in the MKS KolonizationScenario. " +
+                "The Phase 3 projector strips these on send so per-agency clients start with empty " +
+                "kolony research — the accumulated shared research is NOT migrated. Spec §10 migration " +
+                "is fresh-start-only: stop the server, archive Universe/ before any player connects, " +
+                "and start fresh. " +
+                "RECOVERY OPTIONS at this moment (no agencies minted yet, so per-agency vessel-stamping " +
+                "is NOT yet actionable — that requires Slice E's setvesselagency admin command, which " +
+                "runs AFTER each player has minted their agency by connecting once): " +
+                "(1) Accept the loss + set AllowEnablePerAgencyOnExistingUniverse=true in " +
+                "Settings/GameplaySettings.xml. Server boots, projector strips on first connect, " +
+                "players start kolony research from zero. (2) After agencies are minted (each player " +
+                "has connected at least once), run Slice E's `setvesselagency {vesselGuid} {agencyGuid}` " +
+                "for each kolony-bearing base — the next post-attribution kolony mutation routes the " +
+                "entry into the right agency. Slice E is not yet shipped; until then the only recovery " +
+                "is option (1) or the spec §10 fresh-start (archive Universe/, restart). (3) Stay on " +
+                "shared-agency mode (PerAgencyCareer=false) — no kolony data loss; kolony continues as " +
+                "shared accumulation under the Phase 3 gate=off path.");
+        }
+
+        /// <summary>
         /// Stage 5.17d upgrade-lens diagnostic. Pre-existing CONTRACTS / CONTRACTS_FINISHED
         /// entries in the shared <c>ContractSystem</c> scenario under gate=on means the
         /// scenario will ship to every connecting player at handshake; without the per-
@@ -748,6 +833,53 @@ namespace Server.System.Agency
                 "the cross-agency lock check. Stage 5.18d's transferagency admin command will be the recovery " +
                 "path. To preserve full re-enable: keep Universe/Agencies/ intact, or accept the loss and use " +
                 "transferagency to re-own the affected vessels under the new agencies.");
+
+            // [Phase 3 Slice B / MKS-R2 upgrade-lens finding MF1] Per-agency MKS state
+            // (KOLONY_ENTRIES) is frozen on disk under gate=off — invisible to the
+            // shared-mode 30s SHA pass, stale relative to the now-diverging shared
+            // KolonizationScenario. An operator who re-enables PerAgencyCareer will
+            // see the frozen entries re-materialise, producing a stale snapshot of
+            // the world the operator was actually playing in shared-mode. Cheap text
+            // scan of Universe/Agencies/*.txt; don't load the full AgencyState file.
+            try
+            {
+                if (FileHandler.FolderExists(AgencyState.AgenciesPath))
+                {
+                    var frozenAgencyCount = 0;
+                    foreach (var filePath in FileHandler.GetFilesInPath(AgencyState.AgenciesPath))
+                    {
+                        if (Path.GetExtension(filePath) != ".txt") continue;
+                        try
+                        {
+                            // Substring match is sufficient — KOLONY_ENTRIES is the
+                            // only top-level child node containing that token and a
+                            // legitimate agency file is operator-friendly text.
+                            var text = File.ReadAllText(filePath);
+                            if (text.Contains("KOLONY_ENTRIES")) frozenAgencyCount++;
+                        }
+                        catch (Exception) { /* per-file isolation — skip and keep scanning */ }
+                    }
+
+                    if (frozenAgencyCount > 0)
+                    {
+                        LunaLog.Warning(
+                            $"[fix:MKS-R2] Additionally, {frozenAgencyCount} agency file(s) under " +
+                            $"{AgencyState.AgenciesPath} carry frozen per-agency KOLONY_ENTRIES from a prior " +
+                            "gate=on session. Shared-mode kolony play continues from the shared scenario only; " +
+                            "the per-agency entries on disk are NOT updated by the legacy 30s SHA pass and will " +
+                            "reappear stale if you re-enable PerAgencyCareer (the projected state will reflect " +
+                            "a snapshot from before the gate=off session). Consider clearing KOLONY_ENTRIES " +
+                            "child blocks from Universe/Agencies/*.txt before re-enabling, or accepting the " +
+                            "stale projection.");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                // Diagnostic failure must not block boot — log and continue. Same
+                // posture as the per-file isolation inside the loop.
+                LunaLog.Warning($"[fix:MKS-R2] Frozen-kolony-state scan failed: {e.GetType().Name}: {e.Message}");
+            }
         }
 
         private static void WarnAboutOrphanedVessels()
@@ -1335,6 +1467,19 @@ namespace Server.System.Agency
         /// <see cref="AgencyState"/> so a concurrent SaveAgency does not serialise a
         /// torn multi-field snapshot. Same pattern as
         /// <see cref="Server.System.Scenario.ScenarioDataUpdater.GetSemaphore"/>.
+        ///
+        /// <para><b>Stage 5.18d MKS-aware <c>transferagency</c> extension</b>
+        /// (consumer-lens Lens-3 SF1): the migration path acquires this lock
+        /// TWICE (source agency + destination agency) in ordinal Guid-comparison
+        /// order to avoid AB-BA deadlock against concurrent
+        /// <c>transferagency</c> commands moving vessels in the opposite
+        /// direction. Same lock-ordering rule as the BUG-033 precedent in
+        /// <c>ScenarioDataUpdater.GetSemaphore</c>. See pre-spec §4.e
+        /// (<c>mks-lmp-compatibility-phase-3-prespec.md</c>) for the full
+        /// migration contract — atomic dict-remove + dict-add under the dual
+        /// lock + persist both agencies + wire-echo (removal-echo to source,
+        /// added-entries echo to destination — Slice E protocol-additive on
+        /// <see cref="LmpCommon.Message.Data.Agency.AgencyKolonyStateMsgData"/>).</para>
         /// </summary>
         internal static object GetAgencyLock(Guid agencyId) =>
             AgencyLocks.GetOrAdd(agencyId, _ => new object());

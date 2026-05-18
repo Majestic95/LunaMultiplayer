@@ -71,6 +71,18 @@ namespace Server.Message
                 case AgencyMessageType.CreateRequest:
                     HandleCreateRequest(client, (AgencyCreateRequestMsgData)data);
                     break;
+                case AgencyMessageType.KolonyState:
+                    // [Phase 3 Slice B] MKS kolony per-agency routing. The MsgData
+                    // is shared S↔C (pre-spec §2.e); inbound from the client postfix
+                    // carries a wire-supplied AgencyId which the router IGNORES,
+                    // deriving the authoritative sender's agency from
+                    // AgencyByPlayerName instead. Same trust posture as
+                    // AgencyContractRouter. TryRoute returns false if the gate is
+                    // off (defensive — a buggy client emitting under gate=off);
+                    // we drop silently in that case (siblings drop server-→-client
+                    // subtypes the same way).
+                    AgencyKolonyRouter.TryRoute(client, (AgencyKolonyStateMsgData)data);
+                    break;
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:

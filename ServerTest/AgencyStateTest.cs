@@ -1,3 +1,4 @@
+using LmpCommon.Message.Data.Agency;
 using LunaConfigNode.CfgNode;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Server.System.Agency;

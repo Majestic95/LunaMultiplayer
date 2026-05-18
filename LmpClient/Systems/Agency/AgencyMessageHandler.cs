@@ -64,6 +64,20 @@ namespace LmpClient.Systems.Agency
                     // already log-drops it.
                     LunaLog.LogWarning("[Agency]: Dropping inbound CreateRequest (S→C-illegal subtype).");
                     break;
+                case AgencyMessageType.KolonyState:
+                    // [Phase 3 Slice B] Stub forward-compat. The kolony client mirror
+                    // is deferred to a 5.18-series follow-up; the catch-up path on the
+                    // server (HandshakeSystem) sends an AgencyKolonyStateMsgData
+                    // unconditionally under gate=on (even an empty dict, by design —
+                    // see AgencyKolonyStateMsgData XML). Without this case the
+                    // existing 0.31-per-agency client would log "Unknown
+                    // AgencyMessageType KolonyState — dropping." every connect AND
+                    // every kolony mutation echo. Debug-level (not Warning) because
+                    // the message is a server-known-correct push; a future Slice B+
+                    // client mirror author moves real apply logic into this branch
+                    // following the AgencyContractMsgData/HandleContract precedent.
+                    LunaLog.Log("[Agency]: KolonyState received — client mirror not yet wired (Phase 3 Slice B, 5.18-series follow-up).");
+                    break;
                 default:
                     LunaLog.LogWarning($"[Agency]: Unknown AgencyMessageType {msgData.AgencyMessageType} — dropping.");
                     break;

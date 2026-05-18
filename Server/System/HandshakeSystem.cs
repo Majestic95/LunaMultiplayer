@@ -69,6 +69,15 @@ namespace Server.System
                         // doesn't have to wait for a mutation to learn the inherited state.
                         // No-op when the agency has zero contracts yet.
                         AgencySystemSender.SendContractCatchupTo(client, assignedState);
+                        // [Phase 3 Slice B] MKS kolony catch-up: persisted per-agency
+                        // KolonyEntries (populated by AgencyKolonyRouter on prior sessions)
+                        // are pushed to the reconnecting owner BEFORE any mid-session
+                        // mutation arrives — the pre-5.18-series client mirror author needs
+                        // the full state at connect time to render KolonizationManager-bound
+                        // UI accurately. Sends unconditionally under gate=on (even an empty
+                        // dict — see SendKolonyCatchupTo XML on "empty distinguishes from
+                        // unsynced").
+                        AgencySystemSender.SendKolonyCatchupTo(client, assignedState);
                     }
                 }
 
