@@ -210,6 +210,12 @@ namespace LmpClient.Systems.Agency
 
         private static void HandleCreateReply(AgencyCreateReplyMsgData data)
         {
+            // Capture the server's verdict for the AgencyCreateWindow to surface
+            // (Stage 5.18c). Empty Reason on success is fine — the window only
+            // renders the reason when LastCreateReplySuccess is false.
+            System.LastCreateReplySuccess = data.Success;
+            System.LastCreateReplyReason = data.Reason ?? string.Empty;
+
             if (data.Success)
             {
                 // Server applied the rename; mirror it locally. The reply's AgencyId
@@ -232,11 +238,10 @@ namespace LmpClient.Systems.Agency
             else
             {
                 // Failure — leave LocalAgencyDisplayName untouched (still the auto-
-                // registered default or the prior accepted custom name). 5.18c will
-                // surface data.Reason in the rename window for the user. Log here for
-                // the operator-visible KSP.log trail.
+                // registered default or the prior accepted custom name). The window
+                // reads LastCreateReplyReason to render the rejection to the user.
                 LunaLog.LogWarning(
-                    $"[Agency]: Rename rejected by server — Reason='{data.Reason ?? string.Empty}'.");
+                    $"[Agency]: Rename rejected by server — Reason='{System.LastCreateReplyReason}'.");
             }
         }
 

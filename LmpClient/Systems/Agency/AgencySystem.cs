@@ -209,6 +209,25 @@ namespace LmpClient.Systems.Agency
             new ConcurrentDictionary<Guid, Guid>();
 
         /// <summary>
+        /// Last <see cref="AgencyCreateReplyMsgData"/>.Success flag — true on first
+        /// load (until the user submits anything) so the AgencyCreateWindow doesn't
+        /// render a misleading error banner before the user has tried to rename.
+        /// Set by <see cref="AgencyMessageHandler.HandleCreateReply"/>; read by the
+        /// Stage 5.18c <c>AgencyCreateWindow</c> to decide whether to render
+        /// <see cref="LastCreateReplyReason"/> as a rejection message or a success
+        /// confirmation.
+        /// </summary>
+        public bool LastCreateReplySuccess { get; internal set; } = true;
+
+        /// <summary>
+        /// Last <see cref="AgencyCreateReplyMsgData"/>.Reason payload (server-supplied
+        /// rejection reason on failure, may be empty on success). Read by the Stage
+        /// 5.18c <c>AgencyCreateWindow</c> to surface the server's verdict to the
+        /// player after a rename submit.
+        /// </summary>
+        public string LastCreateReplyReason { get; internal set; } = string.Empty;
+
+        /// <summary>
         /// Convenience accessor over <see cref="VesselOwnership"/>. Returns true if
         /// the registry has any entry for <paramref name="vesselId"/>; false if the
         /// vessel id is absent. The out-param is set to <see cref="Guid.Empty"/> on
@@ -240,6 +259,8 @@ namespace LmpClient.Systems.Agency
             LocalAgencyOwningPlayerName = string.Empty;
             OtherAgencies.Clear();
             VesselOwnership.Clear();
+            LastCreateReplySuccess = true;
+            LastCreateReplyReason = string.Empty;
 
             if (clearedOwnerships > 0)
                 LunaLog.Log($"[Agency]: Cleared {clearedOwnerships} vessel-ownership entries on disconnect.");

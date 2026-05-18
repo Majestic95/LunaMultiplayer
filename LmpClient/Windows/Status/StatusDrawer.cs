@@ -6,6 +6,7 @@ using LmpClient.Systems.SettingsSys;
 using LmpClient.Systems.Status;
 using LmpClient.Systems.Warp;
 using LmpClient.Windows.Admin;
+using LmpClient.Windows.Agency;
 using LmpClient.Windows.Chat;
 using LmpClient.Windows.CraftLibrary;
 using LmpClient.Windows.Debug;
@@ -59,6 +60,20 @@ namespace LmpClient.Windows.Status
             if (SettingsSystem.ServerSettings.AllowAdmin)
             {
                 AdminWindow.Singleton.Display = GUILayout.Toggle(AdminWindow.Singleton.Display, AdminIcon, ToggleButtonStyle);
+            }
+
+            // Stage 5.18c per-agency toggle. Gated on the server-supplied
+            // PerAgencyCareerEnabled flag AND Career mode (mirroring
+            // AgencyWindow.Display) so the button doesn't render on a Sandbox/
+            // Science profile against a misconfigured per-agency server (per
+            // spec §10 Q-Mode, per-agency is career-only). Without the Career
+            // gate the button appears, the player clicks it, and absolutely
+            // nothing visible happens because the window's Display getter
+            // refuses to render under non-Career — UX-hostile dead button.
+            if (SettingsSystem.ServerSettings.PerAgencyCareerEnabled
+                && HighLogic.CurrentGame?.Mode == Game.Modes.CAREER)
+            {
+                AgencyWindow.Singleton.Display = GUILayout.Toggle(AgencyWindow.Singleton.Display, "Agency", ToggleButtonStyle);
             }
 
             GUILayout.EndHorizontal();

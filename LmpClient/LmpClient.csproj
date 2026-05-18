@@ -283,6 +283,7 @@
     <Compile Include="Systems\Admin\AdminMessageHandler.cs" />
     <Compile Include="Systems\Admin\AdminMessageSender.cs" />
     <Compile Include="Systems\Admin\AdminSystem.cs" />
+    <Compile Include="Systems\Agency\AgencyLabelFormatter.cs" />
     <Compile Include="Systems\Agency\AgencyMembership.cs" />
     <Compile Include="Systems\Agency\AgencyMessageHandler.cs" />
     <Compile Include="Systems\Agency\AgencyMessageSender.cs" />
@@ -460,6 +461,10 @@
     <Compile Include="Systems\VesselSwitcherSys\VesselSwitcherSystem.cs" />
     <Compile Include="Windows\Admin\AdminDrawer.cs" />
     <Compile Include="Windows\Admin\AdminWindow.cs" />
+    <Compile Include="Windows\Agency\AgencyCreateDrawer.cs" />
+    <Compile Include="Windows\Agency\AgencyCreateWindow.cs" />
+    <Compile Include="Windows\Agency\AgencyDrawer.cs" />
+    <Compile Include="Windows\Agency\AgencyWindow.cs" />
     <Compile Include="Windows\BannedParts\BannedPartsResourcesDrawer.cs" />
     <Compile Include="Windows\BannedParts\BannedPartsResourcesWindow.cs" />
     <Compile Include="Windows\ServerList\ColorEffect.cs" />

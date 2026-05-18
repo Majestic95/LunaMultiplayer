@@ -95,9 +95,15 @@ namespace LmpClient.Systems.Agency
         /// <paramref name="incoming"/> is Empty, insert ONLY when no prior
         /// entry exists; never replace an existing real id with Empty.</para>
         ///
-        /// <para><b>Future evolution.</b> Two cases need a dedicated authoritative
-        /// channel that bypasses this helper's preservation rule when 5.18c
-        /// <c>AgencyVisibilityMsgData</c> lands:
+        /// <para><b>Future evolution (Stage 5.18d).</b> The next consumer needs
+        /// a sibling helper that BYPASSES this preservation rule for two
+        /// authoritative server-pushed mutations. Recommended shape:
+        /// <c>public static void ForceRecordOwnership(registry, vesselId,
+        /// authoritativeAgencyId)</c> = unconditional indexer write, with XML
+        /// pointing back here for the rationale. Both cases below need it:</para>
+        ///
+        /// <para><b>Cases that need the bypass helper:</b>
+        /// <list type="bullet">
         /// <list type="bullet">
         ///   <item><b>Demote to Unassigned:</b> if a future operator-facing flow
         ///         adds a "remove agency claim" path (none today — the planned
