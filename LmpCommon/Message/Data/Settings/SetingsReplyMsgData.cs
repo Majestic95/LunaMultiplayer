@@ -215,7 +215,14 @@ namespace LmpCommon.Message.Data.Settings
             MaxScreenshotHeight = lidgrenMsg.ReadInt32();
             MinCraftLibraryRequestIntervalMs = lidgrenMsg.ReadInt32();
             PrintMotdInChat = lidgrenMsg.ReadBoolean();
-            PerAgencyCareerEnabled = lidgrenMsg.ReadBoolean();
+            // [Stage 5.17e-2 review-finding A.3] Tail-bit read guard matches the
+            // canonical pattern (VesselProtoMsgData.Reason, HandshakeRequestMsgData,
+            // WarpNewSubspaceMsgData.RequestSeq, etc.). A peer that doesn't ship the
+            // byte — older 0.31.0 server, mixed-dev-build, or any future tail-bump
+            // we drop — defaults PerAgencyCareerEnabled=false (gate off). Original
+            // 5.17e-2 code unconditionally called ReadBoolean and contradicted the
+            // backward-read-compat claim in the field's XML doc.
+            PerAgencyCareerEnabled = lidgrenMsg.Position < lidgrenMsg.LengthBits && lidgrenMsg.ReadBoolean();
         }
 
         internal override int InternalGetMessageSize()

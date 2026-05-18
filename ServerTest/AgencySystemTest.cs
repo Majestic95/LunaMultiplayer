@@ -58,6 +58,14 @@ namespace ServerTest
             GameplaySettings.SettingsStore.StartingFunds = 0f;
             GameplaySettings.SettingsStore.StartingScience = 0f;
             GameplaySettings.SettingsStore.StartingReputation = 0f;
+            // Session-19 review-finding A.1 tests seed scenarios + vessels + flip
+            // ServerRunning. Wipe them here so adjacent test classes (LockSystemAgencyTest
+            // etc. already self-clean vessels, but ScenarioStoreSystem.CurrentScenarios
+            // has no other clear-on-teardown) don't observe our leftovers.
+            ScenarioStoreSystem.CurrentScenarios.Clear();
+            VesselStoreSystem.CurrentVessels.Clear();
+            ServerContext.ServerRunning = false;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = false;
 
             if (Directory.Exists(ServerContext.UniverseDirectory))
                 Directory.Delete(ServerContext.UniverseDirectory, recursive: true);
@@ -521,6 +529,126 @@ namespace ServerTest
 
             Assert.AreEqual(1, AgencySystem.Agencies.Count,
                 "non-.txt files must be ignored; only one agency was actually persisted");
+        }
+
+        [TestMethod]
+        public void LoadExistingAgencies_RefusesBoot_OnProgressOnlyUpgradeHazard()
+        {
+            // [Stage 5.17e-9 review-finding A.1] The boot refusal must fire on any of
+            // the three accumulated-shared-state hazards the Warn helper counts:
+            // strategies, world-firsts (ProgressTracking), or facility upgrades.
+            // Pre-fix, only StrategySystem was checked — a universe with ONLY
+            // ProgressTracking entries booted with a warning and then silently
+            // stripped the data on first per-agency client connect. Pin the
+            // ProgressTracking branch end-to-end through the public LoadExistingAgencies
+            // entry point.
+            SetupBootRefusalScenario();
+            SeedProgressTrackingHazard();
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsFalse(ServerContext.ServerRunning,
+                "ServerRunning must be flipped to false when ProgressTracking shared entries exist " +
+                "and AllowEnablePerAgencyOnExistingUniverse=false.");
+            Assert.AreEqual(0, AgencySystem.Agencies.Count,
+                "No agencies should be loaded — the refusal fires after the would-be-load path is " +
+                "drained by Reset() in Setup(), so the registry stays empty.");
+        }
+
+        [TestMethod]
+        public void LoadExistingAgencies_RefusesBoot_OnFacilityOnlyUpgradeHazard()
+        {
+            // [Stage 5.17e-9 review-finding A.1] Sibling of the ProgressTracking test:
+            // ScenarioUpgradeableFacilities hazard alone must trigger refusal. The
+            // facility branch sweeps the same known-KSC-facility-key list as the
+            // WarnAboutSharedProgressFacilityOnUpgrade helper and treats lvl>0 as
+            // accumulated upgrade state.
+            SetupBootRefusalScenario();
+            SeedFacilityUpgradeHazard();
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsFalse(ServerContext.ServerRunning,
+                "ServerRunning must be flipped to false when a known facility has lvl>0 and " +
+                "AllowEnablePerAgencyOnExistingUniverse=false.");
+            Assert.AreEqual(0, AgencySystem.Agencies.Count);
+        }
+
+        [TestMethod]
+        public void LoadExistingAgencies_AllowsBoot_OnProgressHazard_WhenOverrideOn()
+        {
+            // Operator opt-in: the override flag suppresses the refusal so the
+            // projector's strip-on-first-connect is the documented contract. Pin
+            // that the override actually works — without this, the refusal would
+            // be impossible to bypass and pre-0.31 upgraders couldn't continue.
+            SetupBootRefusalScenario();
+            SeedProgressTrackingHazard();
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = true;
+            try
+            {
+                AgencySystem.LoadExistingAgencies();
+
+                Assert.IsTrue(ServerContext.ServerRunning,
+                    "ServerRunning must remain true when the operator has explicitly opted in via " +
+                    "AllowEnablePerAgencyOnExistingUniverse=true.");
+            }
+            finally
+            {
+                GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = false;
+            }
+        }
+
+        private void SetupBootRefusalScenario()
+        {
+            // Common prep for the three refusal tests: gate already on via Setup();
+            // ensure pre-conditions for the refusal — server marked running, override
+            // off (default), no agencies loaded (already true from Reset), and at
+            // least one vessel so the universe is non-pristine.
+            ServerContext.ServerRunning = true;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = false;
+
+            // Wipe scenario / vessel store state so adjacent tests in this class
+            // don't interfere. (No existing test in AgencySystemTest seeds these,
+            // so a clean slate is the correct starting point.)
+            ScenarioStoreSystem.CurrentScenarios.Clear();
+            VesselStoreSystem.CurrentVessels.Clear();
+
+            // Non-pristine universe: any vessel makes IsEmpty=false.
+            VesselStoreSystem.CurrentVessels.TryAdd(Guid.NewGuid(), LoadSampleVessel());
+        }
+
+        private static void SeedProgressTrackingHazard()
+        {
+            // Minimum hazard shape: ProgressTracking { Progress { Kerbin { … } } }.
+            var scenario = new LunaConfigNode.CfgNode.ConfigNode("") { Name = "ProgressTracking" };
+            var progress = new LunaConfigNode.CfgNode.ConfigNode("") { Name = "Progress" };
+            scenario.AddNode(progress);
+            var kerbin = new LunaConfigNode.CfgNode.ConfigNode("") { Name = "Kerbin" };
+            progress.AddNode(kerbin);
+            ScenarioStoreSystem.CurrentScenarios.TryAdd("ProgressTracking", scenario);
+        }
+
+        private static void SeedFacilityUpgradeHazard()
+        {
+            // Minimum hazard shape: ScenarioUpgradeableFacilities { SpaceCenter/LaunchPad { lvl = 2 } }.
+            // The 5.17e-9 sweep treats any known-KSC-facility with lvl>0 as a hazard.
+            // Parse the inner lvl value via the ConfigNode(text) constructor — matches
+            // the AgencyScenarioProjectorTest pattern (Project tests build scenarios
+            // the same way) and works around MixedCollection.Update's update-only
+            // semantics for values that don't exist yet.
+            var scenario = new LunaConfigNode.CfgNode.ConfigNode("") { Name = "ScenarioUpgradeableFacilities" };
+            var launchPad = new LunaConfigNode.CfgNode.ConfigNode("lvl = 2\n") { Name = "SpaceCenter/LaunchPad" };
+            scenario.AddNode(launchPad);
+            ScenarioStoreSystem.CurrentScenarios.TryAdd("ScenarioUpgradeableFacilities", scenario);
+        }
+
+        private static Server.System.Vessel.Classes.Vessel LoadSampleVessel()
+        {
+            // Reused from LockSystemAgencyTest's pattern — the XmlExampleFiles/Others
+            // folder is copied into the ServerTest output directory by the csproj.
+            var dir = Path.Combine(Directory.GetCurrentDirectory(), "XmlExampleFiles", "Others");
+            return new Server.System.Vessel.Classes.Vessel(
+                File.ReadAllText(Directory.GetFiles(dir).OrderBy(p => p, StringComparer.Ordinal).First()));
         }
     }
 }

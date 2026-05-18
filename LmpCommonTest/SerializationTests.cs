@@ -330,6 +330,50 @@ namespace LmpCommonTest
             Assert.AreEqual("test-server", roundTripped.ConsoleIdentifier);
         }
 
+        [TestMethod]
+        public void TestSerializeDeserializeSettingsReplyMsg_TruncatedPayloadMissingTail_DefaultsFalse()
+        {
+            // [Stage 5.17e-2 review-finding A.3] Backward read-compat for the tail
+            // PerAgencyCareerEnabled bool. A peer that doesn't ship the byte —
+            // older 0.31.0 server, mixed-dev-build, or any future tail-bump we drop
+            // — must NOT throw on deserialize; defaults the field to false (gate
+            // off). Matches the VesselProtoMsgData.Reason / HandshakeRequest /
+            // WarpNewSubspace tail-bit guard pattern.
+            //
+            // Setup: serialize a full payload with the flag TRUE, then truncate the
+            // receiver's LengthBits by 1 to drop the trailing bool bit. The earlier
+            // fields stay intact; only the guarded tail read sees "no bits left."
+            var msgData = BuildRepresentativeSettingsReply();
+            msgData.PerAgencyCareerEnabled = true;
+
+            var msg = Factory.CreateNew<SetingsSrvMsg>(msgData);
+            var sendBuf = Client.CreateMessage(msg.GetMessageSize());
+            msg.Serialize(sendBuf);
+            var sentLengthBits = sendBuf.LengthBits;
+
+            var bytes = sendBuf.ReadBytes(sendBuf.LengthBytes);
+            var recvBuf = Client.CreateIncomingMessage(NetIncomingMessageType.Data, bytes);
+            recvBuf.LengthBits = sentLengthBits - 1; // drop trailing 1-bit bool
+
+            msg.Recycle();
+
+            var deserialised = (SettingsReplyMsgData)Factory.Deserialize(recvBuf, Environment.TickCount).Data;
+
+            // The flag must default to false — proves the Position<LengthBits guard
+            // short-circuits the ReadBoolean. Pre-fix, ReadBoolean was unconditional
+            // and would either return a stray bit value or throw past end-of-stream.
+            Assert.IsFalse(deserialised.PerAgencyCareerEnabled,
+                "PerAgencyCareerEnabled must default to false when the tail bit is absent from the wire.");
+
+            // Earlier fields remain correctly decoded — confirms the truncation only
+            // affected the guarded tail read and the rest of the wire layout was
+            // honoured.
+            Assert.AreEqual(GameMode.Career, deserialised.GameMode);
+            Assert.AreEqual("test-server", deserialised.ConsoleIdentifier);
+            Assert.AreEqual(true, deserialised.PrintMotdInChat,
+                "Previous tail field PrintMotdInChat must still decode correctly.");
+        }
+
         private static SettingsReplyMsgData BuildRepresentativeSettingsReply()
         {
             // Fill enough fields to make the round-trip meaningful — most importantly

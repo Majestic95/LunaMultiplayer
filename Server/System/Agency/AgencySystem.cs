@@ -352,13 +352,60 @@ namespace Server.System.Agency
                     else if ((rndScn.GetNode("ExpParts")?.Value.GetAllValues().Count ?? 0) > 0) hasHazard = true;
                 }
             }
-            // Progress/facility (5.17e-6) — strategies or facility upgrades.
+            // Progress/facility (5.17e-6) — strategies OR shared world-firsts OR upgraded
+            // facility tiers. Pre-review-finding-A.1 (session 19): only the strategy
+            // branch fired here despite WarnAboutSharedProgressFacilityOnUpgrade
+            // counting all three. That asymmetry left ProgressTracking-only and
+            // facility-only upgrade universes booting (with a warning) into silent
+            // strip-on-first-connect — exactly the failure mode the refusal exists
+            // to prevent. Keep the three sub-checks aligned with the Warn helper.
             if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("StrategySystem", out var stratScn))
             {
                 lock (Scenario.ScenarioDataUpdater.GetSemaphore("StrategySystem"))
                 {
                     var sc = stratScn.GetNode("STRATEGIES")?.Value;
                     if (sc != null && sc.GetNodes("STRATEGY").Any()) hasHazard = true;
+                }
+            }
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ProgressTracking", out var progScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("ProgressTracking"))
+                {
+                    // Same dynamic-naming constraint as the Warn helper — any child
+                    // under Progress signals accumulated world-firsts. GetAllNodes()
+                    // enumerates regardless of name, so we don't need a hard-coded
+                    // sentinel list here.
+                    var progContainer = progScn.GetNode("Progress")?.Value;
+                    if (progContainer != null && progContainer.GetAllNodes().Any()) hasHazard = true;
+                }
+            }
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("ScenarioUpgradeableFacilities"))
+                {
+                    // Mirror the Warn helper's known-facility-keys sweep: any KSC
+                    // facility with lvl > 0 means the operator has accumulated tier
+                    // upgrades that the projector overrides to stock defaults.
+                    var knownFacilityKeys = new[]
+                    {
+                        "SpaceCenter/LaunchPad", "SpaceCenter/VehicleAssemblyBuilding",
+                        "SpaceCenter/Runway", "SpaceCenter/SpaceplaneHangar",
+                        "SpaceCenter/TrackingStation", "SpaceCenter/AstronautComplex",
+                        "SpaceCenter/MissionControl", "SpaceCenter/Administration",
+                        "SpaceCenter/ResearchAndDevelopment",
+                    };
+                    foreach (var k in knownFacilityKeys)
+                    {
+                        var fac = facScn.GetNode(k)?.Value;
+                        if (fac == null) continue;
+                        var lvl = fac.GetValue("lvl")?.Value;
+                        if (string.IsNullOrEmpty(lvl)) continue;
+                        if (float.TryParse(lvl, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed > 0f)
+                        {
+                            hasHazard = true;
+                            break;
+                        }
+                    }
                 }
             }
 

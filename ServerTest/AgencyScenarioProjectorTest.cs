@@ -4,6 +4,7 @@ using Server.Settings.Structures;
 using Server.System.Agency;
 using System;
 using System.Globalization;
+using System.Text;
 
 namespace ServerTest
 {
@@ -299,6 +300,78 @@ namespace ServerTest
             var result = AgencyScenarioProjector.ProjectForClient("Funding", input, null);
 
             Assert.AreEqual(input, result);
+        }
+
+        [TestMethod]
+        public void Project_ProgressTracking_StripsSharedEntries_WhenAgencyHasNoMatchingAchievement()
+        {
+            // [Stage 5.17e-6 review-finding A.2] Strict-isolation: shared
+            // ProgressTracking → Progress → {child} entries must be stripped from
+            // the outbound scenario when the requesting agency has no matching
+            // achievement of its own. Pre-fix, the projector used upsert semantics
+            // that left unmatched shared children intact (partial bleed). The
+            // upgrade-in-place hazard then leaked accumulated world-firsts from
+            // pre-per-agency play to every per-agency client.
+            //
+            // Scenario shape: ProgressTracking { Progress { Kerbin { … } FirstLaunch { … } } }.
+            var input = "Progress\n{\n\tKerbin\n\t{\n\t\tcompleted = True\n\t}\n\tFirstLaunch\n\t{\n\t\tcompleted = True\n\t}\n}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+            // Empty Achievements dict — no per-agency progress to splice.
+
+            var result = AgencyScenarioProjector.Project("ProgressTracking", input, agency);
+
+            Assert.IsFalse(result.Contains("Kerbin"),
+                "Shared Progress entry 'Kerbin' must be stripped when agency has no matching achievement.");
+            Assert.IsFalse(result.Contains("FirstLaunch"),
+                "Shared Progress entry 'FirstLaunch' must be stripped when agency has no matching achievement.");
+            // Container shape preserved — the Progress child node must still exist
+            // (so client KSP's ProgressTracking ScenarioModule deserialises cleanly).
+            StringAssert.Contains(result, "Progress",
+                "Progress container must be preserved even when stripped of all children.");
+        }
+
+        [TestMethod]
+        public void Project_ProgressTracking_StripsShared_AndSplicesAgencyAchievements()
+        {
+            // [Stage 5.17e-6 review-finding A.2] Mixed case: shared scenario has
+            // entries the agency does NOT have AND entries the agency DOES have.
+            // Result: ALL shared children stripped; only agency's spliced. Mirrors
+            // SpliceAgencyStrategiesIntoScenario's strip-then-splice pattern.
+            var input = "Progress\n{\n\tKerbin\n\t{\n\t\tcompleted = True\n\t}\n\tFirstLaunch\n\t{\n\t\tcompleted = True\n\t}\n}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+
+            // Agency has its OWN "FirstLaunch" with different content + a new "Mun".
+            agency.Achievements["FirstLaunch"] = new AgencyAchievementEntry
+            {
+                Id = "FirstLaunch",
+                Data = Encoding.UTF8.GetBytes("agency-specific = TrueAgency\n"),
+                NumBytes = Encoding.UTF8.GetByteCount("agency-specific = TrueAgency\n"),
+            };
+            agency.Achievements["Mun"] = new AgencyAchievementEntry
+            {
+                Id = "Mun",
+                Data = Encoding.UTF8.GetBytes("landed = True\n"),
+                NumBytes = Encoding.UTF8.GetByteCount("landed = True\n"),
+            };
+
+            var result = AgencyScenarioProjector.Project("ProgressTracking", input, agency);
+
+            Assert.IsFalse(result.Contains("Kerbin"),
+                "Unmatched shared entry 'Kerbin' must be stripped (strict isolation).");
+            // The agency's "FirstLaunch" entry has unique content — confirms the
+            // splice ran and the shared version did NOT survive next to it.
+            StringAssert.Contains(result, "agency-specific = TrueAgency",
+                "Agency's FirstLaunch achievement content must be spliced in.");
+            // Agency-new entry appears.
+            StringAssert.Contains(result, "Mun",
+                "Agency's new 'Mun' achievement must be spliced into Progress.");
+            StringAssert.Contains(result, "landed = True",
+                "Agency's 'Mun' achievement content must be spliced.");
+            // The shared "completed = True" line under Kerbin must NOT appear —
+            // proves strict-strip rather than upsert. (Agency's FirstLaunch uses
+            // distinct content so we can tell apart.)
+            Assert.IsFalse(result.Contains("completed = True"),
+                "Shared content of stripped entries must be gone, not just the entry names.");
         }
     }
 }

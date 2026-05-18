@@ -239,36 +239,55 @@ namespace Server.System.Agency
                 return scenarioText;
             }
 
+            // Find or create Progress container, strip ALL existing children, then
+            // splice in the per-agency Achievements. Strict-isolation matches the
+            // Strategy splice (SpliceAgencyStrategiesIntoScenario) and the spec §10
+            // Q-BootRefusal sign-off — the Warn helpers tell the operator "the
+            // projector strips ... so per-agency clients start with ... no world
+            // firsts," and the AllowEnablePerAgencyOnExistingUniverse=true override
+            // is "I accept the strip on first per-agency connect." Pre-review-
+            // finding-A.2 (session 19) the projector used upsert semantics that left
+            // unmatched shared Progress children intact, contradicting both the
+            // sibling splice and the documented operator contract.
+            //
+            // The historical "no enumerate-all" rationale on the in-code comment
+            // was incorrect: LunaConfigNode.CfgNode.ConfigNode.GetAllNodes() (verified
+            // v1.9.1) enumerates children regardless of name — exactly what the
+            // dynamic-named Progress children need. Strip-then-splice is the same
+            // shape as the STRATEGY strip-and-splice, just with GetAllNodes()
+            // substituted for GetNodes("STRATEGY"). The boot refusal (5.17e-9 +
+            // session-19 fix to RefuseStartupIfUpgradeHazardWithoutOverride) is the
+            // operator safety net for upgrade-in-place universes; the projector
+            // honours the override-flag contract once the operator opts in.
             var progressContainer = node.GetNode("Progress")?.Value;
             if (progressContainer == null)
             {
                 progressContainer = new ConfigNode("") { Name = "Progress" };
                 node.AddNode(progressContainer);
             }
+            else
+            {
+                // .ToArray() snapshots the enumeration so RemoveNode during iteration
+                // doesn't invalidate the cursor (same pattern as the Tech/Science/
+                // ExpParts strip in SpliceAgencyResearchIntoScenario). Note:
+                // GetAllNodes() returns List<ConfigNode> directly, not the
+                // CfgNodeValue<string, ConfigNode> wrappers that the named overload
+                // GetNodes(name) returns — so we pass `existing` straight to
+                // RemoveNode(ConfigNode), no `.Value` indirection.
+                foreach (var existing in progressContainer.GetAllNodes().ToArray())
+                    progressContainer.RemoveNode(existing);
+            }
 
             AgencyAchievementEntry[] snapshot;
             lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
                 snapshot = targetAgency.Achievements.Values.ToArray();
 
-            // Upsert pattern (matches the legacy ScenarioAchievementsDataUpdater
-            // writer's ReplaceNode-or-AddNode): for each per-agency Achievement,
-            // remove the matching shared child by name, then add the per-agency
-            // version. Shared achievements with no per-agency override stay —
-            // the WarnAboutSharedResearchOnUpgrade boot diagnostic (5.17e-5) +
-            // a future 5.17e-6 equivalent informs operators about the partial
-            // bleed-through under upgrade-in-place universes. This trades
-            // strict-isolation for a simpler projector + compatibility with the
-            // dynamic-naming KSP uses for Progress children (no enumerate-all).
             foreach (var entry in snapshot)
             {
                 if (entry == null || string.IsNullOrEmpty(entry.Id) || entry.Data == null || entry.NumBytes <= 0)
                     continue;
                 try
                 {
-                    // Remove existing same-named child if any (upsert semantics).
-                    var existing = progressContainer.GetNode(entry.Id);
-                    if (existing != null)
-                        progressContainer.RemoveNode(existing.Value);
                     var achNode = ScenarioDataUpdater.ParseClientConfigNode(entry.Data, entry.NumBytes, entry.Id);
                     if (achNode.IsEmpty())
                         continue;
@@ -276,7 +295,7 @@ namespace Server.System.Agency
                 }
                 catch (Exception)
                 {
-                    // Per-entry isolation.
+                    // Per-entry isolation — drop this achievement, keep others.
                 }
             }
 
