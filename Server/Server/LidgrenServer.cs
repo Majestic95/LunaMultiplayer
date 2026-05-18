@@ -200,6 +200,26 @@ namespace Server.Server
             client.BytesSent += outmsg.LengthBytes;
 
             var sendResult = Server.SendMessage(outmsg, client.Connection, message.NetDeliveryMethod, message.Channel);
+
+            // [diag:send] Low-noise capture: most reliable-ordered sends return
+            // Sent on a healthy connection, so the happy path adds one branch and no
+            // log line. The interesting cases — FailedNotConnected (silent drop when
+            // Lidgren status != Connected, the leading hypothesis), Queued (window
+            // full), or Dropped (unreliable channel saturated) — surface the full
+            // context once per occurrence. Originally added during the MockClientTest
+            // flake investigation (see project_mock_harness_flakes.md); retained
+            // permanently because an operator who sees their wire start failing on
+            // a real server gets actionable evidence immediately.
+            if (sendResult != NetSendResult.Sent)
+            {
+                var dataType = message.Data?.GetType().Name ?? "<null-data>";
+                var connStatus = client.Connection?.Status.ToString() ?? "<null-conn>";
+                var endpoint = client.Connection?.RemoteEndPoint?.ToString() ?? "<null-ep>";
+                var qCount = client.SendMessageQueue.Count;
+                LunaLog.Debug(
+                    $"[diag:send] result={sendResult} type={dataType} channel={message.Channel} method={message.NetDeliveryMethod} " +
+                    $"connStatus={connStatus} clientStatus={client.ConnectionStatus} ep={endpoint} queue={qCount}");
+            }
         }
 
         public static void FlushSendQueue()
