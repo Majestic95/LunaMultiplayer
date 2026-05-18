@@ -90,13 +90,18 @@
                                                FontStyle="Italic"/>
                                 </StackPanel>
 
-                                <!-- Dirty-count badge -->
-                                <TextBlock Grid.Row="2"
-                                           IsVisible="{Binding HasDirty}"
-                                           FontStyle="Italic">
-                                    <Run Text="{Binding DirtyCount}"/>
-                                    <Run Text="unsaved change(s) in this group."/>
-                                </TextBlock>
+                                <!-- Dirty-count + validation summary line -->
+                                <StackPanel Grid.Row="2" Orientation="Vertical" Spacing="2">
+                                    <TextBlock IsVisible="{Binding HasDirty}"
+                                               FontStyle="Italic">
+                                        <Run Text="{Binding DirtyCount}"/>
+                                        <Run Text="unsaved change(s) in this group."/>
+                                    </TextBlock>
+                                    <TextBlock IsVisible="{Binding HasValidationError}"
+                                               Foreground="Red"
+                                               FontStyle="Italic"
+                                               Text="One or more fields have validation errors. Fix them before saving."/>
+                                </StackPanel>
 
                                 <!-- Fields list. Dimmed via FieldsOpacity when values are POCO defaults. -->
                                 <ScrollViewer Grid.Row="3"
@@ -155,6 +160,20 @@
                                                             <!-- Parse error -->
                                                             <TextBlock Text="{Binding ParseError}"
                                                                        IsVisible="{Binding ParseError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                                                                       Foreground="Red"
+                                                                       FontSize="11"
+                                                                       TextWrapping="Wrap"/>
+
+                                                            <!-- Validation error (per-field rule) -->
+                                                            <TextBlock Text="{Binding ValidationError}"
+                                                                       IsVisible="{Binding ValidationError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                                                                       Foreground="Red"
+                                                                       FontSize="11"
+                                                                       TextWrapping="Wrap"/>
+
+                                                            <!-- Cross-field error (e.g. HearbeatMsInterval < ConnectionMsTimeout) -->
+                                                            <TextBlock Text="{Binding CrossFieldError}"
+                                                                       IsVisible="{Binding CrossFieldError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                                                                        Foreground="Red"
                                                                        FontSize="11"
                                                                        TextWrapping="Wrap"/>

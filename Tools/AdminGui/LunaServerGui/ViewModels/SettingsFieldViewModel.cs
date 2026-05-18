@@ -39,6 +39,7 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
     private readonly PropertyInfo _property;
     private readonly object _instance;
     private readonly object? _originalValue;
+    private readonly IReadOnlyList<FieldValidationRule> _rules;
 
     public string Name => _property.Name;
     public string TypeName => _property.PropertyType.Name;
@@ -58,15 +59,40 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
     [ObservableProperty] private string? _parseError;
     [ObservableProperty] private bool _isDirty;
 
+    /// <summary>
+    /// First-failing validation rule's operator-facing message, or null on
+    /// pass. Distinct from <see cref="ParseError"/> — a ParseError means
+    /// "your text isn't a valid value of this type"; a ValidationError
+    /// means "the parsed value violates a spec rule (out of range, too
+    /// long, etc.)". Save is gated on BOTH being clear.
+    /// </summary>
+    [ObservableProperty] private string? _validationError;
+
+    /// <summary>
+    /// Cross-field validation message routed here by the parent
+    /// <see cref="SettingsGroupViewModel"/> after its
+    /// <see cref="SettingsCatalog.CrossFieldValidator"/> runs. Distinct
+    /// from <see cref="ValidationError"/> so the rule-eval path (which
+    /// runs on per-field change) doesn't clobber the cross-field message.
+    /// View surfaces both stacked.
+    /// </summary>
+    [ObservableProperty] private string? _crossFieldError;
+
     /// <summary>Display-only string for locked / read-only contexts (same shape as 1D-1's SettingsField.DisplayValue).</summary>
     public string DisplayValue { get; }
 
-    public SettingsFieldViewModel(PropertyInfo property, object instance, string comment, string? lockReason)
+    public SettingsFieldViewModel(
+        PropertyInfo property,
+        object instance,
+        string comment,
+        string? lockReason,
+        IReadOnlyList<FieldValidationRule>? rules = null)
     {
         _property = property ?? throw new ArgumentNullException(nameof(property));
         _instance = instance ?? throw new ArgumentNullException(nameof(instance));
         Comment = comment ?? string.Empty;
         LockReason = lockReason;
+        _rules = rules ?? Array.Empty<FieldValidationRule>();
         _originalValue = property.GetValue(instance);
         DisplayValue = FormatForDisplay(_originalValue);
 
@@ -109,11 +135,13 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
         {
             ParseError = null;
             IsDirty = !Equals(parsed, _originalValue);
+            ValidationError = RunRules(parsed);
         }
         else
         {
             ParseError = error;
             IsDirty = true; // Differs from baseline; just doesn't parse cleanly.
+            ValidationError = null; // Parse-failed values don't get rule-checked.
         }
     }
 
@@ -121,12 +149,119 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
     {
         if (Editor != FieldEditorKind.Bool) return;
         IsDirty = !Equals(value, _originalValue);
+        ValidationError = RunRules(value);
     }
 
     partial void OnEnumValueChanged(string? value)
     {
         if (Editor != FieldEditorKind.Enum) return;
         IsDirty = !Equals(value, _originalValue?.ToString());
+        // Enum rules are vanishingly rare today (no spec-defined ones in
+        // 1D-3); run anyway so a future MaxLengthRule on a string enum
+        // works without code change.
+        ValidationError = RunRules(value);
+    }
+
+    /// <summary>
+    /// First-failing rule's message, or null if all rules pass / no rules
+    /// configured for this field. Called whenever the editor surface
+    /// changes (post-parse) AND on initial construction to surface
+    /// validation failures the operator inherits from the loaded file
+    /// before they edit anything.
+    /// </summary>
+    private string? RunRules(object? parsedValue)
+    {
+        foreach (var rule in _rules)
+        {
+            var msg = rule.Validate(parsedValue);
+            if (msg is not null) return msg;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Write the editor surface's parsed value to <paramref name="target"/>
+    /// (which may be a shadow instance built for cross-field validation,
+    /// or the real wrapped instance on Save). Returns false if the editor
+    /// surface fails to parse — caller skips this field. Does NOT mutate
+    /// the real wrapped instance unless the caller passes it explicitly.
+    /// </summary>
+    internal bool WriteToInstance(object target)
+    {
+        if (Editor == FieldEditorKind.Locked) return false;
+        switch (Editor)
+        {
+            case FieldEditorKind.Bool:
+                _property.SetValue(target, BoolValue);
+                return true;
+            case FieldEditorKind.Enum:
+                if (EnumValue is null || !Enum.TryParse(_property.PropertyType, EnumValue, out var enumParsed))
+                    return false;
+                _property.SetValue(target, enumParsed);
+                return true;
+            case FieldEditorKind.Text:
+                if (!TryParseTextToValue(TextValue, out var parsed, out _))
+                    return false;
+                _property.SetValue(target, parsed);
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /// <summary>
+    /// Write the captured original value from the wrapped instance to
+    /// <paramref name="target"/>. Used when building a shadow instance for
+    /// cross-field validation — fields that aren't dirty (or whose edits
+    /// don't parse) need their on-disk value visible to the validator.
+    /// </summary>
+    internal void WriteOriginalToInstance(object target)
+        => _property.SetValue(target, _originalValue);
+
+    /// <summary>
+    /// Restore the editor surface to the field's captured original. Used
+    /// by <see cref="SettingsGroupViewModel.RevertAll"/>. Goes through the
+    /// editor's bindable property setter so the partial OnXxxChanged
+    /// handlers fire and re-evaluate IsDirty + ValidationError.
+    /// </summary>
+    public void RevertToOriginal()
+    {
+        switch (Editor)
+        {
+            case FieldEditorKind.Bool:
+                BoolValue = (bool)(_originalValue ?? false);
+                break;
+            case FieldEditorKind.Enum:
+                EnumValue = _originalValue?.ToString();
+                break;
+            case FieldEditorKind.Text:
+                TextValue = FormatForDisplay(_originalValue);
+                if (TextValue == "(unset)") TextValue = string.Empty;
+                break;
+            case FieldEditorKind.Locked:
+                // Locked fields never had an editor surface that diverged
+                // from the original; nothing to revert.
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Run rules against the current editor surface. Used by the parent
+    /// group on construction to populate ValidationError for fields that
+    /// inherit a validation failure from the loaded XML (e.g. operator
+    /// edited the file by hand and put MaxPlayers=99999).
+    /// </summary>
+    public void EvaluateRulesNow()
+    {
+        if (Editor == FieldEditorKind.Locked) return;
+        object? currentValue = Editor switch
+        {
+            FieldEditorKind.Bool => BoolValue,
+            FieldEditorKind.Enum => EnumValue,
+            FieldEditorKind.Text when TryParseTextToValue(TextValue, out var parsed, out _) => parsed,
+            _ => null,
+        };
+        ValidationError = RunRules(currentValue);
     }
 
     /// <summary>

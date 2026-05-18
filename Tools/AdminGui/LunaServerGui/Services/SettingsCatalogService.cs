@@ -55,6 +55,101 @@ public sealed class SettingsCatalogService
             "dialog (slice 1D-4) will gate this edit; do not toggle it casually.",
     };
 
+    /// <summary>
+    /// Per-field validation rules sourced from spec §Validation-And-Safety-
+    /// Rules + the duplicated POCOs' XmlComment hints. Rule evaluation runs
+    /// on the post-parse typed value, never raw editor text. Multiple rules
+    /// per field stack — first failing rule wins on the operator-facing
+    /// message. Keyed by (Type, PropertyName) for the same shape as
+    /// <see cref="LockedFields"/>.
+    /// </summary>
+    private static readonly Dictionary<(Type Type, string Property), FieldValidationRule[]> FieldRules = new()
+    {
+        // GeneralSettings — string max-lengths + non-empty server identity
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.ServerName))]
+            = new FieldValidationRule[] { new RequiredRule(), new MaxLengthRule(30) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.Description))]
+            = new FieldValidationRule[] { new MaxLengthRule(200) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.CountryCode))]
+            = new FieldValidationRule[] { new MaxLengthRule(2) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.WebsiteText))]
+            = new FieldValidationRule[] { new MaxLengthRule(15) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.Website))]
+            = new FieldValidationRule[] { new MaxLengthRule(60) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.Password))]
+            = new FieldValidationRule[] { new MaxLengthRule(30) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.AdminPassword))]
+            = new FieldValidationRule[] { new MaxLengthRule(30) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.ServerMotd))]
+            = new FieldValidationRule[] { new MaxLengthRule(255) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.MaxPlayers))]
+            = new FieldValidationRule[] { new NumericRangeRule(1, 10000) },
+        [(typeof(GeneralSettingsDefinition), nameof(GeneralSettingsDefinition.MaxUsernameLength))]
+            = new FieldValidationRule[] { new NumericRangeRule(1, 100) },
+
+        // ConnectionSettings — ports + MTU + interval sanity
+        [(typeof(ConnectionSettingsDefinition), nameof(ConnectionSettingsDefinition.Port))]
+            = new FieldValidationRule[] { new NumericRangeRule(1, 65535) },
+        [(typeof(ConnectionSettingsDefinition), nameof(ConnectionSettingsDefinition.HearbeatMsInterval))]
+            = new FieldValidationRule[] { new MinValueRule(1) },
+        [(typeof(ConnectionSettingsDefinition), nameof(ConnectionSettingsDefinition.ConnectionMsTimeout))]
+            = new FieldValidationRule[] { new MinValueRule(1) },
+        [(typeof(ConnectionSettingsDefinition), nameof(ConnectionSettingsDefinition.UpnpMsTimeout))]
+            = new FieldValidationRule[] { new MinValueRule(1) },
+        [(typeof(ConnectionSettingsDefinition), nameof(ConnectionSettingsDefinition.MaximumTransmissionUnit))]
+            = new FieldValidationRule[] { new NumericRangeRule(1, 8192) },
+
+        // WebsiteSettings — port + refresh interval
+        [(typeof(WebsiteSettingsDefinition), nameof(WebsiteSettingsDefinition.Port))]
+            = new FieldValidationRule[] { new NumericRangeRule(1, 65535) },
+        [(typeof(WebsiteSettingsDefinition), nameof(WebsiteSettingsDefinition.RefreshIntervalMs))]
+            = new FieldValidationRule[] { new MinValueRule(100) },
+
+        // MasterServerSettings — server's explicit "Min value = 5000" floor
+        [(typeof(MasterServerSettingsDefinition), nameof(MasterServerSettingsDefinition.MasterServerRegistrationMsInterval))]
+            = new FieldValidationRule[] { new MinValueRule(5000) },
+
+        // LogSettings — non-negative expire
+        [(typeof(LogSettingsDefinition), nameof(LogSettingsDefinition.ExpireLogs))]
+            = new FieldValidationRule[] { new NumericRangeRule(0, 36500) },
+    };
+
+    private static readonly Dictionary<string, string> EmptyErrors = new();
+
+    /// <summary>
+    /// Cross-field rules: evaluated against the loaded POCO instance.
+    /// Currently only one rule (HearbeatMsInterval &lt; ConnectionMsTimeout
+    /// in ConnectionSettings, per spec §Validation-And-Safety-Rules);
+    /// cross-group rules like Connection.Port vs Website.Port collision are
+    /// deferred — they require coordination across SettingsGroupViewModels
+    /// and the spec marks port-conflicts as "where possible".
+    /// EmptyErrors is declared above this so the lambda capture sees a
+    /// non-null reference at static-init time.
+    /// </summary>
+    private static readonly Dictionary<Type, CrossFieldValidator> CrossFieldValidators = new()
+    {
+        [typeof(ConnectionSettingsDefinition)] = static instance =>
+        {
+            var conn = (ConnectionSettingsDefinition)instance;
+            if (conn.HearbeatMsInterval >= conn.ConnectionMsTimeout)
+            {
+                // Flag the heartbeat field — it's the one that's "too high"
+                // semantically. Operator typically tunes heartbeat-down to
+                // fix this rather than timeout-up.
+                return new Dictionary<string, string>
+                {
+                    [nameof(ConnectionSettingsDefinition.HearbeatMsInterval)] =
+                        $"Must be less than ConnectionMsTimeout ({conn.ConnectionMsTimeout}ms). " +
+                        $"A heartbeat ≥ timeout means clients drop before sending one.",
+                };
+            }
+            return EmptyErrors;
+        },
+    };
+
+    internal static CrossFieldValidator? GetCrossFieldValidator(Type definitionType)
+        => CrossFieldValidators.TryGetValue(definitionType, out var v) ? v : null;
+
     public SettingsCatalogService(SettingsXmlService xml)
     {
         _xml = xml ?? throw new ArgumentNullException(nameof(xml));
@@ -113,7 +208,8 @@ public sealed class SettingsCatalogService
         }
 
         var fieldVms = BuildFieldVms(definitionType, instance!);
-        return new SettingsGroupViewModel(_xml, displayName, path, status, detail, instance!, fieldVms);
+        var crossFieldValidator = GetCrossFieldValidator(definitionType);
+        return new SettingsGroupViewModel(_xml, displayName, path, status, detail, instance!, fieldVms, crossFieldValidator);
     }
 
     private static IReadOnlyList<SettingsFieldViewModel> BuildFieldVms(Type definitionType, object instance)
@@ -130,7 +226,8 @@ public sealed class SettingsCatalogService
             {
                 var comment = p.GetCustomAttribute<XmlCommentAttribute>()?.Value ?? string.Empty;
                 LockedFields.TryGetValue((definitionType, p.Name), out var lockReason);
-                return new SettingsFieldViewModel(p, instance, comment, lockReason);
+                FieldRules.TryGetValue((definitionType, p.Name), out var rules);
+                return new SettingsFieldViewModel(p, instance, comment, lockReason, rules);
             })
             .ToList();
     }

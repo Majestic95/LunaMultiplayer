@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using LunaServerGui.Models;
 using LunaServerGui.Services;
+using LunaServerGui.SettingsCatalog;
 
 namespace LunaServerGui.ViewModels;
 
@@ -25,6 +26,7 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
 {
     private readonly SettingsXmlService _xml;
     private readonly object _instance;
+    private readonly CrossFieldValidator? _crossFieldValidator;
 
     public string DisplayName { get; }
     public string FilePath { get; }
@@ -42,6 +44,7 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
 
     [ObservableProperty] private bool _hasDirty;
     [ObservableProperty] private bool _hasParseError;
+    [ObservableProperty] private bool _hasValidationError;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
@@ -62,10 +65,12 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
         SettingsGroupStatus status,
         string? detail,
         object instance,
-        IReadOnlyList<SettingsFieldViewModel> fields)
+        IReadOnlyList<SettingsFieldViewModel> fields,
+        CrossFieldValidator? crossFieldValidator = null)
     {
         _xml = xml ?? throw new ArgumentNullException(nameof(xml));
         _instance = instance ?? throw new ArgumentNullException(nameof(instance));
+        _crossFieldValidator = crossFieldValidator;
         DisplayName = displayName;
         FilePath = filePath;
         Status = status;
@@ -73,40 +78,101 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
         Fields = new ObservableCollection<SettingsFieldViewModel>(fields);
 
         foreach (var f in Fields)
+        {
             f.PropertyChanged += OnFieldPropertyChanged;
+            // Only evaluate rules for files that actually loaded from disk.
+            // MissingFile/ParseError groups display POCO defaults — running
+            // RequiredRule against them would falsely red-flag ServerName=""
+            // on a file the GUI just told the operator doesn't exist yet
+            // (review finding #4).
+            if (ValuesAreFromFile) f.EvaluateRulesNow();
+        }
+        if (ValuesAreFromFile) RecomputeCrossFieldErrors();
         RecomputeAggregateState();
     }
 
     private void OnFieldPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
-        // Only the dirty/parse-error flags affect the group-level aggregate.
+        // Only the dirty/error flags affect the group-level aggregate.
         // Don't recompute on every TextValue keystroke; the field VM's
-        // partial OnTextValueChanged handler is what flips IsDirty +
-        // ParseError, which fires this once per relevant change.
-        if (e.PropertyName is nameof(SettingsFieldViewModel.IsDirty)
-            or nameof(SettingsFieldViewModel.ParseError))
+        // partial OnTextValueChanged handler flips IsDirty + ParseError +
+        // ValidationError together, which fires this once per relevant
+        // change. We also need to re-run cross-field validation on any
+        // dirty change because cross-field rules read other fields' commits.
+        switch (e.PropertyName)
         {
-            RecomputeAggregateState();
+            case nameof(SettingsFieldViewModel.IsDirty):
+                RecomputeCrossFieldErrors();
+                RecomputeAggregateState();
+                break;
+            case nameof(SettingsFieldViewModel.ParseError):
+            case nameof(SettingsFieldViewModel.ValidationError):
+            case nameof(SettingsFieldViewModel.CrossFieldError):
+                RecomputeAggregateState();
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Build a shadow instance of the Definition POCO populated with each
+    /// field's effective edit (operator's in-progress value when dirty +
+    /// parses cleanly; on-disk original otherwise), then run the cross-
+    /// field validator against the shadow. The real wrapped instance is
+    /// NEVER mutated by this path — eliminating the snapshot/restore
+    /// fragility flagged in the slice 1D-3 review (Cross-field validator
+    /// could leave torn state if the validator threw before finally).
+    /// </summary>
+    private void RecomputeCrossFieldErrors()
+    {
+        foreach (var f in Fields) f.CrossFieldError = null;
+        if (_crossFieldValidator is null) return;
+
+        var shadow = Activator.CreateInstance(_instance.GetType());
+        if (shadow is null) return;
+
+        foreach (var f in Fields)
+        {
+            // Fields with a parse error fall back to their on-disk
+            // original — the cross-field rule sees the value that's
+            // CURRENTLY in the file, not a half-typed text.
+            var committed = f.IsDirty && string.IsNullOrEmpty(f.ParseError) && f.WriteToInstance(shadow);
+            if (!committed) f.WriteOriginalToInstance(shadow);
+        }
+
+        var errors = _crossFieldValidator(shadow);
+        foreach (var (fieldName, msg) in errors)
+        {
+            var fieldVm = Fields.FirstOrDefault(f => f.Name == fieldName);
+            if (fieldVm is not null) fieldVm.CrossFieldError = msg;
         }
     }
 
     private void RecomputeAggregateState()
     {
         var dirty = 0;
-        var hasError = false;
+        var hasParse = false;
+        var hasValidation = false;
         foreach (var f in Fields)
         {
             if (f.IsDirty) dirty++;
-            if (!string.IsNullOrEmpty(f.ParseError)) hasError = true;
+            if (!string.IsNullOrEmpty(f.ParseError)) hasParse = true;
+            // Per-field ValidationError on a NON-dirty field is shown red
+            // (so the operator knows about it) but does NOT block Save —
+            // the operator inherited that problem from the loaded file and
+            // shouldn't be forced to fix it before saving unrelated edits.
+            // (Review finding #3: constructor-time validation was blocking
+            // save on a pre-broken file even when the operator was editing
+            // an entirely different field.) CrossFieldError IS counted
+            // regardless: it fires precisely because operator edits caused
+            // an inconsistency, so blocking save is the correct response.
+            if (f.IsDirty && !string.IsNullOrEmpty(f.ValidationError)) hasValidation = true;
+            if (!string.IsNullOrEmpty(f.CrossFieldError)) hasValidation = true;
         }
         DirtyCount = dirty;
         HasDirty = dirty > 0;
-        HasParseError = hasError;
-        // Only allow Save when the underlying file was actually loaded —
-        // MissingFile/ParseError groups show POCO defaults and writing them
-        // back would silently create a brand-new file with placeholder
-        // values, which the operator might not want.
-        CanSave = ValuesAreFromFile && HasDirty && !HasParseError;
+        HasParseError = hasParse;
+        HasValidationError = hasValidation;
+        CanSave = ValuesAreFromFile && HasDirty && !HasParseError && !HasValidationError;
     }
 
     /// <summary>
@@ -158,26 +224,18 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
     private bool CanInvokeRevert() => HasDirty;
 
     /// <summary>
-    /// Discard all in-progress edits and restore each field's editor to its
-    /// original value. The view binds the Revert button to this. Triggers
-    /// per-field IsDirty/ParseError recompute via the PropertyChanged
-    /// handler.
+    /// Discard all in-progress edits and restore each field's editor to
+    /// its captured original value. Delegates to
+    /// <see cref="SettingsFieldViewModel.RevertToOriginal"/> which uses
+    /// the typed original (review finding #1: round-tripping DisplayValue
+    /// for bools silently failed when the original was null/"(unset)").
+    /// The partial OnXxxChanged handlers fire and re-evaluate
+    /// IsDirty/ParseError/ValidationError.
     /// </summary>
     public void RevertAll()
     {
         foreach (var f in Fields)
-        {
-            // Setting the editor surfaces back to their captured originals
-            // is enough: the partial OnXxxChanged handlers in
-            // SettingsFieldViewModel re-evaluate IsDirty and clear
-            // ParseError.
-            if (f.Editor == FieldEditorKind.Bool && bool.TryParse(f.DisplayValue, out var b))
-                f.BoolValue = b;
-            else if (f.Editor == FieldEditorKind.Enum)
-                f.EnumValue = f.DisplayValue;
-            else if (f.Editor == FieldEditorKind.Text)
-                f.TextValue = f.DisplayValue == "(unset)" ? string.Empty : f.DisplayValue;
-        }
+            f.RevertToOriginal();
     }
 
     /// <summary>
