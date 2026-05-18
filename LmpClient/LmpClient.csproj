@@ -283,6 +283,10 @@
     <Compile Include="Systems\Admin\AdminMessageHandler.cs" />
     <Compile Include="Systems\Admin\AdminMessageSender.cs" />
     <Compile Include="Systems\Admin\AdminSystem.cs" />
+    <Compile Include="Systems\Agency\AgencyMembership.cs" />
+    <Compile Include="Systems\Agency\AgencyMessageHandler.cs" />
+    <Compile Include="Systems\Agency\AgencyMessageSender.cs" />
+    <Compile Include="Systems\Agency\AgencySystem.cs" />
     <Compile Include="Systems\AsteroidComet\AsteroidCometEvents.cs" />
     <Compile Include="Systems\Label\LabelEvents.cs" />
     <Compile Include="Systems\Label\LabelSystem.cs" />

@@ -1,0 +1,245 @@
+using LmpClient.Base;
+using LmpClient.Base.Interface;
+using LmpClient.Systems.ShareCareer;
+using LmpClient.Systems.ShareContracts;
+using LmpClient.Systems.ShareFunds;
+using LmpClient.Systems.ShareReputation;
+using LmpClient.Systems.ShareScience;
+using LmpCommon.Message.Data.Agency;
+using LmpCommon.Message.Interface;
+using LmpCommon.Message.Types;
+using System;
+using System.Collections.Concurrent;
+
+namespace LmpClient.Systems.Agency
+{
+    /// <summary>
+    /// Inbound dispatcher for the four per-agency S→C subtypes (Stage 5.18a).
+    /// Routes <see cref="AgencyMessageType"/> entries to the appropriate apply path:
+    /// <list type="bullet">
+    ///   <item>Handshake → populate <see cref="AgencySystem.LocalAgencyId"/> +
+    ///         <see cref="AgencySystem.OtherAgencies"/> snapshot.</item>
+    ///   <item>State → defensive filter against LocalAgencyId; apply Funds/Sci/Rep
+    ///         via the bracket-wrapped <c>Set*WithoutTriggeringEvent</c> helpers.</item>
+    ///   <item>Contract → defensive filter; route through
+    ///         <see cref="ShareContractsMessageHandler.ApplyContractBatch"/> (queued
+    ///         via <see cref="ShareCareerSystem"/> so it waits for
+    ///         <c>ContractSystem.Instance</c>).</item>
+    ///   <item>CreateReply → on success, update
+    ///         <see cref="AgencySystem.LocalAgencyDisplayName"/>; on failure, log
+    ///         the reason for the 5.18c UI to surface to the player.</item>
+    /// </list>
+    /// </summary>
+    public class AgencyMessageHandler : SubSystem<AgencySystem>, IMessageHandler
+    {
+        public ConcurrentQueue<IServerMessageBase> IncomingMessages { get; set; } =
+            new ConcurrentQueue<IServerMessageBase>();
+
+        public void HandleMessage(IServerMessageBase msg)
+        {
+            if (!(msg.Data is AgencyBaseMsgData msgData)) return;
+
+            switch (msgData.AgencyMessageType)
+            {
+                case AgencyMessageType.Handshake:
+                    HandleHandshake((AgencyHandshakeMsgData)msgData);
+                    break;
+                case AgencyMessageType.State:
+                    HandleState((AgencyStateMsgData)msgData);
+                    break;
+                case AgencyMessageType.Contract:
+                    HandleContract((AgencyContractMsgData)msgData);
+                    break;
+                case AgencyMessageType.CreateReply:
+                    HandleCreateReply((AgencyCreateReplyMsgData)msgData);
+                    break;
+                case AgencyMessageType.CreateRequest:
+                    // CreateRequest is C→S only; arriving inbound means a misrouted
+                    // peer message or wire corruption. Drop quietly — the message
+                    // family's dictionary entry on the Srv side exists only for
+                    // wire-symmetry (BUG-010 rule) and the server's AgencyMsgReader
+                    // already log-drops it.
+                    LunaLog.LogWarning("[Agency]: Dropping inbound CreateRequest (S→C-illegal subtype).");
+                    break;
+                default:
+                    LunaLog.LogWarning($"[Agency]: Unknown AgencyMessageType {msgData.AgencyMessageType} — dropping.");
+                    break;
+            }
+        }
+
+        #region Handlers
+
+        private static void HandleHandshake(AgencyHandshakeMsgData data)
+        {
+            // Empty AssignedAgencyId is a server bug — RegisterAgency returns null
+            // under gate=off, but a misconfigured dual-mode path could ship Empty.
+            // Log so operators/testers see the symptom in KSP.log instead of "client
+            // silently goes zombie." We do NOT set LocalAgencyId to Empty here; the
+            // existing default (Empty from construction or prior OnDisabled) already
+            // covers that state, and re-setting would mask the prior server's value
+            // on a reconnect race where the prior connection was clean.
+            if (data.AssignedAgencyId == Guid.Empty)
+            {
+                LunaLog.LogWarning(
+                    "[Agency]: Handshake received with AssignedAgencyId=Empty — " +
+                    "server-side bug (likely misconfigured dual-mode). Ignoring.");
+                return;
+            }
+
+            // Last-Handshake-wins by design (see AgencyHandshakeMsgData XML — this
+            // message is a one-shot snapshot at the receiving player's connect time).
+            // A second Handshake on the same connection would be a server bug, but the
+            // semantics here are still well-defined: re-populate the registry from the
+            // newer snapshot. Reset DisplayName + OwningPlayerName at the same time
+            // so the brief Handshake→State window doesn't expose the PREVIOUS
+            // connection's values to any reader. The values are repopulated by the
+            // immediately-following AgencyStateMsgData on channel 22 (Lidgren per-
+            // channel ordering guarantees the State arrives next).
+            System.LocalAgencyId = data.AssignedAgencyId;
+            System.LocalAgencyDisplayName = string.Empty;
+            System.LocalAgencyOwningPlayerName = string.Empty;
+            System.OtherAgencies.Clear();
+            for (var i = 0; i < data.OtherAgencyCount; i++)
+            {
+                var info = data.OtherAgencies[i];
+                if (info == null) continue;
+                // Don't overwrite the local agency entry if (somehow) the server
+                // included it in its own OtherAgencies list — the canonical local
+                // identity lives on LocalAgencyId / LocalAgencyDisplayName /
+                // LocalAgencyOwningPlayerName, set by the AgencyState that
+                // immediately follows this Handshake on the same channel.
+                if (info.AgencyId == data.AssignedAgencyId) continue;
+                // De-duplicate by id — a server bug that listed the same agency twice
+                // would otherwise produce a "key already exists" exception on the
+                // second add. Last entry wins.
+                System.OtherAgencies[info.AgencyId] = info;
+            }
+
+            LunaLog.Log(
+                $"[Agency]: Handshake received — LocalAgencyId={data.AssignedAgencyId:N}, " +
+                $"{System.OtherAgencies.Count} other agency/agencies known.");
+        }
+
+        private static void HandleState(AgencyStateMsgData data)
+        {
+            if (!AgencyMembership.IsForLocalAgency(System.LocalAgencyId, data.AgencyId))
+            {
+                // Privacy + defence-in-depth: the server's owner-only contract means
+                // we should never see another agency's full state. If we do, drop
+                // without applying — applying would corrupt the local KSP singletons
+                // with values from someone else's agency.
+                LunaLog.LogWarning(
+                    $"[Agency]: Dropping State for non-local agency {data.AgencyId:N} " +
+                    $"(local={System.LocalAgencyId:N}).");
+                return;
+            }
+
+            // Update the identity bookkeeping. The State message is the canonical
+            // source for LocalAgencyDisplayName + LocalAgencyOwningPlayerName — the
+            // Handshake message only carries the id (and a privacy-summary list of
+            // OTHER agencies, never this client's own).
+            System.LocalAgencyDisplayName = data.DisplayName ?? string.Empty;
+            System.LocalAgencyOwningPlayerName = data.OwningPlayerName ?? string.Empty;
+
+            // Capture the scalars on the message-handling thread so the queued action
+            // sees the values at receive-time, not whatever the message data field
+            // might be at apply-time (defensive against message recycle / reuse).
+            var funds = data.Funds;
+            var science = data.Science;
+            var reputation = data.Reputation;
+
+            // ShareCareerSystem.QueueAction defers the apply until ContractSystem +
+            // Funding + R&D + Reputation singletons are alive (typically post
+            // SpaceCenter load). Without this gate, calling Set*WithoutTriggeringEvent
+            // pre-scene NREs because Funding.Instance / R&D.Instance / Reputation.Instance
+            // are null. The existing ShareFundsMessageHandler uses the exact same
+            // pattern (commit f9... etc.).
+            ShareCareerSystem.Singleton.QueueAction(() =>
+            {
+                // BUG-025 v2 bracketing is INSIDE each Set*WithoutTriggeringEvent —
+                // do not double-bracket here. The helpers call StartIgnoringEvents
+                // on their owning Share*System, apply the value via
+                // <Singleton>.SetFunds/SetScience/SetReputation with
+                // TransactionReasons.None, and StopIgnoringEvents. This is the
+                // canonical no-feedback-loop path.
+                ShareFundsSystem.Singleton.SetFundsWithoutTriggeringEvent(funds);
+                ShareScienceSystem.Singleton.SetScienceWithoutTriggeringEvent((float)science);
+                ShareReputationSystem.Singleton.SetReputationWithoutTriggeringEvent((float)reputation);
+            });
+
+            LunaLog.Log($"[Agency]: State applied — funds={funds}, sci={science}, rep={reputation}, displayName='{System.LocalAgencyDisplayName}'.");
+        }
+
+        private static void HandleContract(AgencyContractMsgData data)
+        {
+            if (!AgencyMembership.IsForLocalAgency(System.LocalAgencyId, data.AgencyId))
+            {
+                LunaLog.LogWarning(
+                    $"[Agency]: Dropping Contract batch for non-local agency {data.AgencyId:N} " +
+                    $"(local={System.LocalAgencyId:N}).");
+                return;
+            }
+
+            // Defensive copy off the wire buffer — same pattern as the existing
+            // ShareContractsMessageHandler, so a future message recycle doesn't
+            // corrupt the queued apply.
+            var contractInfos = ShareContractsMessageHandler.CopyContracts(data.Contracts);
+
+            LunaLog.Log($"[Agency]: Queueing Contract batch — {contractInfos.Length} contract(s) for local agency.");
+
+            // Ordering note: this batch enters ShareCareerSystem's single FIFO queue,
+            // shared with the same queue ShareProgressContractsMsgData applies use.
+            // Under gate=on the server's AgencyContractRouter (Stage 5.17d) intercepts
+            // ShareProgressContractsMsgData in ShareContractsSystem and emits this
+            // AgencyContractMsgData INSTEAD — so the two wire types should not
+            // interleave for the same scenario in practice. The FIFO queue keeps order
+            // safe regardless: if a future server bug ever interleaves them, the apply
+            // order matches the receive order. Don't add a separate queue for agency
+            // contracts; that would introduce a cross-queue race against the legacy
+            // contract path.
+            ShareCareerSystem.Singleton.QueueAction(() =>
+            {
+                // ApplyContractBatch handles its own bracketing on the relevant
+                // Share*Systems (Contracts + Funds + Science + Reputation +
+                // ExperimentalParts). Same KSP-side machinery the shared-agency
+                // ShareProgressContractsMsgData path uses — correct regardless of
+                // which wire envelope delivered the batch.
+                ShareContractsMessageHandler.ApplyContractBatch(contractInfos);
+            });
+        }
+
+        private static void HandleCreateReply(AgencyCreateReplyMsgData data)
+        {
+            if (data.Success)
+            {
+                // Server applied the rename; mirror it locally. The reply's AgencyId
+                // is guaranteed to equal LocalAgencyId on success (see
+                // AgencyCreateRequestMsgData XML — CreateRequest is a rename-on-connect,
+                // not a mint), so we don't need to re-anchor LocalAgencyId here. The
+                // defensive equality check is a sanity assertion: if the server ever
+                // sends a Success reply with a mismatched id, that's a server bug
+                // worth surfacing.
+                if (data.AgencyId != System.LocalAgencyId)
+                {
+                    LunaLog.LogWarning(
+                        $"[Agency]: CreateReply Success but AgencyId {data.AgencyId:N} " +
+                        $"!= LocalAgencyId {System.LocalAgencyId:N} — server bug? " +
+                        $"Accepting display name anyway.");
+                }
+                System.LocalAgencyDisplayName = data.DisplayName ?? string.Empty;
+                LunaLog.Log($"[Agency]: Agency renamed to '{System.LocalAgencyDisplayName}'.");
+            }
+            else
+            {
+                // Failure — leave LocalAgencyDisplayName untouched (still the auto-
+                // registered default or the prior accepted custom name). 5.18c will
+                // surface data.Reason in the rename window for the user. Log here for
+                // the operator-visible KSP.log trail.
+                LunaLog.LogWarning(
+                    $"[Agency]: Rename rejected by server — Reason='{data.Reason ?? string.Empty}'.");
+            }
+        }
+
+        #endregion
+    }
+}

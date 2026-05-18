@@ -1,5 +1,6 @@
 ﻿using Lidgren.Network;
 using LmpClient.Systems.Admin;
+using LmpClient.Systems.Agency;
 using LmpClient.Systems.Chat;
 using LmpClient.Systems.CraftLibrary;
 using LmpClient.Systems.Facility;
@@ -284,6 +285,15 @@ namespace LmpClient.Network
                     break;
                 case ServerMessageType.Screenshot:
                     ScreenshotSystem.Singleton.EnqueueMessage(msg);
+                    break;
+                case ServerMessageType.Agency:
+                    // Stage 5.18a per-agency client mirror. A single client system
+                    // handles all four S→C agency subtypes (Handshake / State /
+                    // Contract / CreateReply); dispatch into AgencyMessageHandler
+                    // switches on AgencyMessageType. Single-system fan-in keeps the
+                    // small per-agency surface co-located instead of fanning across
+                    // four separate Systems the way ShareProgress does.
+                    AgencySystem.Singleton.EnqueueMessage(msg);
                     break;
                 default:
                     LunaLog.LogError($"[LMP]: Unhandled Message type {msg.MessageType}");

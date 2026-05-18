@@ -27,5 +27,15 @@ namespace LmpClient.Systems.SettingsSys
         public int MaxScreenshotHeight { get; set; }
         public int MinCraftLibraryRequestIntervalMs { get; set; }
         public bool PrintMotdInChat { get; set; }
+
+        /// <summary>
+        /// Mirrors <c>SettingsReplyMsgData.PerAgencyCareerEnabled</c> — the server's
+        /// combined gate (<c>PerAgencyCareer=true AND GameMode=Career</c>). Stage 5.18a
+        /// surfaces this so the future 5.18c UI / 5.18b write-path patches can early-
+        /// out without sniffing protocol versions. Defaults to false so a server that
+        /// ships pre-0.31 protocol (no tail byte for this field on the wire) reads as
+        /// per-agency-off.
+        /// </summary>
+        public bool PerAgencyCareerEnabled { get; set; }
     }
 }

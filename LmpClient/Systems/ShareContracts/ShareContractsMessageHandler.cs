@@ -32,12 +32,20 @@ namespace LmpClient.Systems.ShareContracts
                 LunaLog.Log("Queue ContractsUpdate.");
                 ShareCareerSystem.Singleton.QueueAction(() =>
                 {
-                    ContractUpdate(contractInfos);
+                    ApplyContractBatch(contractInfos);
                 });
             }
         }
 
-        private static ContractInfo[] CopyContracts(ContractInfo[] contracts)
+        /// <summary>
+        /// Deep-copies a ContractInfo array so the caller-owned source can be modified
+        /// after enqueue without affecting the queued apply.
+        /// Internal so the per-agency client mirror (Stage 5.18a
+        /// <c>LmpClient/Systems/Agency/AgencyMessageHandler</c>) can defensively copy
+        /// inbound <c>AgencyContractMsgData</c> before queueing apply, the same way
+        /// the shared <c>ShareProgressContractsMsgData</c> path does.
+        /// </summary>
+        internal static ContractInfo[] CopyContracts(ContractInfo[] contracts)
         {
             var newContracts = new ContractInfo[contracts.Length];
             for (var i = 0; i < contracts.Length; i++)
@@ -48,7 +56,27 @@ namespace LmpClient.Systems.ShareContracts
             return newContracts;
         }
 
-        private static void ContractUpdate(ContractInfo[] contractInfos)
+        /// <summary>
+        /// Apply a batch of contract updates to <c>ContractSystem.Instance</c>. Brackets
+        /// the apply with <c>StartIgnoringEvents/StopIgnoringEvents</c> on the local
+        /// <see cref="ShareContractsSystem"/> + <see cref="ShareFunds.ShareFundsSystem"/>
+        /// + <see cref="ShareScience.ShareScienceSystem"/> +
+        /// <see cref="ShareReputation.ShareReputationSystem"/> +
+        /// <see cref="ShareExperimentalParts.ShareExperimentalPartsSystem"/> so a
+        /// contract state transition (Accept / Complete / Fail) that internally credits
+        /// funds / science / reputation / experimental-parts does not re-broadcast
+        /// those scalar deltas to the server (the server already projected them via
+        /// the agency router or shared-pool path — re-broadcasting would produce
+        /// double-counting).
+        ///
+        /// Internal so the Stage 5.18a per-agency client mirror can reuse the apply
+        /// machinery for <c>AgencyContractMsgData</c> — the same KSP-side semantics
+        /// are correct regardless of which wire envelope delivered the batch. Callers
+        /// MUST schedule via <c>ShareCareerSystem.QueueAction</c> (or another
+        /// equivalent guarantee that <c>ContractSystem.Instance</c> is ready); this
+        /// method dereferences the singleton directly.
+        /// </summary>
+        internal static void ApplyContractBatch(ContractInfo[] contractInfos)
         {
             LunaLog.Log($"[ShareContracts]: Syncing {contractInfos.Length} contract(s).");
 
