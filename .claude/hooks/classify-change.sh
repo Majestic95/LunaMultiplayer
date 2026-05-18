@@ -49,6 +49,9 @@ elif [[ "$FILE_PATH" =~ /LmpClient/Systems/ ]] || [[ "$FILE_PATH" =~ /LmpClient/
 # Shared protocol / common
 elif [[ "$FILE_PATH" =~ /LmpCommon/ ]]; then
   DOMAIN="COMMON"
+# Admin GUI (Avalonia desktop launcher) — Tools/AdminGui/
+elif [[ "$FILE_PATH" =~ /Tools/AdminGui/ ]]; then
+  DOMAIN="GUI"
 else
   DOMAIN="GENERAL"
 fi
@@ -81,6 +84,9 @@ case "$DOMAIN" in
     ;;
   ARCHITECTURE)
     echo "REVIEW_SUGGESTED: [Architecture Agent] — $FILE_PATH is a design doc / project config. Run: review-agents/architecture-review.md" >&2
+    ;;
+  GUI)
+    echo "REVIEW_SUGGESTED: [GUI Agent] — $FILE_PATH is in Tools/AdminGui (Avalonia desktop launcher). Run: review-agents/gui-review.md" >&2
     ;;
   *)
     echo "REVIEW_SUGGESTED: [General review] — $FILE_PATH. Run: review-prompt.md" >&2

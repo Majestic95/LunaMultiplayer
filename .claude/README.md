@@ -33,6 +33,7 @@ Caps are higher than CE's 400/500 because C# is more verbose than TypeScript. Ex
 | `/LmpClient/Harmony/` | Harmony patches | `client-harmony-review.md` |
 | `/LmpClient/Systems/`, other `/LmpClient/` | Client (mod side) | `client-harmony-review.md` |
 | `/LmpCommon/` (non-Message) | Shared protocol | `network-review.md` |
+| `/Tools/AdminGui/` | Admin GUI (Avalonia desktop launcher) | `gui-review.md` |
 | `CLAUDE.md`, `/docs/`, `/Documentation/` | Architecture | `architecture-review.md` |
 | Everything else | General | `review-prompt.md` |
 
@@ -40,7 +41,7 @@ Caps are higher than CE's 400/500 because C# is more verbose than TypeScript. Ex
 - Fires on **PreToolUse** for `Bash`. No-ops for commands that don't contain `git commit`.
 - Reads `git diff --cached`, filters to production source paths, and **blocks the commit (exit 2)** unless a matching review receipt exists.
 - A "review receipt" is a file in `.claude/review-receipts/<sha1-of-staged-diff>.txt` — written by Claude after running the appropriate review-agent on the staged content. Receipts are gitignored (per-session markers).
-- Exempt paths bypass the gate entirely: `docs/`, `Documentation/`, `.claude/`, `CLAUDE.md`, `README.md`, `.gitignore`, `.editorconfig`, `*.csproj`, `*.sln`, `*.props`, `*.targets`, all `/Test/` projects, `AssemblyInfo.cs`, `.Designer.cs`, `.g.cs`, `Test*.cs`. Docs / scaffolding / test commits proceed without the gate.
+- Exempt paths bypass the gate entirely: `docs/`, `Documentation/`, `.claude/`, `CLAUDE.md`, `README.md`, `.gitignore`, `.editorconfig`, `*.csproj`, `*.sln`, `*.slnx`, `*.props`, `*.targets`, all `/Test/` projects, `AssemblyInfo.cs`, `.Designer.cs`, `.g.cs`, `Test*.cs`. Docs / scaffolding / test commits proceed without the gate.
 
 #### Workflow for production commits
 

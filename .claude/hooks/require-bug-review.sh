@@ -64,6 +64,7 @@ while IFS= read -r FILE; do
      || [[ "$FILE_NORM" =~ ^\.editorconfig$ ]] \
      || [[ "$FILE_NORM" =~ \.csproj$ ]] \
      || [[ "$FILE_NORM" =~ \.sln$ ]] \
+     || [[ "$FILE_NORM" =~ \.slnx$ ]] \
      || [[ "$FILE_NORM" =~ \.props$ ]] \
      || [[ "$FILE_NORM" =~ \.targets$ ]] \
      || [[ "$FILE_NORM" =~ /Test/ ]] \

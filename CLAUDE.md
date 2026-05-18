@@ -95,6 +95,9 @@ luna-multiplayer/
 ├── ServerTest/                 # NUnit tests for server (18 tests)
 ├── LmpCommonTest/              # NUnit tests for LmpCommon
 ├── LmpClientTest/              # MSTest on net472 — client-internal unit tests
+├── Tools/
+│   └── AdminGui/               # Avalonia desktop launcher + admin console (net10.0) — Tools/AdminGui/AdminGui.slnx
+│       └── LunaServerGui/      # The GUI app project (`feature/admin-gui` branch, worktree F:\luna-multiplayer-gui)
 ├── docs/
 │   └── research/
 │       ├── 00-overview.md      # Inventory method
@@ -190,7 +193,7 @@ Conventional Commits:
 <type>(<scope>): <short description>
 ```
 - **Types:** `feat`, `fix`, `refactor`, `test`, `docs`, `chore`, `perf`, `style`
-- **Scopes:** `server`, `client`, `common`, `network`, `vessel`, `lock`, `share`, `scenario`, `harmony`, `backup`, `command`, `settings`, `log`, `web`, `docs`
+- **Scopes:** `server`, `client`, `common`, `network`, `vessel`, `lock`, `share`, `scenario`, `harmony`, `backup`, `command`, `settings`, `log`, `web`, `docs`, `gui`
 
 ### No AI attribution
 **Silent partner rule applies to everything**: commits, PRs, issues, code comments, committed docs.
