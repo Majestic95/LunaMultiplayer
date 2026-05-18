@@ -153,6 +153,99 @@ namespace ServerTest
             Assert.AreEqual(state.Reputation, restored.Reputation);
         }
 
+        // ---- Stage 5.17d: Contracts list round-trip ----
+
+        [TestMethod]
+        public void RoundTrip_PreservesContracts()
+        {
+            // Stage 5.17d: per-agency Contracts list must survive Serialize/Parse so
+            // a server restart preserves the agency's Active+Finished contract pool.
+            // Without persistence, any in-flight contract is silently dropped on restart
+            // and the agency owner has no recovery path.
+            var state = NewSampleAgency();
+            var c1Guid = Guid.NewGuid();
+            var c2Guid = Guid.NewGuid();
+            state.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = c1Guid,
+                State = "Active",
+                Data = new byte[] { 1, 2, 3, 4, 5 },
+                NumBytes = 5,
+            });
+            state.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = c2Guid,
+                State = "Completed",
+                Data = System.Text.Encoding.UTF8.GetBytes("guid = abc\nstate = Completed"),
+                NumBytes = "guid = abc\nstate = Completed".Length,
+            });
+
+            var serialized = state.Serialize();
+            var restored = AgencyState.Parse(serialized);
+
+            Assert.AreEqual(2, restored.Contracts.Count);
+            Assert.AreEqual(c1Guid, restored.Contracts[0].ContractGuid);
+            Assert.AreEqual("Active", restored.Contracts[0].State);
+            CollectionAssert.AreEqual(new byte[] { 1, 2, 3, 4, 5 }, restored.Contracts[0].Data);
+            Assert.AreEqual(c2Guid, restored.Contracts[1].ContractGuid);
+            Assert.AreEqual("Completed", restored.Contracts[1].State);
+            Assert.AreEqual(state.Contracts[1].NumBytes, restored.Contracts[1].NumBytes);
+        }
+
+        [TestMethod]
+        public void Parse_MissingContractsNode_LoadsEmptyList()
+        {
+            // Forward-compat: 5.14c-era AgencyState files lack a CONTRACTS child node.
+            // Loading them through the 5.17d parser must yield an empty Contracts list,
+            // not throw. Without this, every pre-5.17d agency file would fail to load
+            // on first boot after upgrading the server binary.
+            var minimal = "AgencyId = " + Guid.NewGuid().ToString("N") + "\nDisplayName = Old Agency";
+
+            var restored = AgencyState.Parse(minimal);
+
+            Assert.AreEqual(0, restored.Contracts.Count);
+        }
+
+        [TestMethod]
+        public void Serialize_EmptyContractsList_OmitsContractsNode()
+        {
+            // The CONTRACTS child node should only emit when the list is non-empty.
+            // Operator workflow: a fresh agency before any contract Accept should
+            // look identical to a 5.14c-era file. Keeps diffs minimal across upgrades.
+            var state = NewSampleAgency();
+
+            var serialized = state.Serialize();
+
+            Assert.IsFalse(serialized.Contains("CONTRACTS"),
+                "Empty Contracts list should not emit a CONTRACTS sub-node.");
+        }
+
+        [TestMethod]
+        public void Parse_MalformedContractData_RecoversWithEmptyBytes()
+        {
+            // Per-entry isolation in the parser: if Base64 decode fails for one contract,
+            // the slot loads with empty data (operator can see the broken contract in the
+            // list) but the parent AgencyState load succeeds and sibling contracts are
+            // preserved. Same shape as the router's per-contract exception isolation
+            // (spec §2 Q6 commitment b).
+            var guid = Guid.NewGuid();
+            var hand = "AgencyId = " + Guid.NewGuid().ToString("N") + "\n" +
+                       "CONTRACTS\n{\n" +
+                       "  CONTRACT\n  {\n" +
+                       "    Guid = " + guid.ToString("N") + "\n" +
+                       "    State = Active\n" +
+                       "    Data = !!not valid base64!!\n" +
+                       "  }\n" +
+                       "}\n";
+
+            var restored = AgencyState.Parse(hand);
+
+            Assert.AreEqual(1, restored.Contracts.Count, "Malformed Data must not drop the slot.");
+            Assert.AreEqual(guid, restored.Contracts[0].ContractGuid);
+            Assert.AreEqual("Active", restored.Contracts[0].State);
+            Assert.AreEqual(0, restored.Contracts[0].NumBytes, "Malformed Data must reduce to empty NumBytes.");
+        }
+
         private static AgencyState NewSampleAgency() => new AgencyState
         {
             AgencyId = Guid.NewGuid(),

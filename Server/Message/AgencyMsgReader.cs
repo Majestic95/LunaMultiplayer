@@ -73,9 +73,13 @@ namespace Server.Message
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:
+                case AgencyMessageType.Contract:
                     // Server-→-client subtypes that should not be inbound. Drop with a log
                     // so a misbehaving / malicious client can't drive the server into
-                    // unexpected paths.
+                    // unexpected paths. (Stage 5.17d appended Contract to this arm —
+                    // AgencyContractMsgData is owner-only echo from AgencyContractRouter;
+                    // clients send contract intent through the existing
+                    // ShareProgressContractsMsgData path which the router intercepts.)
                     LunaLog.Warning($"[fix:per-agency-career] Received server-→-client subtype {data.AgencyMessageType} from {client.PlayerName}; dropping");
                     break;
                 default:

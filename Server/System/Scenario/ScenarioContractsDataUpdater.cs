@@ -88,5 +88,54 @@ namespace Server.System.Scenario
                 }
             });
         }
+
+        /// <summary>
+        /// Stage 5.17d — under PerAgencyCareer=on the <see cref="Server.System.Agency.AgencyContractRouter"/>
+        /// routes Active/Completed/etc. contracts per-agency, but the SHARED <c>ContractSystem</c>
+        /// scenario's <c>CONTRACTS</c> node still holds the original Offered entry for the same
+        /// guid. Without removing it, peer agencies see the contract as Offered on their next
+        /// <c>SendScenarioModules</c> and could "accept" it — producing duplicate per-agency
+        /// claims of the same Offered slot. This helper frees the slot by deleting the matching
+        /// guid from the shared CONTRACTS node only; <c>CONTRACTS_FINISHED</c> is left alone
+        /// (the per-agency archival lives in <see cref="Server.System.Agency.AgencyState.Contracts"/>
+        /// — the shared scenario does NOT mirror per-agency finished state).
+        ///
+        /// Same per-scenario writer-lock contract as <see cref="WriteContractDataToFile"/> so the
+        /// <c>ScenarioStoreSystem.BackupScenarios</c> serialization doesn't race the
+        /// <c>RemoveNode</c> here (BUG-033 precedent).
+        /// </summary>
+        public static void RemoveContractFromSharedOfferedPool(Guid contractGuid)
+        {
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    lock (Semaphore.GetOrAdd("ContractSystem", new object()))
+                    {
+                        if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("ContractSystem", out var scenario)) return;
+
+                        var contractsNode = scenario.GetNode("CONTRACTS")?.Value;
+                        if (contractsNode == null) return;
+
+                        var guidString = contractGuid.ToString();
+                        foreach (var entry in contractsNode.GetNodes("CONTRACT").ToArray())
+                        {
+                            var node = entry.Value;
+                            var raw = node.GetValue("guid")?.Value;
+                            if (string.IsNullOrEmpty(raw)) continue;
+                            if (!Guid.TryParse(raw, out var parsed)) continue;
+                            if (parsed == contractGuid)
+                            {
+                                contractsNode.RemoveNode(node);
+                            }
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Error($"[fix:per-agency-career] Error removing contract {contractGuid:N} from shared Offered pool: {e}");
+                }
+            });
+        }
     }
 }

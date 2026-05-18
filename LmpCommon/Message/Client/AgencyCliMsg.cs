@@ -44,6 +44,7 @@ namespace LmpCommon.Message.Client
             [(ushort)AgencyMessageType.CreateRequest] = typeof(AgencyCreateRequestMsgData),
             [(ushort)AgencyMessageType.CreateReply] = typeof(AgencyCreateReplyMsgData),
             [(ushort)AgencyMessageType.State] = typeof(AgencyStateMsgData),
+            [(ushort)AgencyMessageType.Contract] = typeof(AgencyContractMsgData),
         };
 
         public override ClientMessageType MessageType => ClientMessageType.Agency;

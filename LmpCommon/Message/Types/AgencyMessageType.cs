@@ -13,5 +13,6 @@ namespace LmpCommon.Message.Types
         CreateRequest = 1,
         CreateReply = 2,
         State = 3,
+        Contract = 4,
     }
 }

@@ -60,7 +60,15 @@ namespace Server.System
                 {
                     AgencySystemSender.SendHandshakeTo(client, assignedAgencyId);
                     if (AgencySystem.Agencies.TryGetValue(assignedAgencyId, out var assignedState))
+                    {
                         AgencySystemSender.SendStateTo(client, assignedState);
+                        // Stage 5.17d catch-up: persisted per-agency contracts (Active +
+                        // Finished, populated by AgencyContractRouter on prior sessions)
+                        // are pushed to the reconnecting owner so the 5.18a client mirror
+                        // doesn't have to wait for a mutation to learn the inherited state.
+                        // No-op when the agency has zero contracts yet.
+                        AgencySystemSender.SendContractCatchupTo(client, assignedState);
+                    }
                 }
 
                 var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<PlayerConnectionJoinMsgData>();

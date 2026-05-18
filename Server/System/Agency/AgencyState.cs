@@ -1,6 +1,7 @@
 using LunaConfigNode.CfgNode;
 using Server.Context;
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 
@@ -33,6 +34,21 @@ namespace Server.System.Agency
         public double Funds { get; set; }
         public double Science { get; set; }
         public double Reputation { get; set; }
+
+        /// <summary>
+        /// Per-agency contract pool — Active / Completed / Failed / Cancelled /
+        /// DeadlineExpired / Withdrawn entries owned by this agency. Offered contracts
+        /// are NOT stored here per spec §2 Q6 commitment (a); they live in the shared
+        /// scenario pool so Contract Configurator's <c>ContractPreLoader</c> sees the
+        /// world it expects. Populated by <see cref="AgencyContractRouter"/>; persisted
+        /// as a <c>CONTRACTS</c> child node under the agency's ConfigNode file.
+        ///
+        /// **Concurrency contract.** Mutations to this list MUST be performed under
+        /// <see cref="AgencySystem.GetAgencyLock"/>; the router holds the lock around
+        /// the upsert batch, and <see cref="AgencySystem.SaveAgency"/> serialises under
+        /// the same lock so a concurrent reader cannot observe a torn list.
+        /// </summary>
+        public List<AgencyContractEntry> Contracts { get; } = new List<AgencyContractEntry>();
 
         /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
@@ -72,6 +88,32 @@ namespace Server.System.Agency
             node.CreateValue(new CfgNodeValue<string, string>("Funds", Funds.ToString("R", CultureInfo.InvariantCulture)));
             node.CreateValue(new CfgNodeValue<string, string>("Science", Science.ToString("R", CultureInfo.InvariantCulture)));
             node.CreateValue(new CfgNodeValue<string, string>("Reputation", Reputation.ToString("R", CultureInfo.InvariantCulture)));
+
+            // Contracts persist as a CONTRACTS child node containing one CONTRACT sub-node
+            // per entry. Emitted only when non-empty so older / pristine agency files stay
+            // visually identical to their 5.14c shape. Bytes are Base64-encoded since
+            // ConfigNode values are strings; decompressed form is stored so an operator
+            // diffing two AgencyState files can see the actual contract ConfigNode bytes
+            // (compression is a wire-only concern handled by ContractInfo at serialize time).
+            if (Contracts.Count > 0)
+            {
+                var contractsRoot = new ConfigNode("") { Name = "CONTRACTS" };
+                node.AddNode(contractsRoot);
+                foreach (var entry in Contracts)
+                {
+                    if (entry == null)
+                        continue;
+                    var contractNode = new ConfigNode("") { Name = "CONTRACT" };
+                    contractNode.CreateValue(new CfgNodeValue<string, string>("Guid", entry.ContractGuid.ToString("N", CultureInfo.InvariantCulture)));
+                    contractNode.CreateValue(new CfgNodeValue<string, string>("State", entry.State ?? string.Empty));
+                    var dataBytes = entry.Data ?? Array.Empty<byte>();
+                    var len = Math.Min(entry.NumBytes, dataBytes.Length);
+                    var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
+                    contractNode.CreateValue(new CfgNodeValue<string, string>("Data", base64));
+                    contractsRoot.AddNode(contractNode);
+                }
+            }
+
             return node;
         }
 
@@ -120,6 +162,52 @@ namespace Server.System.Agency
                 throw new FormatException("AgencyState ConfigNode missing required AgencyId field.");
 
             state.AgencyId = Guid.Parse(rawId);
+
+            // Forward-compat: CONTRACTS child node is Stage 5.17d addition. Older
+            // AgencyState files predate it and load with an empty Contracts list.
+            // Per-entry parse failures (malformed Guid / unparseable Base64) are
+            // logged via the caller's catch — same per-contract isolation rule the
+            // router applies on the wire side.
+            var contractsRoot = node.GetNode("CONTRACTS")?.Value;
+            if (contractsRoot != null)
+            {
+                foreach (var contractEntry in contractsRoot.GetNodes("CONTRACT"))
+                {
+                    var entryNode = contractEntry.Value;
+                    var rawGuid = entryNode.GetValue("Guid")?.Value;
+                    if (string.IsNullOrEmpty(rawGuid))
+                        continue;
+                    if (!Guid.TryParse(rawGuid, out var contractGuid))
+                        continue;
+
+                    var entry = new AgencyContractEntry
+                    {
+                        ContractGuid = contractGuid,
+                        State = entryNode.GetValue("State")?.Value ?? string.Empty,
+                    };
+
+                    var base64 = entryNode.GetValue("Data")?.Value;
+                    if (!string.IsNullOrEmpty(base64))
+                    {
+                        try
+                        {
+                            entry.Data = Convert.FromBase64String(base64);
+                            entry.NumBytes = entry.Data.Length;
+                        }
+                        catch (FormatException)
+                        {
+                            // Malformed payload: keep entry with empty data so the slot
+                            // is observable (operator can see "this contract is broken")
+                            // without aborting the parent agency load.
+                            entry.Data = Array.Empty<byte>();
+                            entry.NumBytes = 0;
+                        }
+                    }
+
+                    state.Contracts.Add(entry);
+                }
+            }
+
             return state;
         }
 

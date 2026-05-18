@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 
 namespace Server.System.Agency
 {
@@ -158,6 +159,72 @@ namespace Server.System.Agency
             // over without losing data. Stage 5.18d's transferagency / setagencyfunds is
             // the proper recovery path for an already-mid-loss universe.
             WarnAboutSavingsLossOnUpgrade();
+
+            // [Stage 5.17d upgrade-lens review] Pre-existing shared-agency contract
+            // diagnostic. Without the per-agency ContractSystem scenario projection
+            // (deferred to 5.18a per AgencyScenarioProjector.cs), the shared `CONTRACTS`
+            // node still ships at SendScenarioModules time to every connecting player.
+            // On an upgrade-in-place universe with accumulated shared-agency Active
+            // contracts, every per-0.31 player will see those contracts as their own
+            // agency's Active list and could "complete" them — producing duplicate
+            // rewards via the existing Share*Funds path. Operator-readable warning so
+            // they can archive + restart before the first connect.
+            WarnAboutSharedContractsOnUpgrade();
+        }
+
+        /// <summary>
+        /// Stage 5.17d upgrade-lens diagnostic. Pre-existing CONTRACTS / CONTRACTS_FINISHED
+        /// entries in the shared <c>ContractSystem</c> scenario under gate=on means the
+        /// scenario will ship to every connecting player at handshake; without the per-
+        /// agency <c>ContractSystem</c> projection (deferred to Stage 5.18a) every player
+        /// inherits those contracts as their own. Operator sees the warning and can
+        /// archive Universe/ before any player connects (spec §10 fresh-start-only).
+        /// </summary>
+        private static void WarnAboutSharedContractsOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint agency on a new universe is fine.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("ContractSystem", out var scenario))
+                return;
+
+            int active = 0, finished = 0;
+            // Same per-scenario lock the projector uses to read; under boot there are
+            // no concurrent writers but the guard is symmetric.
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("ContractSystem"))
+            {
+                var activeNode = scenario.GetNode("CONTRACTS")?.Value;
+                if (activeNode != null)
+                {
+                    foreach (var c in activeNode.GetNodes("CONTRACT"))
+                    {
+                        var st = c.Value.GetValue("state")?.Value ?? string.Empty;
+                        // Pre-existing Offered entries are expected (the shared pool is
+                        // designed to carry them); only flag in-progress / completed.
+                        if (st != "Offered" && st != "Generated" && st != string.Empty)
+                            active++;
+                    }
+                }
+                var finishedNode = scenario.GetNode("CONTRACTS_FINISHED")?.Value;
+                if (finishedNode != null)
+                    finished = finishedNode.GetNodes("CONTRACT").Count();
+            }
+
+            if (active == 0 && finished == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:per-agency-career] PerAgencyCareer=true on an upgrade universe carries " +
+                $"shared-agency contract state: {active} non-Offered entry/entries in CONTRACTS + " +
+                $"{finished} entry/entries in CONTRACTS_FINISHED. Per-agency clients (Stage 5.18a) " +
+                "do NOT yet receive a projected ContractSystem scenario, so each connecting player " +
+                "would inherit these contracts as their own agency's work — completing them would " +
+                "credit duplicate rewards through the Share*Funds path. Spec §10 migration is " +
+                "fresh-start-only: stop the server, archive Universe/ before any player connects, " +
+                "and start fresh. If accepted as-is, the duplication risk persists until 5.18a's " +
+                "ContractSystem projection lands.");
         }
 
         /// <summary>

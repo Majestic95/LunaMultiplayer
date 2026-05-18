@@ -53,7 +53,18 @@ namespace LmpCommon.Message.Data.ShareProgress
 
         public int GetByteCount()
         {
-            return GuidUtil.ByteSize + sizeof(int) + sizeof(byte) * NumBytes;
+            // Upper bound on the SERIALIZED bytes (not the in-memory bytes). Serialize
+            // runs Common.ThreadSafeCompress on Data, which can INFLATE small or
+            // incompressible payloads — QuickLZ has a fixed-per-call header (~9 bytes)
+            // plus a multiplicative overhead for incompressible data, so a 70-byte
+            // decompressed contract often serialises as ~95+ bytes on the wire.
+            // The Lidgren NetOutgoingMessage buffer is sized off this value, so an
+            // under-estimate forces a reallocation; a SerializationTests round-trip
+            // assertion (Stage 5.17d AgencyContractMsgData) caught the under-count.
+            // 400 bytes of slack matches the QuickLZ output-buffer overallocation
+            // convention used internally and gives generous headroom for any payload
+            // size + future-protocol fields appended after the bytes block.
+            return GuidUtil.ByteSize + sizeof(int) + NumBytes + 400;
         }
     }
 }

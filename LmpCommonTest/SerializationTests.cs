@@ -4,6 +4,7 @@ using LmpCommon.Message.Client;
 using LmpCommon.Message.Data.Agency;
 using LmpCommon.Message.Data.Chat;
 using LmpCommon.Message.Data.Kerbal;
+using LmpCommon.Message.Data.ShareProgress;
 using LmpCommon.Message.Data.Vessel;
 using LmpCommon.Message.Server;
 using LmpCommonTest.Properties;
@@ -197,6 +198,69 @@ namespace LmpCommonTest
 
             Assert.IsFalse(roundTripped.Success);
             Assert.AreEqual("Display name already taken by another agency", roundTripped.Reason);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyContractMsg()
+        {
+            // Stage 5.17d — owner-only contract batch S→C. Pin that AgencyId, count,
+            // and per-entry Guid + bytes all round-trip. The Data array compresses
+            // on serialize and decompresses on deserialize via Common.ThreadSafeCompress,
+            // so the post-deserialize bytes should match the pre-serialize bytes.
+            //
+            // Caveat: ContractInfo.Serialize mutates Data IN-PLACE via Common.ThreadSafeCompress.
+            // The source byte arrays we hand to msgData.Contracts will be compressed bytes
+            // by the time Serialize returns. Snapshot the expected bytes BEFORE round-trip
+            // so the post-round-trip assertion compares against the original (pre-compress)
+            // payload, not the mutated source. This in-place mutation is a wire-layer
+            // quirk shared with CraftInfo / VesselProtoMsgData (every CachedQlz wire path).
+            var agencyId = Guid.NewGuid();
+            var c1Guid = Guid.NewGuid();
+            var c2Guid = Guid.NewGuid();
+            var c1Original = Encoding.UTF8.GetBytes("guid = " + c1Guid.ToString("N") + "\nstate = Active");
+            var c2Original = Encoding.UTF8.GetBytes("guid = " + c2Guid.ToString("N") + "\nstate = Completed\nvalues = 1,2,3");
+            var c1Bytes = (byte[])c1Original.Clone();
+            var c2Bytes = (byte[])c2Original.Clone();
+
+            var msgData = Factory.CreateNewMessageData<AgencyContractMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.ContractCount = 2;
+            msgData.Contracts = new[]
+            {
+                new ContractInfo { ContractGuid = c1Guid, Data = c1Bytes, NumBytes = c1Bytes.Length },
+                new ContractInfo { ContractGuid = c2Guid, Data = c2Bytes, NumBytes = c2Bytes.Length },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyContractMsgData>(msgData);
+
+            Assert.AreEqual(agencyId, roundTripped.AgencyId);
+            Assert.AreEqual(2, roundTripped.ContractCount);
+            Assert.AreEqual(c1Guid, roundTripped.Contracts[0].ContractGuid);
+            Assert.AreEqual(c1Original.Length, roundTripped.Contracts[0].NumBytes,
+                "Contract bytes did not round-trip (NumBytes after compress+decompress should match original).");
+            for (var i = 0; i < c1Original.Length; i++)
+                Assert.AreEqual(c1Original[i], roundTripped.Contracts[0].Data[i], $"byte mismatch at offset {i}");
+            Assert.AreEqual(c2Guid, roundTripped.Contracts[1].ContractGuid);
+            Assert.AreEqual(c2Original.Length, roundTripped.Contracts[1].NumBytes);
+            for (var i = 0; i < c2Original.Length; i++)
+                Assert.AreEqual(c2Original[i], roundTripped.Contracts[1].Data[i], $"c2 byte mismatch at offset {i}");
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyContractMsg_EmptyBatch()
+        {
+            // First-connect / no-contracts case: agency exists, owner has zero contracts,
+            // sender opportunistically sends an empty batch. Pin that count=0 round-trips
+            // without dereferencing into the entries array.
+            var msgData = Factory.CreateNewMessageData<AgencyContractMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.ContractCount = 0;
+            msgData.Contracts = new ContractInfo[0];
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyContractMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual(0, roundTripped.ContractCount);
         }
 
         [TestMethod]

@@ -1,4 +1,5 @@
 using LmpCommon.Message.Data.Agency;
+using LmpCommon.Message.Data.ShareProgress;
 using LmpCommon.Message.Server;
 using Server.Client;
 using Server.Context;
@@ -132,6 +133,79 @@ namespace Server.System.Agency
             msgData.Reason = reason ?? string.Empty;
 
             MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+        }
+
+        /// <summary>
+        /// Stage 5.17d — owner-only echo of a per-agency contract batch (Q6 hybrid,
+        /// post-Accept states). Routed exclusively to the agency owner; peers never
+        /// receive another agency's per-agency contracts (spec §10 Q1
+        /// PrivateAgencyResources=true). No-op when:
+        /// <list type="bullet">
+        ///   <item><see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is off
+        ///        (dual-mode silence).</item>
+        ///   <item>The owner is null (called from a code path where the source client
+        ///        is unknown).</item>
+        ///   <item>The batch is empty / null (nothing to send).</item>
+        /// </list>
+        /// </summary>
+        public static void SendContractsToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<ContractInfo> contracts)
+        {
+            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+                return;
+            if (owner == null || contracts == null || contracts.Count == 0)
+                return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyContractMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.ContractCount = contracts.Count;
+            msgData.Contracts = new ContractInfo[contracts.Count];
+            for (var i = 0; i < contracts.Count; i++)
+                msgData.Contracts[i] = contracts[i];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// Stage 5.17d — catch-up send of the OWNER's persisted per-agency contracts on
+        /// connect. Called from <see cref="HandshakeSystem"/> after the agency
+        /// handshake + state push, so a returning player whose contracts persisted to
+        /// <see cref="AgencyState.Contracts"/> across a server restart receives them
+        /// without having to send any mutation first.
+        ///
+        /// Without this, the consumer-lens review noted: a 5.18a client author would see
+        /// <see cref="AgencyState.Contracts"/> persisted on disk, write a handler for
+        /// <see cref="AgencyContractMsgData"/>, test against a fresh session (works),
+        /// then ship a build where a returning player loses their entire Active+Finished
+        /// list until they mutate something. Catch-up closes that gap server-side so the
+        /// 5.18a handler can rely on a deterministic "state arrives once on connect" contract.
+        /// </summary>
+        public static void SendContractCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+                return;
+            if (client == null || state == null || state.Contracts == null || state.Contracts.Count == 0)
+                return;
+
+            var infos = new List<ContractInfo>(state.Contracts.Count);
+            foreach (var entry in state.Contracts)
+            {
+                if (entry == null) continue;
+                var lenSafe = Math.Min(entry.NumBytes, entry.Data?.Length ?? 0);
+                var copy = lenSafe > 0 ? new byte[lenSafe] : new byte[0];
+                if (lenSafe > 0)
+                    Buffer.BlockCopy(entry.Data, 0, copy, 0, lenSafe);
+                infos.Add(new ContractInfo
+                {
+                    ContractGuid = entry.ContractGuid,
+                    Data = copy,
+                    NumBytes = lenSafe,
+                });
+            }
+
+            if (infos.Count == 0)
+                return;
+
+            SendContractsToOwner(client, state.AgencyId, infos);
         }
     }
 }

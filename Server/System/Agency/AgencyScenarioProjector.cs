@@ -47,7 +47,14 @@ namespace Server.System.Agency
         ///   - <c>ResearchAndDevelopment</c> tech-node child blobs and
         ///     <c>ResearchAndDevelopmentParts</c> — Stage 5.17b (per-agency tech routing).
         ///   - <c>ContractSystem</c> Active / Completed / Declined lists — Stage 5.17d
-        ///     (AgencyContractRouter; Q6 hybrid).
+        ///     shipped the AgencyContractRouter + per-agency persistence + owner-only
+        ///     AgencyContractMsgData wire echo (commit shipping with this comment
+        ///     update); the matching <c>ContractSystem</c> scenario projection that
+        ///     substitutes per-agency Active+Finished into the outgoing
+        ///     <see cref="ScenarioStoreSystem.GetScenarioInConfigNodeFormat"/> blob
+        ///     is deferred to Stage 5.18a alongside the client mirror so the
+        ///     projection has an observable consumer. Until then, post-Accept
+        ///     contracts reach the client through the wire echo only.
         ///   - <c>ScenarioUpgradeableFacilities</c> facility tiers — Stage 5.18b.
         ///   - <c>StrategySystem</c>, <c>KerbalRoster</c>, <c>ScenarioAchievements</c>,
         ///     <c>ScenarioDestructibles</c> — Stage 5.18b.
