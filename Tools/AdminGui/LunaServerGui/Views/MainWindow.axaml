@@ -3,18 +3,39 @@
         xmlns:vm="using:LunaServerGui.ViewModels"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="450"
+        mc:Ignorable="d" d:DesignWidth="900" d:DesignHeight="650"
         x:Class="LunaServerGui.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Icon="/Assets/avalonia-logo.ico"
-        Title="LunaServerGui">
+        Title="Luna Server GUI"
+        Width="900" Height="650">
 
     <Design.DataContext>
-        <!-- This only sets the DataContext for the previewer in an IDE,
-             to set the actual DataContext for runtime, set the DataContext property in code (look at App.axaml.cs) -->
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <TextBlock Text="{Binding Greeting}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+    <Grid RowDefinitions="*,Auto">
 
+        <TabControl Grid.Row="0">
+            <TabItem Header="Folder &amp; Setup">
+                <ContentControl Content="{Binding FolderSetup}"/>
+            </TabItem>
+            <TabItem Header="Server Console">
+                <ContentControl Content="{Binding ServerControl}"/>
+            </TabItem>
+        </TabControl>
+
+        <!-- Surfaced when MainWindow.OnClosing refuses to close because the
+             server is still running. Bound to CloseBlockedMessage which the
+             VM sets/clears via TryAllowClose(). -->
+        <Border Grid.Row="1"
+                IsVisible="{Binding CloseBlockedMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                Background="{DynamicResource SystemControlBackgroundAccentBrush}"
+                Padding="12,8">
+            <TextBlock Text="{Binding CloseBlockedMessage}"
+                       Foreground="White"
+                       TextWrapping="Wrap"/>
+        </Border>
+
+    </Grid>
 </Window>
