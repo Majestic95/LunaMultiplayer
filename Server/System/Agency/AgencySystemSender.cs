@@ -3,6 +3,7 @@ using LmpCommon.Message.Data.ShareProgress;
 using LmpCommon.Message.Server;
 using Server.Client;
 using Server.Context;
+using Server.Log;
 using Server.Server;
 using Server.Settings.Structures;
 using System;
@@ -209,6 +210,90 @@ namespace Server.System.Agency
                 return;
 
             SendContractsToOwner(client, state.AgencyId, infos);
+        }
+
+        /// <summary>
+        /// Stage 5.18d — broadcast a batch of vessel-ownership transitions to every
+        /// connected client. Called from the admin commands that mutate
+        /// <c>Vessel.OwningAgencyId</c> in the canonical store (5.18d slice (e)
+        /// <c>transferagency</c>, slice (g) <c>deleteagency</c> cascade).
+        ///
+        /// <para><b>Broadcast (not owner-only).</b> Vessel ownership is public state —
+        /// every client needs the transition for Stage 5.18c UI labels and Stage 5.18d
+        /// economy guards (recovery-of-cross-agency-vessel rejection). See
+        /// <see cref="AgencyVisibilityMsgData"/> XML for the rationale; spec §10 Q1's
+        /// <c>PrivateAgencyResources=true</c> applies to resource scalars, not to
+        /// ownership identity.</para>
+        ///
+        /// <para><b>No-op cases:</b>
+        /// <list type="bullet">
+        ///   <item><see cref="AgencySystem.PerAgencyEnabled"/> is false. Dual-mode silence
+        ///         (spec §11) — under gate=off the admin commands themselves should
+        ///         refuse to run; the no-op here is belt-and-braces.</item>
+        ///   <item><paramref name="changes"/> is null or empty. No-op silently; callers
+        ///         don't need a pre-flight check.</item>
+        /// </list></para>
+        ///
+        /// <para><b>Mutation ordering contract for callers.</b> The canonical
+        /// <c>Vessel.OwningAgencyId</c> on the server MUST be updated BEFORE this
+        /// broadcast fires. The race window is benign on the CLIENT side — see
+        /// <see cref="AgencyVisibilityMsgData"/>'s cross-channel hazard paragraph for
+        /// the full analysis: <see cref="LmpClient.Systems.Agency.AgencyMembership.ForceRecordOwnership"/>
+        /// is unconditional and <see cref="LmpClient.Systems.Agency.AgencyMembership.RecordOwnership"/>'s
+        /// preservation rule keeps a relay-stripped resend from clobbering Y. But on
+        /// the SERVER side, an inverted order (broadcast fires while the canonical
+        /// store still holds X) means the server's own relay path would forward a
+        /// proto carrying the stale stamp AFTER the broadcast — peers would see Y,
+        /// then the relay would deliver an unrelated authoritative proto whose
+        /// embedded <c>lmpOwningAgency</c> is still X (only stripped on resends from
+        /// the new owner, not on the server-rebuilt-then-relayed proto from the prior
+        /// owner). The 5.18d admin commands hold the vessel-store lock anchor across
+        /// the mutation AND the broadcast inside the same critical section — see
+        /// slice (e) / (g) for the concrete pattern.</para>
+        ///
+        /// <para><b>Caller contract on <paramref name="changes"/>.</b> The sender does
+        /// NOT defensively snapshot the input list; values are read out via the
+        /// indexer during the synchronous build of <c>AgencyVisibilityMsgData.Changes</c>.
+        /// Callers MUST NOT mutate the list while this method is in flight. The
+        /// recommended call shape — build a local <c>List&lt;VesselOwnershipChange&gt;</c>
+        /// inside the lock-anchored critical section and pass it once — naturally
+        /// avoids the hazard.</para>
+        ///
+        /// <para><b>Chunking.</b> Batches larger than
+        /// <see cref="AgencyVisibilityMsgData.MaxChangeCount"/> are split into multiple
+        /// consecutive messages on channel 22. Lidgren's per-channel
+        /// <c>ReliableOrdered</c> guarantee preserves across-batch apply order on the
+        /// client side — the receiver applies chunks in the same order the sender
+        /// emitted them, so a deleteagency cascade against an agency with thousands
+        /// of vessels lands deterministically.</para>
+        /// </summary>
+        public static void BroadcastVisibilityChange(IReadOnlyList<VesselOwnershipChange> changes)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (changes == null || changes.Count == 0)
+                return;
+
+            var total = changes.Count;
+            var batchCount = 0;
+            for (var start = 0; start < total; start += AgencyVisibilityMsgData.MaxChangeCount)
+            {
+                var chunkSize = Math.Min(AgencyVisibilityMsgData.MaxChangeCount, total - start);
+                var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyVisibilityMsgData>();
+                msgData.ChangeCount = chunkSize;
+                msgData.Changes = new VesselOwnershipChange[chunkSize];
+                for (var i = 0; i < chunkSize; i++)
+                    msgData.Changes[i] = changes[start + i];
+
+                MessageQueuer.SendToAllClients<AgencySrvMsg>(msgData);
+                batchCount++;
+            }
+
+            // Operator-visible signal for the Stage 5.18+ GUI launcher (which parses
+            // server stdout). Without this, an admin command's broadcast is invisible
+            // unless the operator correlates against the per-client receive logs.
+            var batchSuffix = batchCount > 1 ? $" in {batchCount} batches" : string.Empty;
+            LunaLog.Normal($"[fix:per-agency-career] Broadcast ownership-visibility — {total} change(s){batchSuffix}");
         }
     }
 }

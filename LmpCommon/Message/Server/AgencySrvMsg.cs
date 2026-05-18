@@ -47,6 +47,7 @@ namespace LmpCommon.Message.Server
             [(ushort)AgencyMessageType.CreateReply] = typeof(AgencyCreateReplyMsgData),
             [(ushort)AgencyMessageType.State] = typeof(AgencyStateMsgData),
             [(ushort)AgencyMessageType.Contract] = typeof(AgencyContractMsgData),
+            [(ushort)AgencyMessageType.Visibility] = typeof(AgencyVisibilityMsgData),
         };
 
         public override ServerMessageType MessageType => ServerMessageType.Agency;

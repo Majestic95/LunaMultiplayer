@@ -249,6 +249,55 @@ namespace LmpCommonTest
         }
 
         [TestMethod]
+        public void TestSerializeDeserializeAgencyVisibilityMsg()
+        {
+            // Stage 5.18d — broadcast S→C ownership push (transferagency / deleteagency
+            // cascade). Round-trip three entries covering the three meaningful states:
+            // X → Y (real → real, transferagency), X → Empty (deleteagency cascade
+            // demote), Empty → Y (Unassigned-sentinel claim).
+            var v1 = Guid.NewGuid(); var newAgency1 = Guid.NewGuid();
+            var v2 = Guid.NewGuid(); // demote to Empty
+            var v3 = Guid.NewGuid(); var newAgency3 = Guid.NewGuid();
+
+            var msgData = Factory.CreateNewMessageData<AgencyVisibilityMsgData>();
+            msgData.ChangeCount = 3;
+            msgData.Changes = new[]
+            {
+                new VesselOwnershipChange { VesselId = v1, NewOwningAgencyId = newAgency1 },
+                new VesselOwnershipChange { VesselId = v2, NewOwningAgencyId = Guid.Empty },
+                new VesselOwnershipChange { VesselId = v3, NewOwningAgencyId = newAgency3 },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyVisibilityMsgData>(msgData);
+
+            Assert.AreEqual(3, roundTripped.ChangeCount);
+            Assert.AreEqual(v1, roundTripped.Changes[0].VesselId);
+            Assert.AreEqual(newAgency1, roundTripped.Changes[0].NewOwningAgencyId);
+            Assert.AreEqual(v2, roundTripped.Changes[1].VesselId);
+            Assert.AreEqual(Guid.Empty, roundTripped.Changes[1].NewOwningAgencyId,
+                "Empty NewOwningAgencyId (deleteagency cascade demotion) MUST round-trip as Empty, " +
+                "not be silently dropped by the wire — ForceRecordOwnership relies on this.");
+            Assert.AreEqual(v3, roundTripped.Changes[2].VesselId);
+            Assert.AreEqual(newAgency3, roundTripped.Changes[2].NewOwningAgencyId);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyVisibilityMsg_EmptyBatch()
+        {
+            // Defensive empty-batch case. AgencySystemSender.BroadcastVisibilityChange
+            // early-returns on empty input so this path shouldn't fire in practice, but
+            // pin the wire shape anyway — a future caller bypassing the early-return
+            // must not crash the receiver.
+            var msgData = Factory.CreateNewMessageData<AgencyVisibilityMsgData>();
+            msgData.ChangeCount = 0;
+            msgData.Changes = new VesselOwnershipChange[0];
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyVisibilityMsgData>(msgData);
+
+            Assert.AreEqual(0, roundTripped.ChangeCount);
+        }
+
+        [TestMethod]
         public void TestSerializeDeserializeAgencyContractMsg_EmptyBatch()
         {
             // First-connect / no-contracts case: agency exists, owner has zero contracts,

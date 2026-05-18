@@ -50,6 +50,9 @@ namespace LmpClient.Systems.Agency
                 case AgencyMessageType.Contract:
                     HandleContract((AgencyContractMsgData)msgData);
                     break;
+                case AgencyMessageType.Visibility:
+                    HandleVisibility((AgencyVisibilityMsgData)msgData);
+                    break;
                 case AgencyMessageType.CreateReply:
                     HandleCreateReply((AgencyCreateReplyMsgData)msgData);
                     break;
@@ -206,6 +209,63 @@ namespace LmpClient.Systems.Agency
                 // which wire envelope delivered the batch.
                 ShareContractsMessageHandler.ApplyContractBatch(contractInfos);
             });
+        }
+
+        private static void HandleVisibility(AgencyVisibilityMsgData data)
+        {
+            // Stage 5.18d. Server-broadcast batch of vessel-ownership transitions
+            // (transferagency X→Y push; deleteagency cascade demoting to Empty).
+            // Authoritative — route through ForceRecordOwnership which BYPASSES
+            // the relay-safety preservation rule. See AgencyMembership.cs XML for
+            // the call-site contract distinguishing this path from RecordOwnership.
+            //
+            // No defensive IsForLocalAgency filter: this message is intentionally
+            // broadcast (ownership is public state). Every connected client applies
+            // every entry — Stage 5.18c UI labels and Stage 5.18d economy guards
+            // need the full transition surface, not just changes affecting the
+            // local agency.
+            if (data == null || data.ChangeCount == 0) return;
+
+            // Log on demote-to-Empty specifically — operators investigating "my
+            // vessel went Unassigned" need a grep target in KSP.log. Non-Empty
+            // transitions (X → Y or first-sight X) are routine and stay silent
+            // UNLESS the local player is currently piloting the affected vessel,
+            // in which case the transition will surface in the 5.18c UI label
+            // mid-flight and the operator deserves an explanation in KSP.log.
+            // Defers the optional LunaLog from the Stage 5.18d slice (b)
+            // ForceRecordOwnership CONSIDER review finding to this consumer call
+            // site, where it belongs.
+            var registry = System?.VesselOwnership;
+            var activeVesselId = FlightGlobals.ActiveVessel?.id ?? Guid.Empty;
+            for (var i = 0; i < data.ChangeCount; i++)
+            {
+                var change = data.Changes[i];
+                var prior = Guid.Empty;
+                registry?.TryGetValue(change.VesselId, out prior);
+                AgencyMembership.ForceRecordOwnership(registry, change.VesselId, change.NewOwningAgencyId);
+
+                if (change.NewOwningAgencyId == Guid.Empty && prior != Guid.Empty)
+                {
+                    LunaLog.Log(
+                        $"[Agency]: Visibility — vessel {change.VesselId:N} demoted from " +
+                        $"agency {prior:N} to Unassigned (deleteagency cascade).");
+                }
+                else if (change.VesselId == activeVesselId
+                    && prior != Guid.Empty
+                    && change.NewOwningAgencyId != Guid.Empty
+                    && prior != change.NewOwningAgencyId)
+                {
+                    // Operator-visible signal for the consumer-lens "active vessel
+                    // transferred out from under me" case. Without this log, a player
+                    // mid-mission sees their vessel's UI label change (5.18c) with no
+                    // KSP.log breadcrumb explaining why.
+                    LunaLog.Log(
+                        $"[Agency]: Visibility — ACTIVE vessel {change.VesselId:N} " +
+                        $"transferred from agency {prior:N} to {change.NewOwningAgencyId:N} (admin transferagency).");
+                }
+            }
+
+            LunaLog.Log($"[Agency]: Visibility applied — {data.ChangeCount} ownership change(s).");
         }
 
         private static void HandleCreateReply(AgencyCreateReplyMsgData data)

@@ -14,5 +14,6 @@ namespace LmpCommon.Message.Types
         CreateReply = 2,
         State = 3,
         Contract = 4,
+        Visibility = 5,
     }
 }
