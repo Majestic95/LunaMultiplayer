@@ -32,6 +32,7 @@ namespace Server.Command
             RegisterCommand("listlocks", new ListLocksCommand().Execute, "Lists current locks");
             RegisterCommand("nukeksc", new NukeCommand().Execute, "Clears ALL vessels from KSC and the runway");
             RegisterCommand("setagency", new SetAgencyCommand().Execute, "Set a per-agency career scalar. Usage: /setagency funds|science|reputation <agency-id-or-owner> <amount>");
+            RegisterCommand("transferagency", new TransferAgencyCommand().Execute, "Rename the owner of an existing per-agency career. Usage: /transferagency <agency-id-or-owner> <new-player-name>");
             RegisterCommand("setfunds", new SetFundsCommand().Execute, "Set funds value");
             RegisterCommand("setscience", new SetScienceCommand().Execute, "Set science value");
             RegisterCommand("restartserver", new RestartServerCommand().Execute, "Restarts the server");

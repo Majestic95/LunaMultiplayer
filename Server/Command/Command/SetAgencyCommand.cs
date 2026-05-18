@@ -102,7 +102,9 @@ namespace Server.Command.Command
                         $"setagency: agency token '{token}' does not match any registered agency. Pass either an " +
                         "agency id (run /listagencies to see ids) or the agency owner's REGISTRATION-time LMP handle " +
                         "— if the owning player reconnected under a different name, look up by id. Orphaned agency " +
-                        "ids from boot warnings recover via /transferagency (slice e), not /setagency.");
+                        "ids from boot warnings have no in-memory AgencyState to mutate — recover by restoring " +
+                        "Universe/Agencies/{guid}.txt(.bak), or accept the loss and let owning players mint fresh " +
+                        "agencies on reconnect (no admin command can resurrect an AgencyState that didn't load).");
                 }
                 return false;
             }

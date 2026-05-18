@@ -967,6 +967,144 @@ namespace Server.System.Agency
         }
 
         /// <summary>
+        /// Stage 5.18d slice (e) <c>/transferagency</c>. Renames the owner of an
+        /// existing agency to a different LMP player handle. Vessels keep their
+        /// <c>OwningAgencyId</c> stamp — the agency's identity is preserved; only
+        /// the player handle attached to it changes.
+        ///
+        /// <para><b>Lock discipline.</b> Holds the per-name locks for BOTH the
+        /// old and new owner names (alphabetically ordered to prevent ABBA
+        /// deadlocks against a concurrent <see cref="OnPlayerAuthenticated"/> for
+        /// either name) and the per-agency lock for the source <see cref="AgencyState"/>.
+        /// The two name-locks are required because <see cref="AgencyByPlayerName"/>
+        /// is mutated for both keys; the agency-lock is required for the
+        /// <see cref="AgencyState.OwningPlayerName"/> field write +
+        /// <see cref="SaveAgency"/> serialisation. The name-lock acquire order
+        /// matches <see cref="RegisterAgency"/>'s contract so a concurrent register
+        /// for either name sees the post-mutation index state cleanly.</para>
+        ///
+        /// <para><b>Failure modes</b> (caller surfaces <paramref name="failureReason"/>):
+        /// <list type="bullet">
+        ///   <item>Gate is closed — returns false immediately.</item>
+        ///   <item>Source state is null — returns false (defensive).</item>
+        ///   <item>New name is null / whitespace — returns false. Length-cap and
+        ///         character-class validation live at the caller (the command
+        ///         layer applies <c>MaxUsernameLength</c> and any future character
+        ///         constraints).</item>
+        ///   <item>New name collides with an existing agency's <c>OwningPlayerName</c>
+        ///         — returns false. Operator must transfer the colliding agency
+        ///         first, or use <c>/deleteagency</c> on it.</item>
+        ///   <item>New name equals current name — returns true as a no-op (idempotent
+        ///         rename to same value is safe).</item>
+        /// </list></para>
+        ///
+        /// <para><b>Out-of-scope concerns the CALLER handles:</b>
+        /// <list type="bullet">
+        ///   <item>Releasing the old owner's vessel-scoped locks for vessels of
+        ///         this agency. The lock subsystem is not coupled to AgencySystem;
+        ///         the caller walks <c>LockQuery.GetAllPlayerLocks</c> directly.</item>
+        ///   <item>Echoing <see cref="LmpCommon.Message.Data.Agency.AgencyStateMsgData"/>
+        ///         to the new owner if online.</item>
+        ///   <item>Operator-visible logging.</item>
+        /// </list></para>
+        /// </summary>
+        public static bool TryRenameAgencyOwner(AgencyState source, string newOwnerName, out string failureReason)
+        {
+            failureReason = string.Empty;
+            if (!PerAgencyEnabled)
+            {
+                failureReason = "Per-agency career is not active (gate-off or non-Career mode).";
+                return false;
+            }
+            if (source == null)
+            {
+                failureReason = "Source agency is null.";
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(newOwnerName))
+            {
+                failureReason = "New player name must be non-empty.";
+                return false;
+            }
+
+            var oldOwnerName = source.OwningPlayerName ?? string.Empty;
+            if (string.Equals(oldOwnerName, newOwnerName, StringComparison.Ordinal))
+            {
+                // Idempotent no-op. Operator may run the same command twice from
+                // a script or GUI; the second call returns success without churning
+                // the index / disk write / lock-release subsystem.
+                return true;
+            }
+
+            // Lock both name-locks in alphabetical order. We acquire BOTH because
+            // we mutate AgencyByPlayerName entries keyed on both names (remove old,
+            // add new); a concurrent OnPlayerAuthenticated for either name could
+            // otherwise race the index mutation.
+            string first, second;
+            if (string.CompareOrdinal(oldOwnerName, newOwnerName) < 0)
+            {
+                first = oldOwnerName; second = newOwnerName;
+            }
+            else
+            {
+                first = newOwnerName; second = oldOwnerName;
+            }
+
+            var firstLock = PlayerNameLocks.GetOrAdd(first, _ => new object());
+            var secondLock = PlayerNameLocks.GetOrAdd(second, _ => new object());
+
+            lock (firstLock)
+            {
+                lock (secondLock)
+                {
+                    // Re-check collision under lock. A concurrent OnPlayerAuthenticated
+                    // for newOwnerName that landed between our unlocked precondition
+                    // check (if any) and this acquire could have minted a fresh agency
+                    // for newOwnerName. The lock pair would have serialised that
+                    // register against this rename; whichever landed first wins, and
+                    // the re-check here catches the case where the register landed
+                    // first under a different lock-order observation.
+                    if (AgencyByPlayerName.ContainsKey(newOwnerName))
+                    {
+                        failureReason =
+                            $"Player '{newOwnerName}' already owns another agency. " +
+                            "Transfer or delete the other agency first, then retry.";
+                        return false;
+                    }
+
+                    lock (GetAgencyLock(source.AgencyId))
+                    {
+                        // Persistence-before-index ordering — same rule as RegisterAgency.
+                        // Mutate the state field first + persist, then flip the index.
+                        // A crash between SaveAgency and the index swap leaves disk
+                        // showing the new owner but the in-memory index pointing at
+                        // the old name; LoadExistingAgencies on next boot reads the
+                        // disk file's OwningPlayerName and rebuilds the index from
+                        // it, so the disk-truth wins.
+                        source.OwningPlayerName = newOwnerName;
+                        SaveAgency(source.AgencyId);
+
+                        // Swap the index in ADD-THEN-REMOVE order. AgencyByPlayerName
+                        // uses ConcurrentDictionary so individual mutations are atomic;
+                        // the brief window between Add and Remove leaves BOTH names
+                        // mapped to the same id, rather than NEITHER (server-systems-
+                        // review v1 SS-3). An unlocked reader (e.g. a parallel
+                        // /setagency on another admin thread) that lands in this
+                        // window through TryResolveAgencyToken's name path resolves
+                        // to the correct agency under either name — both paths
+                        // succeed and return the same state. The remove-then-add
+                        // alternative would briefly fail BOTH lookups.
+                        AgencyByPlayerName[newOwnerName] = source.AgencyId;
+                        if (!string.IsNullOrEmpty(oldOwnerName))
+                            AgencyByPlayerName.TryRemove(oldOwnerName, out _);
+                    }
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
         /// Flushes one agency's state to disk via <see cref="FileHandler.WriteAtomic"/>.
         /// Caller is typically <see cref="RegisterAgency"/> (initial save) or — in future
         /// Stage 5 steps — a Share*-routed mutation. Holds the per-agency lock so

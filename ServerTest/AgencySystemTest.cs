@@ -746,6 +746,114 @@ namespace ServerTest
             Assert.AreSame(alice, resolved, "Guid form resolves by registry id, not by name-coincidence.");
         }
 
+        // --- TryRenameAgencyOwner — Stage 5.18d slice (e) /transferagency ----
+        // Renames the OwningPlayerName on an existing AgencyState; vessel
+        // OwningAgencyId stamps are unaffected. Pins the atomic mutation
+        // (state field + AgencyByPlayerName index + disk persistence) +
+        // collision detection + lock ordering.
+
+        [TestMethod]
+        public void TryRenameAgencyOwner_RenamesStateAndIndex()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+            Assert.IsTrue(AgencySystem.TryRenameAgencyOwner(alice, "Bob", out var reason));
+            Assert.AreEqual(string.Empty, reason);
+
+            // State field updated.
+            Assert.AreEqual("Bob", alice.OwningPlayerName);
+            // Index: old name removed, new name maps to same id.
+            Assert.IsFalse(AgencySystem.AgencyByPlayerName.ContainsKey("Alice"));
+            Assert.IsTrue(AgencySystem.AgencyByPlayerName.TryGetValue("Bob", out var idAfter));
+            Assert.AreEqual(alice.AgencyId, idAfter);
+            // Disk persisted with the new name.
+            var roundTripped = AgencyState.Parse(File.ReadAllText(alice.FilePath));
+            Assert.AreEqual("Bob", roundTripped.OwningPlayerName);
+            Assert.AreEqual(alice.AgencyId, roundTripped.AgencyId);
+        }
+
+        [TestMethod]
+        public void TryRenameAgencyOwner_SameName_IdempotentNoOp()
+        {
+            // Operator scripts may re-issue the same transferagency twice; the
+            // second call returns success without churning disk / lock state.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            Assert.IsTrue(AgencySystem.TryRenameAgencyOwner(alice, "Alice", out _));
+            Assert.AreEqual("Alice", alice.OwningPlayerName);
+            Assert.IsTrue(AgencySystem.AgencyByPlayerName.TryGetValue("Alice", out var id));
+            Assert.AreEqual(alice.AgencyId, id);
+        }
+
+        [TestMethod]
+        public void TryRenameAgencyOwner_NewNameCollision_FailsWithReason()
+        {
+            // Both Alice and Bob have agencies. Renaming Alice's agency to "Bob"
+            // would collide with Bob's existing agency in AgencyByPlayerName —
+            // refuse and surface the operator-facing reason.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            var bob = AgencySystem.RegisterAgency("Bob");
+
+            Assert.IsFalse(AgencySystem.TryRenameAgencyOwner(alice, "Bob", out var reason));
+            StringAssert.Contains(reason, "already owns another agency");
+
+            // Both indexes intact post-refusal.
+            Assert.AreEqual(alice.AgencyId, AgencySystem.AgencyByPlayerName["Alice"]);
+            Assert.AreEqual(bob.AgencyId, AgencySystem.AgencyByPlayerName["Bob"]);
+            Assert.AreEqual("Alice", alice.OwningPlayerName);
+        }
+
+        [TestMethod]
+        public void TryRenameAgencyOwner_EmptyOrWhitespaceNewName_FailsWithReason()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+
+            Assert.IsFalse(AgencySystem.TryRenameAgencyOwner(alice, "", out var reason));
+            StringAssert.Contains(reason, "non-empty");
+
+            Assert.IsFalse(AgencySystem.TryRenameAgencyOwner(alice, "   ", out reason));
+            StringAssert.Contains(reason, "non-empty");
+
+            Assert.IsFalse(AgencySystem.TryRenameAgencyOwner(alice, null, out reason));
+            StringAssert.Contains(reason, "non-empty");
+
+            // No state mutation under failure.
+            Assert.AreEqual("Alice", alice.OwningPlayerName);
+        }
+
+        [TestMethod]
+        public void TryRenameAgencyOwner_NullSourceState_FailsDefensively()
+        {
+            Assert.IsFalse(AgencySystem.TryRenameAgencyOwner(null, "Bob", out var reason));
+            StringAssert.Contains(reason, "null");
+        }
+
+        [TestMethod]
+        public void TryRenameAgencyOwner_GateOff_FailsWithReason()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+
+            Assert.IsFalse(AgencySystem.TryRenameAgencyOwner(alice, "Bob", out var reason));
+            StringAssert.Contains(reason, "Per-agency career is not active");
+        }
+
+        [TestMethod]
+        public void TryRenameAgencyOwner_DiskRoundTripsOnReload()
+        {
+            // Persistence-before-index ordering: a fresh AgencySystem.Reset +
+            // LoadExistingAgencies after the rename must pick up the renamed
+            // owner from disk, not a stale registry image.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            AgencySystem.TryRenameAgencyOwner(alice, "Bob", out _);
+
+            AgencySystem.Reset();
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsTrue(AgencySystem.AgencyByPlayerName.TryGetValue("Bob", out var idAfter));
+            Assert.AreEqual(alice.AgencyId, idAfter);
+            Assert.IsFalse(AgencySystem.AgencyByPlayerName.ContainsKey("Alice"),
+                "old owner name must not survive in the rebuilt index — disk is canonical.");
+        }
+
         [TestMethod]
         public void TryResolveAgencyToken_GuidParseMisses_DoesNotFallThroughToNameLookup()
         {
