@@ -37,51 +37,61 @@ namespace Server.Message
                     break;
                 case VesselMessageType.Position:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     if (client.Subspace == WarpContext.LatestSubspace.Id)
                         VesselDataUpdater.WritePositionDataToFile(messageData);
                     break;
                 case VesselMessageType.Flightstate:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     VesselDataUpdater.WriteFlightstateDataToFile(messageData);
                     break;
                 case VesselMessageType.Update:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     VesselDataUpdater.WriteUpdateDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Resource:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     VesselDataUpdater.WriteResourceDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncField:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     VesselDataUpdater.WritePartSyncFieldDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncUiField:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     VesselDataUpdater.WritePartSyncUiFieldDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncCall:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.ActionGroup:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     VesselDataUpdater.WriteActionGroupDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Fairing:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     VesselDataUpdater.WriteFairingDataToFile(messageData);
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Decouple:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Couple:
@@ -89,6 +99,7 @@ namespace Server.Message
                     break;
                 case VesselMessageType.Undock:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    if (RejectIfCrossAgencyWrite(client.PlayerName, messageData)) break;
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 default:
@@ -121,9 +132,116 @@ namespace Server.Message
             return true;
         }
 
+        /// <summary>
+        /// [Stage 5.17a write-path counterpart, session 19 soak Finding 2] Returns true
+        /// (caller must drop the message — no relay, no disk write) when the sender's
+        /// agency is not the owning agency of the target vessel. <see cref="LockSystem.AcquireLock"/>
+        /// already closes the lock-acquire hole, but the vessel-relay path was previously
+        /// unconditional — a cross-agency player could broadcast Position / Flightstate /
+        /// Update / Resource / PartSync* / ActionGroup / Fairing / Decouple / Undock for
+        /// any vessel they had the id of, regardless of lock state. KSP's tracking-station
+        /// "Fly" loads another player's vessel into the local Flight scene; the relayed
+        /// (unauthorised) state then collides with the owning agency's authoritative
+        /// simulation = physics jitter on the owner's instance.
+        ///
+        /// Also called from <see cref="HandleVesselRemove"/> and <see cref="HandleVesselCouple"/>
+        /// to close two destructive holes the consumer-lens + server-systems reviews
+        /// caught: Remove was only gated on ControlLockExists (and not gated at all when
+        /// no Control lock was held — Alice's pinned-but-unlocked vessel could be deleted
+        /// by cross-agency Bob); Couple rewrites the dominant's AuthoritativeSubspaceId
+        /// and removes the weak vessel without any cross-agency check.
+        ///
+        /// Bypass-only cases (mirror <see cref="LockSystem.AcquireLock"/> Stage 5.17a):
+        ///   - Gate off: dual-mode silence (spec §11).
+        ///   - Vessel not in store: first-time-seen ids fall through. Unlike 5.17a's
+        ///     lock-acquire defense this does NOT reject under gate=on — the ingest
+        ///     race is asymmetric on the relay path. A peer would need to know the
+        ///     vessel id to broadcast a position update, which means they've already
+        ///     received the relayed proto bytes; a legitimate KSP client wouldn't
+        ///     broadcast vessel state without holding a lock anyway, so the rare race
+        ///     is a single dropped tick at worst.
+        ///   - <c>Vessel.OwningAgencyId == Guid.Empty</c>: spec §10 Q3 Unassigned-sentinel;
+        ///     any agency may interact until operator <c>transferagency</c> (Stage 5.18d)
+        ///     assigns ownership.
+        ///   - Sender has no agency mapping: defensive bypass. Production path is safe
+        ///     (Authenticated gate runs <see cref="AgencySystem.OnPlayerAuthenticated"/>
+        ///     on the same Lidgren receive thread before the player's first vessel
+        ///     message can be processed; subsequent CliMsgs always see a populated
+        ///     <see cref="AgencySystem.AgencyByPlayerName"/> entry).
+        ///
+        /// **Why we don't add a lock-bypass branch (defense-in-depth note).** The 5.17a
+        /// guard refuses cross-agency lock acquires on the three vessel-scoped lock
+        /// types (Control / Update / UnloadedUpdate), so under gate=on it is structurally
+        /// impossible for a non-owning player to hold a vessel-scoped lock on another
+        /// agency's vessel. The only configuration that could create the situation is
+        /// a pre-gate-on lock surviving the gate flip; spec §10 migration is fresh-
+        /// start-only (operator archives Universe/ before turning the gate on), so
+        /// stale-lock survival is not a supported configuration.
+        ///
+        /// **Boot-ordering** (upgrade-lens review session 19). <c>LoadExistingVessels</c>
+        /// runs in <c>MainServer.Main</c> before <c>LidgrenServer.SetupLidgrenServer</c>
+        /// + <c>ServerRunning=true</c>, so the store is fully populated before any
+        /// vessel CliMsg can arrive. There is no boot-window where an in-flight vessel
+        /// message would bypass the guard due to an empty store.
+        ///
+        /// **5.18d transferagency forward-note** (server-systems review session 19).
+        /// When the admin command lands, it mutates <see cref="AgencySystem.AgencyByPlayerName"/>
+        /// on the command thread. The mutation-ordering rule documented at
+        /// <see cref="AgencySystem.AgencyByPlayerName"/> requires the index flip to be
+        /// the LAST step — until then, this guard reads the pre-transfer mapping and
+        /// the transferred player's vessel writes are routed under their old agency,
+        /// which is safe (they won't yet be cross-agency against the also-not-yet-
+        /// rewritten <see cref="Vessel.OwningAgencyId"/>). transferagency must rewrite
+        /// vessel stamps in <see cref="VesselStoreSystem.CurrentVessels"/> AND the
+        /// player-name index AND release stale locks atomically — see 5.18d sub-item (e).
+        ///
+        /// **OwningAgencyId concurrent get/set best-effort** (server-systems review
+        /// session 19). <see cref="Vessel.OwningAgencyId"/>'s underlying
+        /// <c>MixedCollection&lt;string,string&gt;</c> (LunaConfigNode 1.9.1, no source
+        /// in tree) is not documented thread-safe. A torn read during the proto-ingest
+        /// <c>Task.Run</c> stamp window would <see cref="Guid.TryParse"/>-fail and
+        /// return <see cref="Guid.Empty"/>, which falls into the Unassigned-sentinel
+        /// bypass above — a single tick of relay leakage at worst. Same pre-existing
+        /// shape as <see cref="LockSystem.AcquireLock"/>'s read at line 93. If a real
+        /// race surfaces, snapshot the underlying string once and parse locally.
+        /// </summary>
+        internal static bool RejectIfCrossAgencyWrite(string playerName, VesselBaseMsgData data)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return false;
+            if (!VesselStoreSystem.CurrentVessels.TryGetValue(data.VesselId, out var existing))
+                return false;
+            if (existing.OwningAgencyId == Guid.Empty)
+                return false;
+            if (!AgencySystem.AgencyByPlayerName.TryGetValue(playerName, out var senderAgency))
+                return false;
+            if (senderAgency == existing.OwningAgencyId)
+                return false;
+
+            //Warning-level so operators see the soak-relevant breadcrumb at default log
+            //level (consumer + upgrade + server-systems reviewers all flagged session 19).
+            //KSP-side a buggy or hostile client at ~25Hz position cadence could spam this;
+            //if soak shows the flood is real, rate-limit per (sender, vessel) — keep the
+            //flat Warning for now and react if needed.
+            LunaLog.Warning($"[fix:per-agency-career] refusing relay of {data.VesselMessageType} for {data.VesselId} from {playerName} " +
+                            $"(sender agency {senderAgency:N} != vessel owning agency {existing.OwningAgencyId:N})");
+            return true;
+        }
+
         private static void HandleVesselRemove(ClientStructure client, VesselBaseMsgData message)
         {
             var data = (VesselRemoveMsgData)message;
+
+            //[Stage 5.17a write-path counterpart, consumer-lens review session 19] Cross-agency
+            //rejection. The existing ControlLockExists check only fires when SOME player holds
+            //Control — when no one does (Alice logged off after BUG-010 pinning), a cross-agency
+            //Bob's VesselRemoveMsgData would otherwise delete Alice's vessel and broadcast the
+            //removal to every peer. Strictly more destructive than the position-jitter the
+            //write-path counterpart was originally written to prevent. Bypass shape mirrors
+            //the relay-cases helper; under gate=on the agency must match (or vessel is
+            //Unassigned-sentinel, or sender has no agency mapping for the defensive fall-
+            //through).
+            if (RejectIfCrossAgencyWrite(client.PlayerName, data)) return;
 
             if (LockSystem.LockQuery.ControlLockExists(data.VesselId) && !LockSystem.LockQuery.ControlLockBelongsToPlayer(data.VesselId, client.PlayerName))
                 return;
@@ -245,6 +363,16 @@ namespace Server.Message
                               $"(client subspace {client.Subspace} is past dominant vessel authority subspace {existingDominant.AuthoritativeSubspaceId})");
                 return;
             }
+
+            //[Stage 5.17a write-path counterpart, server-systems review session 19] Cross-agency
+            //rejection on the dominant vessel. Couple is at least as destructive as Remove +
+            //Position combined: it rewrites the dominant's AuthoritativeSubspaceId, removes the
+            //weak vessel, and broadcasts a remove to every peer. Without this guard a cross-
+            //agency Bob could take over Alice's dominant vessel as the merged target. The
+            //weak-vessel side intentionally is NOT separately guarded here — if Bob owns the
+            //weak vessel and Alice owns the dominant, the dominant-side guard already refuses;
+            //if both are foreign to Bob, same.
+            if (RejectIfCrossAgencyWrite(client.PlayerName, msgData)) return;
 
             LunaLog.Debug($"Coupling message received! Dominant vessel: {msgData.VesselId}");
             MessageQueuer.RelayMessage<VesselSrvMsg>(client, msgData);

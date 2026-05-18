@@ -765,7 +765,7 @@ namespace Server.System.Agency
 
             foreach (var kvp in orphanCounts)
             {
-                LunaLog.Warning($"[fix:per-agency-career] {kvp.Value} vessel(s) reference agency {kvp.Key:N} which did not load. The owning player will mint a new agency on reconnect and be locked out of these vessels by the cross-agency check. Restore Universe/Agencies/{kvp.Key:N}.txt(.bak) or admin transferagency to recover.");
+                LunaLog.Warning($"[fix:per-agency-career] {kvp.Value} vessel(s) reference agency {kvp.Key:N} which did not load. The owning player will mint a new agency on reconnect and (a) be refused vessel-scoped lock acquires by the 5.17a cross-agency lock check, AND (b) have their position/flightstate/update broadcasts silently dropped by the 5.17a write-path counterpart (session 19 soak Finding 2). Restore Universe/Agencies/{kvp.Key:N}.txt(.bak) or admin transferagency to recover.");
             }
         }
 
