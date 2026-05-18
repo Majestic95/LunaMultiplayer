@@ -16,6 +16,7 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
     public FolderSetupViewModel FolderSetup { get; }
     public ServerControlViewModel ServerControl { get; }
     public LaunchSettingsViewModel LaunchSettings { get; }
+    public ConnectionsViewModel Connections { get; }
     public AdminActionsViewModel AdminActions { get; }
 
     /// <summary>
@@ -31,6 +32,7 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
         FolderSetup = new FolderSetupViewModel(_folderService, OnValidationChanged);
         ServerControl = new ServerControlViewModel(_processService);
         LaunchSettings = new LaunchSettingsViewModel(_settingsCatalog);
+        Connections = new ConnectionsViewModel(_processService);
         AdminActions = new AdminActionsViewModel(_processService)
         {
             // AdminActions.Restart needs to bring the server back up after
@@ -95,6 +97,10 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        // Connections subscribes to _processService.OutputLineReceived;
+        // detach BEFORE disposing the service so the unsubscribe lands
+        // cleanly on the still-live event source.
+        Connections.Dispose();
         _processService.Dispose();
     }
 }
