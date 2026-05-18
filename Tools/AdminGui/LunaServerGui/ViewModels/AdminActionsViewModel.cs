@@ -249,7 +249,7 @@ public sealed partial class AdminActionsViewModel : ViewModelBase
         var ok = await ConfirmAsync(
             "Delete agency (DESTRUCTIVE)",
             $"Delete agency '{token}'? The AgencyState file + its .bak are removed. Per-agency contracts, tech, science, reputation, funds, facility levels, and strategies are LOST — there is no undo. Vessels stamped with this agency are demoted to the Unassigned sentinel (they survive as Unassigned, NOT deleted). The prior owner mints a fresh agency on next reconnect.",
-            "Delete (--confirm)");
+            "Delete");
         if (!ok) return;
         if (!IsServerRunning())
         {

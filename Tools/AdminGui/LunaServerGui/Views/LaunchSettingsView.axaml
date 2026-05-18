@@ -102,7 +102,7 @@
                                                FontStyle="Italic"
                                                Text="One or more fields have validation errors. Fix them before saving."/>
                                     <TextBlock IsVisible="{Binding HasWarning}"
-                                               Foreground="DarkOrange"
+                                               Foreground="#E65100"
                                                FontStyle="Italic">
                                         <Run Text="Warning ⚠"/>
                                         <Run Text="{Binding WarningCount}"/>
@@ -122,7 +122,7 @@
                                                         BorderThickness="0,0,0,1"
                                                         Padding="0,6"
                                                         Background="{Binding IsDirty, Converter={x:Static vm:DirtyHighlightConverter.Instance}}">
-                                                    <Grid ColumnDefinitions="220,*" ColumnSpacing="12">
+                                                    <Grid ColumnDefinitions="280,*" ColumnSpacing="12">
 
                                                         <!-- Left: name + type + lock indicator -->
                                                         <StackPanel Grid.Column="0" Orientation="Vertical" Spacing="2">
@@ -191,7 +191,7 @@
                                                                  HasWarning gate in SettingsGroupViewModel — review SHOULD FIX #3). -->
                                                             <TextBlock Text="{Binding WarningMessage}"
                                                                        IsVisible="{Binding IsDirty}"
-                                                                       Foreground="DarkOrange"
+                                                                       Foreground="#E65100"
                                                                        FontSize="11"
                                                                        TextWrapping="Wrap"/>
 

@@ -14,9 +14,23 @@
         <vm:MainWindowViewModel/>
     </Design.DataContext>
 
-    <Grid RowDefinitions="*,Auto">
+    <Grid RowDefinitions="Auto,*,Auto">
 
-        <TabControl Grid.Row="0">
+        <!-- Top toolbar: theme switcher on the right.
+             Slice-1E polish will add a persistence shim
+             (%APPDATA%/LunaServerGui/theme.json) so this choice survives
+             restart; today it's session-scoped. -->
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="8,4">
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                <TextBlock Text="Theme:" VerticalAlignment="Center" Opacity="0.7"/>
+                <ComboBox ItemsSource="{Binding ThemeChoices}"
+                          SelectedItem="{Binding SelectedTheme, Mode=TwoWay}"
+                          MinWidth="100"
+                          ToolTip.Tip="Light is brighter and consistent regardless of Windows theme; Dark matches dark-mode operators; System follows your OS preference."/>
+            </StackPanel>
+        </Grid>
+
+        <TabControl Grid.Row="1">
             <TabItem Header="Folder &amp; Setup">
                 <ContentControl Content="{Binding FolderSetup}"/>
             </TabItem>
@@ -37,7 +51,7 @@
         <!-- Surfaced when MainWindow.OnClosing refuses to close because the
              server is still running. Bound to CloseBlockedMessage which the
              VM sets/clears via TryAllowClose(). -->
-        <Border Grid.Row="1"
+        <Border Grid.Row="2"
                 IsVisible="{Binding CloseBlockedMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                 Background="{DynamicResource SystemControlBackgroundAccentBrush}"
                 Padding="12,8">

@@ -2,13 +2,27 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              x:Class="LunaServerGui.App"
              xmlns:local="using:LunaServerGui"
-             RequestedThemeVariant="Default">
-             <!-- "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options. -->
+             RequestedThemeVariant="Light">
+             <!-- Force Light variant rather than following the OS — keeps the admin
+                  GUI bright + consistent regardless of the operator's Windows dark-
+                  mode setting. -->
 
     <Application.DataTemplates>
         <local:ViewLocator/>
     </Application.DataTemplates>
-  
+
+    <Application.Resources>
+        <!-- Brighter, more vibrant accent than the Fluent default muted blue
+             (#0078D4). Material Blue 600. Flows through to
+             SystemControlBackgroundAccentBrush + SystemControlForegroundAccentBrush
+             which our existing views already bind to (Connections tab banner,
+             dirty-count badge on Launch Settings tab strip, Save buttons).
+             Works in BOTH Light and Dark theme variants — operators can
+             flip the theme at runtime via the dropdown in MainWindow's
+             top bar. -->
+        <Color x:Key="SystemAccentColor">#1E88E5</Color>
+    </Application.Resources>
+
     <Application.Styles>
         <FluentTheme />
     </Application.Styles>

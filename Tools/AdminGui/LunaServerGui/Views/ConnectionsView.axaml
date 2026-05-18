@@ -30,11 +30,11 @@
                     <Run Text="Total: " FontWeight="SemiBold"/>
                     <Run Text="{Binding TotalCount}"/>
                 </TextBlock>
-                <TextBlock Foreground="Green">
+                <TextBlock Foreground="#1B5E20">
                     <Run Text="✓ Accepted: " FontWeight="SemiBold"/>
                     <Run Text="{Binding AcceptedCount}"/>
                 </TextBlock>
-                <TextBlock Foreground="Red">
+                <TextBlock Foreground="#C62828">
                     <Run Text="✗ Rejected: " FontWeight="SemiBold"/>
                     <Run Text="{Binding RejectedCount}"/>
                 </TextBlock>
@@ -50,7 +50,7 @@
                 BorderBrush="{DynamicResource SystemControlForegroundBaseMediumLowBrush}"
                 BorderThickness="0,0,0,1"
                 Padding="4,4">
-            <Grid ColumnDefinitions="80,40,160,90,*" ColumnSpacing="8">
+            <Grid ColumnDefinitions="80,40,200,90,*" ColumnSpacing="8">
                 <TextBlock Grid.Column="0" Text="Time"     FontWeight="SemiBold" FontSize="11"/>
                 <TextBlock Grid.Column="1" Text="Outcome"  FontWeight="SemiBold" FontSize="11"/>
                 <TextBlock Grid.Column="2" Text="Player"   FontWeight="SemiBold" FontSize="11"/>
@@ -82,7 +82,7 @@
                                 <Border BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}"
                                         BorderThickness="0,0,0,1"
                                         Padding="4,4">
-                                    <Grid ColumnDefinitions="80,40,160,90,*" ColumnSpacing="8">
+                                    <Grid ColumnDefinitions="80,40,200,90,*" ColumnSpacing="8">
                                         <TextBlock Grid.Column="0"
                                                    Text="{Binding TimestampDisplay}"
                                                    FontFamily="Cascadia Mono, Consolas, Menlo, monospace"

@@ -11,8 +11,10 @@
 
         <!-- State + control buttons -->
         <Grid Grid.Row="0" ColumnDefinitions="Auto,Auto,*,Auto" ColumnSpacing="8">
-            <Button Grid.Column="0" Content="Start" Command="{Binding StartCommand}"/>
-            <Button Grid.Column="1" Content="Stop" Command="{Binding StopCommand}"/>
+            <Button Grid.Column="0" Content="Start" Command="{Binding StartCommand}"
+                    ToolTip.Tip="Launch the server with the entrypoint resolved on the Folder &amp; Setup tab. Disabled until a valid folder is selected and while the server is running."/>
+            <Button Grid.Column="1" Content="Stop" Command="{Binding StopCommand}"
+                    ToolTip.Tip="Closes stdin then kills the process tree after a grace period. Available only while the server is Running."/>
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
                 <TextBlock>
                     <Run Text="State: " FontWeight="SemiBold"/>
@@ -26,9 +28,11 @@
             <TextBlock Grid.Column="3"
                        Text="{Binding LastError}"
                        IsVisible="{Binding LastError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
-                       Foreground="Red"
+                       Foreground="#C62828"
                        TextWrapping="Wrap"
-                       VerticalAlignment="Center"/>
+                       MaxWidth="400"
+                       VerticalAlignment="Center"
+                       ToolTip.Tip="{Binding LastError}"/>
         </Grid>
 
         <!-- Log pane: TextBox provides built-in scrolling + selection + copy. -->
@@ -59,7 +63,8 @@
             <Button Grid.Column="1"
                     Content="Send"
                     Command="{Binding SendInputCommand}"
-                    IsDefault="True"/>
+                    IsDefault="True"
+                    ToolTip.Tip="Send the typed line to the server's stdin (Enter also sends). Available only while the server is Running."/>
         </Grid>
 
     </Grid>

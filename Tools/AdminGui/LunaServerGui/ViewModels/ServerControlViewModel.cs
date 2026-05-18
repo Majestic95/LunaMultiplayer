@@ -9,11 +9,12 @@ using LunaServerGui.Services;
 
 namespace LunaServerGui.ViewModels;
 
-public sealed partial class ServerControlViewModel : ViewModelBase
+public sealed partial class ServerControlViewModel : ViewModelBase, IDisposable
 {
     private const int MaxLogLines = 5000;
 
     private readonly ServerProcessService _service;
+    private bool _disposed;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(StartCommand))]
@@ -120,5 +121,23 @@ public sealed partial class ServerControlViewModel : ViewModelBase
             while (LogLines.Count > MaxLogLines)
                 LogLines.RemoveAt(0);
         });
+    }
+
+    /// <summary>
+    /// Unsubscribe from all <see cref="ServerProcessService"/> events so a
+    /// late Exited / OutputLineReceived from a worker Task continuation
+    /// after MainWindow shutdown doesn't fire into a torn-down dispatcher.
+    /// Visual-audit catch: ServerControlViewModel was the only VM
+    /// subscribing without IDisposable; on fast-close-during-shutdown a
+    /// race could leave the late event scheduled against a dead UI thread.
+    /// </summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _service.StateChanged -= OnStateChanged;
+        _service.OutputLineReceived -= OnOutputLine;
+        _service.ErrorLineReceived -= OnErrorLine;
+        _service.Exited -= OnExited;
     }
 }

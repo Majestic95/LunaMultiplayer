@@ -1,4 +1,7 @@
 using System;
+using System.Collections.Generic;
+using Avalonia;
+using Avalonia.Styling;
 using CommunityToolkit.Mvvm.ComponentModel;
 using LunaServerGui.Models;
 using LunaServerGui.Services;
@@ -25,6 +28,27 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
     /// did not take effect.
     /// </summary>
     [ObservableProperty] private string? _closeBlockedMessage;
+
+    /// <summary>
+    /// Theme dropdown options. Light is the startup default (matches the
+    /// brightening direction); Dark covers operators running Windows dark
+    /// mode at night; System follows the OS preference. Session-scoped —
+    /// persistence to %APPDATA% is deferred to slice 1E polish.
+    /// </summary>
+    public IReadOnlyList<string> ThemeChoices { get; } = new[] { "Light", "Dark", "System" };
+
+    [ObservableProperty] private string _selectedTheme = "Light";
+
+    partial void OnSelectedThemeChanged(string value)
+    {
+        if (Application.Current is null) return;
+        Application.Current.RequestedThemeVariant = value switch
+        {
+            "Dark" => ThemeVariant.Dark,
+            "Light" => ThemeVariant.Light,
+            _ => ThemeVariant.Default,
+        };
+    }
 
     public MainWindowViewModel()
     {
@@ -97,9 +121,13 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        // Connections subscribes to _processService.OutputLineReceived;
-        // detach BEFORE disposing the service so the unsubscribe lands
-        // cleanly on the still-live event source.
+        // BOTH ServerControl and Connections subscribe to
+        // _processService events; detach BOTH before disposing the
+        // service so a late Exited / OutputLineReceived from a worker
+        // continuation doesn't fire into torn-down dispatcher state
+        // (visual-audit BUG: ServerControlViewModel previously never
+        // unsubscribed, racing with fast-close shutdown).
+        ServerControl.Dispose();
         Connections.Dispose();
         _processService.Dispose();
     }
