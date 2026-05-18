@@ -70,6 +70,67 @@
                 </StackPanel>
             </HeaderedContentControl>
 
+            <!-- ====== Per-agency career (Stage 5.18d) ====== -->
+            <HeaderedContentControl>
+                <HeaderedContentControl.Header>
+                    <TextBlock Text="Per-agency career (Stage 5.18d)" FontWeight="SemiBold" FontSize="14"/>
+                </HeaderedContentControl.Header>
+                <StackPanel Spacing="12" Margin="0,4,0,0">
+
+                    <TextBlock TextWrapping="Wrap" FontSize="11" Opacity="0.7"
+                               Text="These commands require PerAgencyCareer=true in GameplaySettings.xml. The server rejects them otherwise; rejections appear in the Console tab."/>
+
+                    <!-- List agencies -->
+                    <Button Content="List agencies" Command="{Binding ListAgenciesCommand}"/>
+
+                    <!-- Set agency funds/science/reputation -->
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Set agency scalar (funds / science / reputation)" FontWeight="SemiBold"/>
+                        <Grid ColumnDefinitions="140,*,*,Auto" ColumnSpacing="8">
+                            <ComboBox Grid.Column="0"
+                                      ItemsSource="{Binding SetAgencyScalarOptions}"
+                                      SelectedItem="{Binding SetAgencyScalar, Mode=TwoWay}"
+                                      MinWidth="120"/>
+                            <TextBox Grid.Column="1"
+                                     Text="{Binding SetAgencyToken, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PlaceholderText="agency-id or owner name"/>
+                            <TextBox Grid.Column="2"
+                                     Text="{Binding SetAgencyAmount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PlaceholderText="amount (e.g. 25000.5)"/>
+                            <Button Grid.Column="3" Content="Set" Command="{Binding SetAgencyCommand}" MinWidth="80"/>
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Transfer agency -->
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Transfer agency ownership" FontWeight="SemiBold"/>
+                        <Grid ColumnDefinitions="*,*,Auto" ColumnSpacing="8">
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding TransferAgencyToken, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PlaceholderText="source agency-id or owner"/>
+                            <TextBox Grid.Column="1"
+                                     Text="{Binding TransferAgencyNewOwner, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PlaceholderText="new player handle"/>
+                            <Button Grid.Column="2" Content="Transfer" Command="{Binding TransferAgencyCommand}" MinWidth="80"/>
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Delete agency (destructive) -->
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Delete agency (DESTRUCTIVE — vessels demoted to Unassigned)" FontWeight="SemiBold"/>
+                        <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding DeleteAgencyToken, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     PlaceholderText="agency-id or owner"/>
+                            <Button Grid.Column="1" Content="Delete" Command="{Binding DeleteAgencyCommand}" MinWidth="80"
+                                    Background="{DynamicResource SystemControlForegroundCriticalBrush}"
+                                    Foreground="White"/>
+                        </Grid>
+                    </StackPanel>
+
+                </StackPanel>
+            </HeaderedContentControl>
+
             <!-- ====== Maintenance ====== -->
             <HeaderedContentControl>
                 <HeaderedContentControl.Header>

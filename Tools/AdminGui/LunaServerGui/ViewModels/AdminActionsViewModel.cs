@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -30,7 +32,46 @@ public sealed partial class AdminActionsViewModel : ViewModelBase
     [NotifyCanExecuteChangedFor(nameof(ConnectionStatsCommand))]
     [NotifyCanExecuteChangedFor(nameof(BackupNowCommand))]
     [NotifyCanExecuteChangedFor(nameof(RestartServerCommand))]
+    [NotifyCanExecuteChangedFor(nameof(ListAgenciesCommand))]
+    [NotifyCanExecuteChangedFor(nameof(SetAgencyCommand))]
+    [NotifyCanExecuteChangedFor(nameof(TransferAgencyCommand))]
+    [NotifyCanExecuteChangedFor(nameof(DeleteAgencyCommand))]
     private ProcessState _state = ProcessState.Stopped;
+
+    // ===== Stage 5.18d agency-command inputs =====
+
+    /// <summary>
+    /// Subcommand for /setagency. Bound to a ComboBox of three choices —
+    /// matches the server-side <c>SetAgencyCommandParser</c> grammar
+    /// (funds | science | reputation). The "rep" alias is supported by
+    /// the server but the GUI uses the canonical spelling.
+    /// </summary>
+    public IReadOnlyList<string> SetAgencyScalarOptions { get; } =
+        new[] { "funds", "science", "reputation" };
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SetAgencyCommand))]
+    private string _setAgencyScalar = "funds";
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SetAgencyCommand))]
+    private string _setAgencyToken = string.Empty;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SetAgencyCommand))]
+    private string _setAgencyAmount = string.Empty;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(TransferAgencyCommand))]
+    private string _transferAgencyToken = string.Empty;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(TransferAgencyCommand))]
+    private string _transferAgencyNewOwner = string.Empty;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(DeleteAgencyCommand))]
+    private string _deleteAgencyToken = string.Empty;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(BroadcastCommand))]
@@ -138,6 +179,94 @@ public sealed partial class AdminActionsViewModel : ViewModelBase
 
     [RelayCommand(CanExecute = nameof(IsServerRunning))]
     private Task BackupNowAsync() => SendAsync("/backup now", "Sent /backup now — flush starting.");
+
+    // ===== Stage 5.18d agency commands =====
+
+    [RelayCommand(CanExecute = nameof(IsServerRunning))]
+    private Task ListAgenciesAsync() =>
+        SendAsync("/listagencies", "Sent /listagencies — see Console tab for the tagged key=value rows.");
+
+    [RelayCommand(CanExecute = nameof(CanSetAgency))]
+    private async Task SetAgencyAsync()
+    {
+        // Server's SetAgencyCommandParser uses InvariantCulture; mirror that
+        // here so operators on de-DE / fr-FR who type "25000.5" don't get
+        // their amount silently re-interpreted.
+        if (!double.TryParse(SetAgencyAmount, NumberStyles.Float, CultureInfo.InvariantCulture, out var amount))
+        {
+            StatusMessage = $"setagency: '{SetAgencyAmount}' is not a valid number. Expected invariant-culture form (e.g. 25000.5).";
+            return;
+        }
+        var amountStr = amount.ToString("R", CultureInfo.InvariantCulture);
+        await SendAsync(
+            $"/setagency {SetAgencyScalar} {SetAgencyToken} {amountStr}",
+            $"Sent /setagency {SetAgencyScalar} {SetAgencyToken} {amountStr} — see Console tab.");
+    }
+    private bool CanSetAgency() =>
+        IsServerRunning()
+        && !string.IsNullOrWhiteSpace(SetAgencyScalar)
+        && !string.IsNullOrWhiteSpace(SetAgencyToken)
+        && !string.IsNullOrWhiteSpace(SetAgencyAmount);
+
+    [RelayCommand(CanExecute = nameof(CanTransferAgency))]
+    private async Task TransferAgencyAsync()
+    {
+        var token = TransferAgencyToken;
+        var newOwner = TransferAgencyNewOwner;
+        if (ConfirmAsync is null)
+        {
+            StatusMessage = "Confirm UI not ready — try again in a moment.";
+            return;
+        }
+        var ok = await ConfirmAsync(
+            "Transfer agency",
+            $"Transfer ownership of agency '{token}' to player '{newOwner}'? The agency identity (AgencyId, vessels, contracts, tech, etc.) is preserved; only the LMP player handle attached to it changes. The current owner's vessel-scoped locks will be released; the new owner inherits all per-agency state on next handshake.",
+            "Transfer");
+        if (!ok) return;
+        if (!IsServerRunning())
+        {
+            StatusMessage = "Server is no longer running — transfer not sent.";
+            return;
+        }
+        await SendAsync(
+            $"/transferagency {token} {newOwner}",
+            $"Sent /transferagency {token} → {newOwner}. Audit lines and the renamed-prior-owner-mint hint appear in the Console tab.");
+    }
+    private bool CanTransferAgency() =>
+        IsServerRunning()
+        && !string.IsNullOrWhiteSpace(TransferAgencyToken)
+        && !string.IsNullOrWhiteSpace(TransferAgencyNewOwner);
+
+    [RelayCommand(CanExecute = nameof(CanDeleteAgency))]
+    private async Task DeleteAgencyAsync()
+    {
+        var token = DeleteAgencyToken;
+        if (ConfirmAsync is null)
+        {
+            StatusMessage = "Confirm UI not ready — try again in a moment.";
+            return;
+        }
+        var ok = await ConfirmAsync(
+            "Delete agency (DESTRUCTIVE)",
+            $"Delete agency '{token}'? The AgencyState file + its .bak are removed. Per-agency contracts, tech, science, reputation, funds, facility levels, and strategies are LOST — there is no undo. Vessels stamped with this agency are demoted to the Unassigned sentinel (they survive as Unassigned, NOT deleted). The prior owner mints a fresh agency on next reconnect.",
+            "Delete (--confirm)");
+        if (!ok) return;
+        if (!IsServerRunning())
+        {
+            StatusMessage = "Server is no longer running — delete not sent.";
+            return;
+        }
+        // The server REQUIRES the --confirm flag — per
+        // DeleteAgencyCommandParser, without it the command prints a usage
+        // banner and refuses. The GUI's modal Confirm dialog above IS the
+        // operator-facing confirmation; we always append the flag here
+        // because the operator already confirmed.
+        await SendAsync(
+            $"/deleteagency {token} --confirm",
+            $"Sent /deleteagency {token} --confirm. Audit lines (vessel demotion broadcasts, lock releases) appear in the Console tab.");
+    }
+    private bool CanDeleteAgency() =>
+        IsServerRunning() && !string.IsNullOrWhiteSpace(DeleteAgencyToken);
 
     [RelayCommand(CanExecute = nameof(IsServerRunning))]
     private async Task RestartServerAsync()
