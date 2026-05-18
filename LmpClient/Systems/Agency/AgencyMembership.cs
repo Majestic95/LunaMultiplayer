@@ -95,21 +95,18 @@ namespace LmpClient.Systems.Agency
         /// <paramref name="incoming"/> is Empty, insert ONLY when no prior
         /// entry exists; never replace an existing real id with Empty.</para>
         ///
-        /// <para><b>Future evolution (Stage 5.18d).</b> The next consumer needs
-        /// a sibling helper that BYPASSES this preservation rule for two
-        /// authoritative server-pushed mutations. Recommended shape:
-        /// <c>public static void ForceRecordOwnership(registry, vesselId,
-        /// authoritativeAgencyId)</c> = unconditional indexer write, with XML
-        /// pointing back here for the rationale. Both cases below need it:</para>
+        /// <para><b>Bypass helper for authoritative writes.</b> Stage 5.18d ships
+        /// <see cref="ForceRecordOwnership"/> for the two server-pushed mutations
+        /// listed below. Use the bypass when the inbound value comes from an
+        /// authoritative path (admin command echo, dedicated visibility push)
+        /// — not from the relay path. The bypass is required because the
+        /// preservation rule in this method drops legitimate demotions to
+        /// Unassigned (transferagency-to-sentinel, deleteagency cascade), and
+        /// it would silently absorb transfer-X→Y pushes that happen to encode
+        /// the new value as Empty for any reason.</para>
         ///
-        /// <para><b>Cases that need the bypass helper:</b>
+        /// <para><b>Cases that route through <see cref="ForceRecordOwnership"/>:</b>
         /// <list type="bullet">
-        /// <list type="bullet">
-        ///   <item><b>Demote to Unassigned:</b> if a future operator-facing flow
-        ///         adds a "remove agency claim" path (none today — the planned
-        ///         5.18d <c>deleteagency --confirm</c> reassigns to a sentinel
-        ///         "Abandoned" agency, not Empty), this preservation rule must
-        ///         be revisited in lockstep.</item>
         ///   <item><b>Transfer X → Y mid-session:</b> 5.18d <c>transferagency</c>
         ///         updates server-side <c>Vessel.OwningAgencyId</c> from agency
         ///         X to agency Y in the canonical store, but mid-session
@@ -117,9 +114,16 @@ namespace LmpClient.Systems.Agency
         ///         which strips <c>lmpOwningAgency</c> on every owner resend,
         ///         so peers keep seeing the stale prior value (X) until the
         ///         next VesselSync (i.e., reconnect or scene change). 5.18c
-        ///         <c>AgencyVisibilityMsgData</c> is the intended remedy, with
-        ///         an explicit "ownership changed" push that bypasses this
-        ///         preservation rule and forces the new value through.</item>
+        ///         <c>AgencyVisibilityMsgData</c> is the explicit "ownership
+        ///         changed" push that bypasses this preservation rule and
+        ///         forces the new value through.</item>
+        ///   <item><b>Demote to Unassigned:</b> 5.18d <c>deleteagency --confirm</c>
+        ///         removes a registered agency; the cascade reassigns its
+        ///         vessels to <see cref="Guid.Empty"/> (the Unassigned-vessel
+        ///         sentinel per spec §10 Q3) on both server and clients. The
+        ///         visibility push carries Empty as the authoritative value
+        ///         and must overwrite — preservation here would leave peer
+        ///         clients seeing a stale "owned by deleted agency" stamp.</item>
         /// </list></para>
         /// </summary>
         public static void RecordOwnership(ConcurrentDictionary<Guid, Guid> registry, Guid vesselId, Guid incoming)
@@ -142,6 +146,41 @@ namespace LmpClient.Systems.Agency
                 // relay-safety contract).
                 registry.TryAdd(vesselId, Guid.Empty);
             }
+        }
+
+        /// <summary>
+        /// Authoritative-write companion to <see cref="RecordOwnership"/>. Stage
+        /// 5.18d. Unconditionally records <paramref name="authoritativeAgencyId"/>
+        /// for <paramref name="vesselId"/>, BYPASSING the relay-safety preservation
+        /// rule that <see cref="RecordOwnership"/> enforces. Callers must only
+        /// route values from authoritative paths through this helper — never the
+        /// relay path. See <see cref="RecordOwnership"/>'s XML for the list of
+        /// authoritative paths (Stage 5.18d <c>transferagency</c> and
+        /// <c>deleteagency</c> cascade via the 5.18c
+        /// <c>AgencyVisibilityMsgData</c> push).
+        ///
+        /// <para><b>Why a separate method, not a flag on <see cref="RecordOwnership"/>.</b>
+        /// The two paths have different correctness contracts and different
+        /// failure modes. Putting them on one method behind a <c>bool force</c>
+        /// flag makes it trivially easy for a future caller to pass <c>true</c>
+        /// from a relay-path site (the wrong place), silently corrupting peer
+        /// registries with relay-stripped Empty values. Two named methods make
+        /// the choice explicit and grep-friendly; reviewers can verify each call
+        /// site routes through the correct one.</para>
+        ///
+        /// <para><b>Demote semantics.</b> Passing <see cref="Guid.Empty"/> is a
+        /// legitimate authoritative demotion (the deleteagency cascade pushes
+        /// Empty as the new owner). The bypass is required precisely so this
+        /// demotion lands; <see cref="RecordOwnership"/>'s preservation rule
+        /// would silently absorb it.</para>
+        /// </summary>
+        public static void ForceRecordOwnership(ConcurrentDictionary<Guid, Guid> registry, Guid vesselId, Guid authoritativeAgencyId)
+        {
+            if (registry == null) return;
+            // Unconditional write — caller has asserted this is authoritative.
+            // No Empty-input preservation, no prior-value check. Indexer is
+            // ConcurrentDictionary's atomic upsert; safe under contention.
+            registry[vesselId] = authoritativeAgencyId;
         }
     }
 }

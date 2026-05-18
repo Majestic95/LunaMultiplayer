@@ -165,7 +165,7 @@ namespace LmpClient.Systems.Agency
         ///         Agency" until 5.18c's incremental visibility wire arrives.</item>
         /// </list></para>
         ///
-        /// <para><b>Relay-safety.</b> Writes go through
+        /// <para><b>Relay-safety.</b> Writes from the relay path go through
         /// <see cref="AgencyMembership.RecordOwnership"/>, which preserves a known
         /// real agency id when an incoming wire payload has no
         /// <c>lmpOwningAgency</c> field (parses to <see cref="Guid.Empty"/>). This
@@ -179,6 +179,17 @@ namespace LmpClient.Systems.Agency
         /// guards the subsequent steady state. See
         /// <c>Server/Message/VesselMsgReader.cs:188-198</c> for the server-side
         /// relay-vs-store contract this mirror honours.</para>
+        ///
+        /// <para><b>Authoritative-write path (Stage 5.18d).</b> Server-pushed
+        /// mutations — the <c>AgencyVisibilityMsgData</c> handler for
+        /// <c>transferagency</c> X→Y and <c>deleteagency</c> cascade-to-Unassigned
+        /// — MUST route through <see cref="AgencyMembership.ForceRecordOwnership"/>
+        /// instead of <see cref="AgencyMembership.RecordOwnership"/>. The Force
+        /// helper bypasses the preservation rule above so a legitimate authoritative
+        /// demotion to <see cref="Guid.Empty"/> actually lands (otherwise the
+        /// preservation rule would silently absorb the demotion and leave peers
+        /// seeing a stale "owned by deleted agency" stamp). See that method's XML
+        /// for the full call-site routing rules.</para>
         ///
         /// <para><b>Thread.</b> Populated from the Unity-thread vessel-proto drain
         /// (<see cref="VesselProtoSys.VesselProtoSystem"/>'s <c>CheckVesselsToLoad</c>

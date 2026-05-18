@@ -245,5 +245,120 @@ namespace LmpClientTest
             AgencyMembership.RecordOwnership(null, Guid.NewGuid(), Guid.NewGuid());
             // No assertion needed — passing without exception is the contract.
         }
+
+        // --- ForceRecordOwnership — Stage 5.18d authoritative-write bypass ---
+        //
+        // Companion to RecordOwnership. Bypasses the relay-safety preservation rule
+        // for authoritative server-pushed mutations (transferagency X→Y push;
+        // deleteagency cascade demoting vessels to Unassigned). Callers MUST route
+        // only authoritative values through this method — never relay-path values
+        // — or peer registries will be corrupted by relay-stripped Empty values
+        // overwriting real agency ids. The choice between RecordOwnership and
+        // ForceRecordOwnership is an explicit call-site decision; these cases pin
+        // the differentiated behaviour.
+
+        [TestMethod]
+        public void ForceRecordOwnership_NonEmpty_NoPrior_Inserts()
+        {
+            // Common authoritative path: 5.18c AgencyVisibilityMsgData arrives for
+            // a vessel the client hasn't seen yet. Force-insert; same outcome as
+            // RecordOwnership for this case.
+            var registry = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var agencyId = Guid.NewGuid();
+
+            AgencyMembership.ForceRecordOwnership(registry, vesselId, agencyId);
+
+            Assert.IsTrue(registry.TryGetValue(vesselId, out var stored));
+            Assert.AreEqual(agencyId, stored);
+        }
+
+        [TestMethod]
+        public void ForceRecordOwnership_NonEmpty_OverwritesPriorReal()
+        {
+            // Transferagency X→Y mid-session: authoritative server push of the new
+            // owner Y replaces the prior owner X in the local registry. Indexer
+            // semantics handle the upsert.
+            var registry = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var oldAgency = Guid.NewGuid();
+            var newAgency = Guid.NewGuid();
+            registry[vesselId] = oldAgency;
+
+            AgencyMembership.ForceRecordOwnership(registry, vesselId, newAgency);
+
+            Assert.AreEqual(newAgency, registry[vesselId]);
+        }
+
+        [TestMethod]
+        public void ForceRecordOwnership_Empty_DowngradesPriorReal()
+        {
+            // THE BYPASS — differentiates ForceRecordOwnership from RecordOwnership.
+            // Deleteagency cascade: the deleted agency's vessels are authoritatively
+            // demoted to Guid.Empty (Unassigned sentinel) on the server, and the
+            // 5.18c AgencyVisibilityMsgData push carries Empty as the new owner.
+            // The peer client's registry MUST update — RecordOwnership's
+            // preservation rule would absorb this write and leave the stale
+            // "owned by deleted agency" stamp in place. ForceRecordOwnership
+            // exists precisely to make this demotion land.
+            var registry = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var realAgency = Guid.NewGuid();
+            registry[vesselId] = realAgency;
+
+            AgencyMembership.ForceRecordOwnership(registry, vesselId, Guid.Empty);
+
+            Assert.AreEqual(Guid.Empty, registry[vesselId],
+                "ForceRecordOwnership MUST overwrite a prior real agency id with Empty " +
+                "(authoritative demotion to Unassigned — deleteagency cascade).");
+        }
+
+        [TestMethod]
+        public void ForceRecordOwnership_Empty_NoPrior_InsertsEmpty()
+        {
+            // Authoritative push for a vessel the client hasn't seen yet, carrying
+            // Empty as the canonical state (e.g. a freshly-spawned Unassigned vessel
+            // announced via a future visibility push). Same outcome as
+            // RecordOwnership for this case; included for symmetry.
+            var registry = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+
+            AgencyMembership.ForceRecordOwnership(registry, vesselId, Guid.Empty);
+
+            Assert.IsTrue(registry.TryGetValue(vesselId, out var stored));
+            Assert.AreEqual(Guid.Empty, stored);
+        }
+
+        [TestMethod]
+        public void ForceRecordOwnership_NullRegistry_NoThrow()
+        {
+            // Symmetric defensive contract with RecordOwnership. The 5.18d call
+            // sites (AgencyVisibilityMsgData handler) will use
+            // AgencySystem.Singleton?.VesselOwnership; the helper tolerates the
+            // null so the call site stays a one-liner.
+            AgencyMembership.ForceRecordOwnership(null, Guid.NewGuid(), Guid.NewGuid());
+        }
+
+        [TestMethod]
+        public void ForceRecordOwnership_Idempotent_WhenSameValueWrittenTwice()
+        {
+            // Transferagency / deleteagency visibility pushes may be redelivered
+            // after a transient disconnect (the 5.18d catch-up flow ships a full
+            // ownership snapshot on reconnect). Repeated ForceRecordOwnership
+            // with the same value MUST be a no-op — same final state, no spurious
+            // change-signal that a future event-emitting refactor could leak.
+            // Pinning this here forecloses such a refactor breaking the contract
+            // silently.
+            var registry = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var agencyId = Guid.NewGuid();
+
+            AgencyMembership.ForceRecordOwnership(registry, vesselId, agencyId);
+            AgencyMembership.ForceRecordOwnership(registry, vesselId, agencyId);
+            AgencyMembership.ForceRecordOwnership(registry, vesselId, agencyId);
+
+            Assert.AreEqual(1, registry.Count, "no extra entries materialised");
+            Assert.AreEqual(agencyId, registry[vesselId]);
+        }
     }
 }
