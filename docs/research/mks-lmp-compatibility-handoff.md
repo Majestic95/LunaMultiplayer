@@ -1,6 +1,6 @@
 # MKS × Luna Multiplayer — full implementation handoff
 
-**Document version:** 3.0 (complete rewrite, 2026-05-18)  
+**Document version:** 3.1 (LMP-side §10 audit corrections applied, 2026-05-18)  
 **Companion:** visual summary in Cursor — `canvases/mks-lmp-compatibility.canvas.tsx` (same machine; open beside this file).
 
 **Scope:** MKS, USITools, Community Resource Pack (CRP) vs Luna Multiplayer on `feature/per-agency`. **Out of scope:** USI-LS and other USI suite mods until this track is green.
@@ -15,7 +15,7 @@ Vanilla LMP + MKS + USITools + CRP **installs and runs**; it is **not playable**
 
 **Effort (revised after audit):** **Playable co-op** ≈ Phases 0–3 — **10–12 weeks** one strong LMP contributor. **Fully compatible** ≈ Phases 0–5 — **4–5 months**.
 
-**Second-pass audit (12 items, single line each):** (1) R0 fix must filter **depot** vessels, not gate on consumer. (2) Orbital `ModuleLogisticsConsumer` calls are a **documented non-issue** (`!LandedOrSplashed`). (3) Phase 0 must use **MandatoryPlugins** + no optional plugin bypass or SHA never applies. (4) Treat **unclaimed Update lock** as skip in MP, not solo. (5) ShareKolony send path must respect **ScenarioSystem** main-thread save vs **TaskFactory** send. (6) Allocate **Lidgren channels** from current `MessageChannelType` after Stage 5.18d (e.g. AgencyVisibility / `eb4ef6e2`). (7) **KolonizationManager** lifecycle unverified—read file before Phase 3. (8) **WOLF GetNewFlightNumber** implementation unverified—read `ScenarioPersister.cs` before Phase 4 / upstream PR. (9) Phase 1.5 acceptance must include **Update lock handoff** and `lastUT`/`lastCheck` interaction. (10) CRP **localization** is optional Phase 0 check. (11) Phase 3 effort **~2×** original (closer to contract/R&D routing complexity than trivial Share*). (12) **Rebase discipline** against moving `feature/per-agency` (audit tip `67b0e01c` vs later head e.g. `b50860e6`); branch from **current** `feature/per-agency` after pull.
+**Second-pass audit (12 items, single line each):** (1) R0 fix must filter **depot** vessels, not gate on consumer. (2) Orbital `ModuleLogisticsConsumer` calls are a **documented non-issue** (`!LandedOrSplashed`). (3) Phase 0 must use **MandatoryPlugins** + no optional plugin bypass or SHA never applies. (4) Treat **unclaimed Update lock** as skip in MP, not solo. (5) ShareKolony send path must respect **ScenarioSystem** main-thread save vs **TaskFactory** send. (6) Allocate **Lidgren channels** by grepping `DefaultChannel =>` literals across `LmpCommon/Message/Server/*SrvMsg.cs` / `Client/*CliMsg.cs` — **no central `MessageChannelType.cs` exists** (audit correction, v3.1). High-water at base SHA `8f609963`: server **22**, client **21**; `AgencyVisibilityMsgData` already shipped at this base (`AgencySrvMsg.cs:50`) so the original `eb4ef6e2` coordination flag is moot — only watch for further in-flight 5.18d slots. (7) **KolonizationManager** lifecycle unverified—read file before Phase 3. (8) **WOLF GetNewFlightNumber** implementation unverified—read `ScenarioPersister.cs` before Phase 4 / upstream PR. (9) Phase 1.5 acceptance must include **Update lock handoff** and `lastUT`/`lastCheck` interaction. (10) CRP **localization** is optional Phase 0 check. (11) Phase 3 effort **~2×** original (closer to contract/R&D routing complexity than trivial Share*). (12) **Rebase discipline** against moving `feature/per-agency` (audit tip `67b0e01c` vs later head e.g. `b50860e6`); branch from **current** `feature/per-agency` after pull.
 
 ---
 
@@ -56,7 +56,7 @@ Remote branch tips move; **record SHAs in §15** when you begin implementation.
 
 | Mechanism | Path | MKS relevance |
 |-----------|------|----------------|
-| **PartSync (ModuleStore)** | `LmpClient/ModuleStore/FieldModuleStore.cs`, `Patching/PartModulePatcher.cs` | XML lists `PartModule` fields/methods; Harmony patches `OnUpdate` / `OnFixedUpdate` / `KSPEvent` / `KSPAction`. **Parent XML propagates to subclasses** (`AddParentsCustomizations` / `GetChildCustomizations`). **`Squad/BaseConverter.xml` applies to `USI_Converter` and stock converter descendants** — most converter fields covered without new XML. |
+| **PartSync (ModuleStore)** | `LmpClient/ModuleStore/FieldModuleStore.cs`, `Patching/PartModulePatcher.cs` | XML lists `PartModule` fields/methods; Harmony patches **`OnUpdate` / `OnFixedUpdate` / `FixedUpdate` / `Update` / `LateUpdate` / `KSPAction` / `KSPEvent` (guiActive filter)** (`PartModulePatcher.cs:38-40` — audit correction v3.1, surface is wider than MD originally claimed). **Parent XML propagates to subclasses** (`AddParentsCustomizations` / `GetChildCustomizations` — `FieldModuleStore.cs:79-96` direct-child, `103-113` parent recursive). **GAP — child propagation is one level only:** `Squad/BaseConverter.xml` does NOT auto-cover `USI_Converter` because `USI_Converter` extends `ModuleResourceConverter` (a grand-child of `BaseConverter`), and no `ModuleResourceConverter.xml` bridge exists in tree. Phase 1 must author this bridge before any USI converter fields will sync. |
 | **ScenarioSystem** | `LmpClient/Systems/Scenario/ScenarioSystem.cs`, `LmpCommon/IgnoredScenarios.cs` | ~30 s SHA delta on scenario text; **last-writer-wins** across peers. **`Save`/main thread vs send often offloaded** — see Phase 3. |
 | **VesselResourceSystem** | `LmpClient/Systems/VesselResourceSys/` | ~2.5 s proto resource sync for **active** vessel; defines interaction with cross-vessel mutations (R0). |
 | **VesselProtoSys** | `LmpClient/Systems/VesselProtoSys/` | Full vessel `ConfigNode` sync; thread/async concerns; budget for expensive reloads. |
@@ -163,11 +163,14 @@ Remote branch tips move; **record SHAs in §15** when you begin implementation.
 
 ---
 
-### Phase 1 — PartSync XML (~3–5 days)
+### Phase 1 — PartSync XML (~6–8 days, revised v3.1)
 
-**Do:** Add XML under `LmpClient/ModuleStore/XML/` (e.g. `USI/` subtree) for **non-inherited** fields: `MKSModule` (`Governor`, etc.), swap selection, warehouses toggles, logistics `lastCheck` (if still useful after 1.5), orbital logistics events, lodes, **Verify in log** that `USI_Converter` receives parent `BaseConverter` patches.
+**Do:**
 
-**Accept:** Remote player sees toggles / governor / recipe within ~1 s; log shows PartSync field events.
+1. **Author `LmpClient/ModuleStore/XML/Squad/ModuleResourceConverter.xml`** (or equivalent per-USI-type XML) to bridge the `BaseConverter` → `ModuleResourceConverter` → `USI_Converter` inheritance gap. **Single-level propagation from `BaseConverter.xml` does NOT reach grand-children** (audit v3.1, see §4) — without this bridge, no converter fields sync at all. This was the load-bearing surprise from the v3.1 LMP-side audit; original MD assumed inheritance covered USI converters for free.
+2. Add XML under `LmpClient/ModuleStore/XML/USI/` for **non-inherited** fields: `MKSModule` (`Governor`, etc.), swap selection, warehouses toggles, logistics `lastCheck` (if still useful after 1.5), orbital logistics events, lodes.
+
+**Accept:** Remote player sees toggles / governor / recipe within ~1 s; log shows PartSync field events; **converter recipe and state changes propagate across clients** (this is the real validation that the bridge XML works — original "verify in log that USI_Converter receives BaseConverter patches" was checking for something that fails by default).
 
 ---
 
@@ -194,7 +197,7 @@ Remote branch tips move; **record SHAs in §15** when you begin implementation.
 1. `IgnoredScenarios` for kolony / logistics / WOLF scenarios targeted by this phase (exact list = product decision: kolony + planetary + orbital minimum; WOLF may move to Phase 4 only—avoid double work).
 2. Message types + client handler + **server** persistence + reconnect catch-up.
 3. **Threading:** mutation hooks (Harmony postfixes on e.g. `TrackLogEntry`) run on **main thread**; **do not** call raw send from postfixed code if `ScenarioSystem` uses **async send** — use a **queue drained on a safe thread** with locking pattern analogous to **`VesselProtoMessageSender` / `VesselArraySyncLock`**.
-4. **Channels:** inspect **`LmpCommon/Message/Types/MessageChannelType.cs`** (and message factory) on **current** branch; pick unused IDs; verify against Stage 5.18d additions (e.g. agency visibility / commit `eb4ef6e2`).
+4. **Channels:** **no central `MessageChannelType.cs` exists** (audit correction, v3.1) — grep `DefaultChannel =>` across `LmpCommon/Message/Server/*SrvMsg.cs` and `Client/*CliMsg.cs` (~22 files each direction) to enumerate allocations. At base SHA `8f609963` high-water marks are server **22** / client **21**; pick unused IDs above those and re-check against any in-flight 5.18d slots before allocation.
 
 **Accept:** Concurrent orbital/planetary ops without 30 s clobber; reconnect loads consistent state; stress test 30+ minutes two-client.
 
@@ -241,11 +244,11 @@ Stage 5 **agency projection and routing** is the template for kolony scenario ow
 4. `LmpClient/Systems/VesselResourceSys/` (sender + apply path)
 5. `LmpClient/Systems/VesselProtoSys/VesselProtoMessageSender.cs` (locking / thread offload)
 6. `LmpClient/Systems/Lock/*`
-7. `Server/System/Agency/AgencyScenarioProjector.cs`, `AgencyContractRouter.cs`, `AgencyState.cs` (skim for shape, not copy-paste)
+7. `Server/System/Agency/` — 7 templates total (skim for shape, not copy-paste): `AgencyScenarioProjector.cs`, `AgencyContractRouter.cs`, `AgencyState.cs`, plus the four Stage 5.17e band-1 routers (`AgencyCurrencyRouter.cs`, `AgencyTechRouter.cs`, `AgencyResearchRouter.cs`, `AgencyProgressRouter.cs`) — audit v3.1 surfaced the four band-1 routers as equally applicable Phase 3 templates.
 8. USITools: `Source/USITools/Logistics/ModuleLogisticsConsumer.cs`
 9. MKS: `KolonizationManager.cs` (**prerequisite**), `KolonizationScenario.cs`, `MKSModule.cs`, `ScenarioOrbitalLogistics` / `PlanetaryLogisticsScenario` as needed
 10. WOLF: `ScenarioPersister.cs` (**prerequisite** before Phase 4)
-11. `LmpCommon/Message/Types/MessageChannelType.cs` (current branch)
+11. ~~`LmpCommon/Message/Types/MessageChannelType.cs`~~ — **file does not exist** (audit correction, v3.1). Channel IDs live as inline `DefaultChannel =>` literals in each `LmpCommon/Message/Server/*SrvMsg.cs` / `Client/*CliMsg.cs`. Grep across both directories to enumerate.
 
 ---
 
@@ -277,6 +280,7 @@ Any new **message types or channel** usage: follow repo rules for **LmpVersionin
 |------|-------|------------------------------|----------------|
 | 2026-05-18 | Research | `67b0e01c` (doc); re-audit head ref `b50360e6` | Handoff v3.0 published |
 | 2026-05-18 | Branch created | `8f609963` (Stage 5.18d slice g — `/deleteagency --confirm`) | `feature/per-agency-mks` created as label only (no checkout) off local `feature/per-agency`. Local-only — not pushed. Protocol at `v0.31.0-per-agency-private-1`. Stage 5.18d still in flight on parent branch; Phases 0/1/1.5/2 cleared to start; Phases 3/4 should wait for 5.18d to land or coordinate per §6 / §7 (wire enum slots, `IgnoredScenarios`, `Server/System/Agency/*` shape, `LmpVersioning`). |
+| 2026-05-18 | Audit (LMP side) | `8f609963` | LMP-side §10 audit pass (items 2-7 + 11) by subagent against `F:\luna-multiplayer-mks`. **1 design correction** (USI_Converter inheritance gap → Phase 1 expanded from 3-5d to 6-8d, must author `ModuleResourceConverter.xml` bridge). **3 fact corrections** (phantom `MessageChannelType.cs` removed, `AgencyVisibilityMsgData` already shipped at this base, `PartModulePatcher` patches `FixedUpdate`/`Update`/`LateUpdate` too). **2 bonus discoveries** (4 additional Agency routers — `AgencyCurrencyRouter`/`Tech`/`Research`/`Progress` — as Phase 3 templates; `LockQuery.GetUpdateLockOwner` method body lives in `LmpCommon/Locks/LockQueryUpdate.cs:39`, not `LmpClient`). External clones (USITools / MKS / WOLF, §10 items 8-10) **still pending** — required prereq for R0 / Phase 3 / Phase 4 design validation. MD bumped 3.0 → 3.1. |
 | | | | |
 
 ---
