@@ -594,12 +594,14 @@ namespace Server.System.Agency
         }
 
         /// <summary>
-        /// Stage 5.17d upgrade-lens diagnostic. Pre-existing CONTRACTS / CONTRACTS_FINISHED
-        /// entries in the shared <c>ContractSystem</c> scenario under gate=on means the
-        /// scenario will ship to every connecting player at handshake; without the per-
-        /// agency <c>ContractSystem</c> projection (deferred to Stage 5.18a) every player
-        /// inherits those contracts as their own. Operator sees the warning and can
-        /// archive Universe/ before any player connects (spec §10 fresh-start-only).
+        /// Stage 5.17d upgrade-lens diagnostic, refreshed Stage 5.18d slice (j).
+        /// Pre-existing CONTRACTS / CONTRACTS_FINISHED entries in the shared
+        /// <c>ContractSystem</c> scenario under gate=on are STRIPPED by
+        /// <see cref="AgencyScenarioProjector.SpliceAgencyContractsIntoScenario"/>
+        /// on first per-agency client connect — what KSP saved as "the shared
+        /// contract state" becomes invisible to per-agency clients. Operator
+        /// sees the warning and can archive <c>Universe/</c> before any player
+        /// connects (spec §10 fresh-start-only) to avoid the strip.
         /// </summary>
         private static void WarnAboutSharedContractsOnUpgrade()
         {
@@ -611,7 +613,7 @@ namespace Server.System.Agency
             if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("ContractSystem", out var scenario))
                 return;
 
-            int active = 0, finished = 0;
+            int nonShared = 0, finished = 0;
             // Same per-scenario lock the projector uses to read; under boot there are
             // no concurrent writers but the guard is symmetric.
             lock (Scenario.ScenarioDataUpdater.GetSemaphore("ContractSystem"))
@@ -622,10 +624,14 @@ namespace Server.System.Agency
                     foreach (var c in activeNode.GetNodes("CONTRACT"))
                     {
                         var st = c.Value.GetValue("state")?.Value ?? string.Empty;
-                        // Pre-existing Offered entries are expected (the shared pool is
-                        // designed to carry them); only flag in-progress / completed.
-                        if (st != "Offered" && st != "Generated" && st != string.Empty)
-                            active++;
+                        // Slice (j) projector strips EVERYTHING in CONTRACTS that
+                        // isn't Offered or Generated. Server-systems-review v1
+                        // SS-1: empty-state entries are stripped too, so we
+                        // count them here as well (the prior implementation
+                        // excluded them, which silently undercounted the strip
+                        // total).
+                        if (st != "Offered" && st != "Generated")
+                            nonShared++;
                     }
                 }
                 var finishedNode = scenario.GetNode("CONTRACTS_FINISHED")?.Value;
@@ -633,19 +639,22 @@ namespace Server.System.Agency
                     finished = finishedNode.GetNodes("CONTRACT").Count();
             }
 
-            if (active == 0 && finished == 0)
+            if (nonShared == 0 && finished == 0)
                 return;
 
             LunaLog.Warning(
                 "[fix:per-agency-career] PerAgencyCareer=true on an upgrade universe carries " +
-                $"shared-agency contract state: {active} non-Offered entry/entries in CONTRACTS + " +
-                $"{finished} entry/entries in CONTRACTS_FINISHED. Per-agency clients (Stage 5.18a) " +
-                "do NOT yet receive a projected ContractSystem scenario, so each connecting player " +
-                "would inherit these contracts as their own agency's work — completing them would " +
-                "credit duplicate rewards through the Share*Funds path. Spec §10 migration is " +
-                "fresh-start-only: stop the server, archive Universe/ before any player connects, " +
-                "and start fresh. If accepted as-is, the duplication risk persists until 5.18a's " +
-                "ContractSystem projection lands.");
+                $"shared-agency contract state: {nonShared} non-Offered/Generated entry/entries in CONTRACTS + " +
+                $"{finished} entry/entries in CONTRACTS_FINISHED. Stage 5.18d slice (j) projects the " +
+                "ContractSystem scenario per-agency on first connect: shared CONTRACTS entries with " +
+                "states other than Offered/Generated and ALL CONTRACTS_FINISHED entries are STRIPPED, " +
+                "replaced with the requesting agency's own AgencyState.Contracts (empty on first connect " +
+                "for a fresh-mint agency). The shared career state above is therefore unrecoverable " +
+                "after the first per-agency client connects. Spec §10 migration is fresh-start-only: " +
+                "stop the server, archive Universe/ before any player connects, and start fresh. If " +
+                "you opt in via AllowEnablePerAgencyOnExistingUniverse=true and accept the strip, the " +
+                "state above is gone — no rollback. CONTRACTS Offered/Generated are preserved (CC's " +
+                "ContractPreLoader source).");
         }
 
         /// <summary>

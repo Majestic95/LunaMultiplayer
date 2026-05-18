@@ -74,6 +74,22 @@ namespace Server.System.Agency
             "StrategySystem",
             "ProgressTracking",
             "ScenarioUpgradeableFacilities",
+            // [Stage 5.18d slice (j)]
+            "ContractSystem",
+        };
+
+        /// <summary>
+        /// Contract states that stay in the SHARED <c>CONTRACTS</c> pool when
+        /// projecting — the rest are spliced per-agency. Mirrors
+        /// <see cref="AgencyContractRouter"/>'s <c>SharedScenarioStates</c>
+        /// (Q6 commitment a: CC's <c>ContractPreLoader</c> draws from the
+        /// shared pool's Offered + Generated entries; per-agency clients see
+        /// them as available pre-Accept).
+        /// </summary>
+        private static readonly HashSet<string> SharedContractStates = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Offered",
+            "Generated",
         };
 
         // Precompiled regexes — one per key. Re-using compiled instances across every
@@ -156,6 +172,15 @@ namespace Server.System.Agency
                     return SpliceAgencyAchievementsIntoScenario(serializedText, targetAgency);
                 case "ScenarioUpgradeableFacilities":
                     return OverrideFacilityLevelsInScenario(serializedText, targetAgency);
+                // [Stage 5.18d slice (j)] Per-agency ContractSystem projection.
+                // Keeps Offered/Generated in the shared CONTRACTS pool (CC's
+                // ContractPreLoader source); strips other shared-pool entries
+                // (pre-5.17d leftover or pre-0.31 upgrade-in-place data) and
+                // splices the requesting agency's AgencyState.Contracts.
+                // CONTRACTS_FINISHED is stripped (no per-agency Finished
+                // surface today; pre-0.31 entries would otherwise bleed).
+                case "ContractSystem":
+                    return SpliceAgencyContractsIntoScenario(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
@@ -380,6 +405,215 @@ namespace Server.System.Agency
         /// the natural optimization is a per-agency cached projection invalidated
         /// on <see cref="AgencyState.TechNodes"/> mutation.
         /// </summary>
+        /// <summary>
+        /// [Stage 5.18d slice (j)] Per-agency <c>ContractSystem</c> scenario
+        /// projection. The closing splice in the Stage 5 projector family;
+        /// makes the Stage 5.17d <c>AgencyContractRouter</c>'s per-agency
+        /// persistence observable via the scene-load scenario wire (in
+        /// addition to the existing owner-only <c>AgencyContractMsgData</c>
+        /// echo).
+        ///
+        /// <para><b>Splice rules.</b> The shared <c>ContractSystem</c>
+        /// scenario carries a <c>CONTRACTS</c> child node containing one
+        /// <c>CONTRACT</c> sub-node per active or pending contract, plus a
+        /// <c>CONTRACTS_FINISHED</c> sibling that KSP archives terminal
+        /// (Completed/Failed/etc.) entries into. Under gate=on:
+        /// <list type="bullet">
+        ///   <item><b>Keep</b> shared-pool <c>CONTRACTS</c> entries whose
+        ///         <c>state</c> is <c>Offered</c> or <c>Generated</c> —
+        ///         Contract Configurator's <c>ContractPreLoader</c> draws
+        ///         from this pool; every agency sees the same Offered/
+        ///         Generated slots and may Accept them, at which point
+        ///         <see cref="AgencyContractRouter.ApplyPerAgencyBatch"/>
+        ///         removes the slot via <c>RemoveContractFromSharedOfferedPool</c>
+        ///         + persists the post-Accept entry into
+        ///         <see cref="AgencyState.Contracts"/> instead. Q6 commitment a.</item>
+        ///   <item><b>Strip</b> shared-pool entries with any other state. In
+        ///         steady-state 5.17d these shouldn't exist (the router
+        ///         removes them on Accept); but pre-5.17d snapshots or
+        ///         upgrade-in-place universes carry stale Active/Completed/
+        ///         etc. entries that would otherwise leak to every per-
+        ///         agency client as if they belonged to that client's
+        ///         agency. Matches the operator-warned strip-on-projection
+        ///         contract of <see cref="AgencySystem.WarnAboutSharedContractsOnUpgrade"/>.</item>
+        ///   <item><b>Strip</b> ALL existing <c>CONTRACTS_FINISHED</c>
+        ///         children (the operator-warned removal of pre-0.31 shared
+        ///         Finished entries). Container stays present but empty so
+        ///         KSP-side <c>ScenarioModule.OnLoad</c> schema expectations
+        ///         remain stable; a subsequent agency-Finished splice
+        ///         repopulates it.</item>
+        ///   <item><b>Splice per-agency entries partitioned by state</b>
+        ///         (consumer-lens v1 MUST FIX). <see cref="AgencyState.Contracts"/>
+        ///         carries the full router-persisted set (Active +
+        ///         Completed / Failed / Cancelled / DeadlineExpired /
+        ///         Withdrawn). KSP's <c>ContractSystem.OnLoad</c> treats
+        ///         <c>CONTRACTS</c> entries as LIVE (they appear in Mission
+        ///         Control's Active tab); terminal entries belong in
+        ///         <c>CONTRACTS_FINISHED</c>. The router doesn't tag the
+        ///         destination — the projector partitions on read: state
+        ///         == "Active" → <c>CONTRACTS</c>; anything else (terminal,
+        ///         unknown, empty) → <c>CONTRACTS_FINISHED</c>. Each
+        ///         entry's bytes parse via
+        ///         <see cref="ScenarioDataUpdater.ParseClientConfigNode"/>;
+        ///         per-entry try/catch isolation so one malformed entry
+        ///         doesn't drop the batch.</item>
+        /// </list></para>
+        ///
+        /// <para><b>Why the CONTRACTS / CONTRACTS_FINISHED partition.</b>
+        /// Pre-MUST-FIX the splice placed every entry into <c>CONTRACTS</c>.
+        /// KSP's <c>ContractSystem</c> instantiates each <c>CONTRACTS</c>
+        /// entry as a live contract — Completed entries would remain in
+        /// Mission Control's Active tab forever (checked-but-undismissable).
+        /// The PlagueNZ-bloat doc-comment that originally argued for
+        /// strip-only behaviour referred to PERSISTENCE volume (the router
+        /// already persists terminal contracts in <see cref="AgencyState.Contracts"/>);
+        /// the strip-from-wire-CONTRACTS_FINISHED was the WRONG mitigation
+        /// for that concern.</para>
+        ///
+        /// <para><b>CONTRACTS_FINISHED container creation asymmetry.</b> The
+        /// projector unconditionally creates a fresh empty <c>CONTRACTS</c>
+        /// container when absent (CC's pre-loader iterates children; empty
+        /// container is benign). For <c>CONTRACTS_FINISHED</c> the container
+        /// is created if absent only when the agency actually has terminal
+        /// contracts to splice — otherwise we don't surface a new container
+        /// shape KSP didn't already have. Both branches honour KSP's
+        /// <c>ScenarioModule.OnLoad</c> tolerance for missing/empty containers.</para>
+        ///
+        /// <para><b>Concurrency.</b> Snapshots <see cref="AgencyState.Contracts"/>
+        /// under <see cref="AgencySystem.GetAgencyLock"/> so a concurrent
+        /// <see cref="AgencyContractRouter.Upsert"/> can't tear the
+        /// projection mid-walk. Matches the snapshot-inside-lock pattern in
+        /// <see cref="SpliceAgencyStrategiesIntoScenario"/>.</para>
+        ///
+        /// <para><b>Two-agency simultaneous Accept race (upgrade-lens v1
+        /// known limitation).</b> If Bob and Alice both Accept Offered slot
+        /// X within the same router tick, both <see cref="AgencyContractRouter.ApplyPerAgencyBatch"/>
+        /// calls may classify+upsert X into their respective
+        /// <see cref="AgencyState.Contracts"/> before either's
+        /// <c>RemoveContractFromSharedOfferedPool</c> commits. Each agency
+        /// then holds X; the projection ships each their own copy + the
+        /// slot is gone from the shared pool. Completing X in either agency
+        /// then credits funds via that agency's
+        /// <see cref="Server.System.Agency.AgencyCurrencyRouter"/> path —
+        /// silent dual-rewards. Slice (j) is the surface that makes this
+        /// observable; the proper fix is a router-side lock around
+        /// classify + upsert + pool-remove. Tracked for a future band-2
+        /// router follow-up.</para>
+        ///
+        /// <para><b>Per-entry isolation on parse failure.</b> Each agency
+        /// contract's bytes pass through
+        /// <see cref="ScenarioDataUpdater.ParseClientConfigNode"/> in a
+        /// per-entry try/catch. One malformed payload drops that single
+        /// contract and continues the batch — matches the router's
+        /// per-contract isolation contract (Q6 commitment b). The drop is
+        /// logged so operators triaging "Alice's mirror knows about a
+        /// contract that disappeared from her UI" can grep for the
+        /// scenario-projection drop (consumer-lens v1 catch-up-vs-scenario
+        /// divergence observability).</para>
+        ///
+        /// <para><b>Whole-scenario parse failure.</b> On ConfigNode parse
+        /// failure of the outer scenario text, logs and returns the input
+        /// unchanged (player gets the shared blob rather than a hung
+        /// handshake). Matches the Strategy / Achievement / Tech splice
+        /// fallback contracts.</para>
+        /// </summary>
+        private static string SpliceAgencyContractsIntoScenario(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "ContractSystem" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:per-agency-career] ContractSystem projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Find or create CONTRACTS container, partition existing children
+            // (Offered/Generated stay; others strip), then splice per-agency
+            // Active entries.
+            var contractsContainer = node.GetNode("CONTRACTS")?.Value;
+            if (contractsContainer == null)
+            {
+                contractsContainer = new ConfigNode("") { Name = "CONTRACTS" };
+                node.AddNode(contractsContainer);
+            }
+            else
+            {
+                foreach (var existing in contractsContainer.GetNodes("CONTRACT").ToArray())
+                {
+                    var state = existing.Value.GetValue("state")?.Value ?? string.Empty;
+                    if (!SharedContractStates.Contains(state))
+                        contractsContainer.RemoveNode(existing.Value);
+                }
+            }
+
+            // Strip existing CONTRACTS_FINISHED children up front (pre-0.31 /
+            // upgrade-in-place shared Finished pool would otherwise leak). The
+            // per-agency terminal splice below repopulates the container with
+            // this client's actual archived contracts.
+            var finishedContainer = node.GetNode("CONTRACTS_FINISHED")?.Value;
+            if (finishedContainer != null)
+            {
+                foreach (var existing in finishedContainer.GetAllNodes().ToArray())
+                    finishedContainer.RemoveNode(existing);
+            }
+
+            // Snapshot agency contracts under the per-agency lock so a
+            // concurrent router upsert can't tear the projection.
+            AgencyContractEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+                snapshot = targetAgency.Contracts.ToArray();
+
+            foreach (var entry in snapshot)
+            {
+                if (entry == null || entry.Data == null || entry.NumBytes <= 0)
+                    continue;
+
+                ConfigNode contractNode;
+                try
+                {
+                    contractNode = ScenarioDataUpdater.ParseClientConfigNode(entry.Data, entry.NumBytes, "CONTRACT");
+                }
+                catch (Exception ex)
+                {
+                    // Per-entry isolation. Log the drop so the catch-up-vs-
+                    // scene-load divergence (5.18a mirror has the contract;
+                    // KSP UI doesn't because the projection couldn't parse it)
+                    // is greppable in operator triage.
+                    LunaLog.Warning($"[fix:per-agency-career] ContractSystem projection dropped contract {entry.ContractGuid:N} from agency {targetAgency.AgencyId:N} on parse: {ex.GetType().Name}: {ex.Message}");
+                    continue;
+                }
+                if (contractNode.IsEmpty())
+                    continue;
+
+                // Partition: live state ("Active") goes to CONTRACTS; everything
+                // else (Completed/Failed/Cancelled/DeadlineExpired/Withdrawn +
+                // any unknown or empty state) goes to CONTRACTS_FINISHED. The
+                // router persists the state field on AgencyState.Contracts[i].
+                // State entries from KSP have empty state for malformed
+                // entries; treat empty as terminal (Mission Control already
+                // hides a contract without a state).
+                var contractState = entry.State ?? string.Empty;
+                if (contractState == "Active")
+                {
+                    contractsContainer.AddNode(contractNode);
+                }
+                else
+                {
+                    if (finishedContainer == null)
+                    {
+                        finishedContainer = new ConfigNode("") { Name = "CONTRACTS_FINISHED" };
+                        node.AddNode(finishedContainer);
+                    }
+                    finishedContainer.AddNode(contractNode);
+                }
+            }
+
+            return node.ToString();
+        }
+
         private static string SpliceAgencyTechIntoResearchAndDevelopment(string scenarioText, AgencyState targetAgency)
         {
             if (string.IsNullOrEmpty(scenarioText))

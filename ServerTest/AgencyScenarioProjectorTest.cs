@@ -76,10 +76,15 @@ namespace ServerTest
         [TestMethod]
         public void Project_UnknownScenario_ReturnsInputUnchanged()
         {
+            // Use a deliberately unrecognised scenario name (e.g. a stock or
+            // mod scenario the projector doesn't claim). "MissionControlsystem"
+            // is a stable placeholder — not in CareerScenarios. Stage 5.18d
+            // slice (j) added ContractSystem to the recognised set, so we no
+            // longer use that as the "unknown" test fixture.
             var agency = new AgencyState { AgencyId = Guid.NewGuid(), Funds = 99999 };
-            var input = "name = ContractSystem\nweights\n{\n\trep = 1\n}\n";
+            var input = "name = ScenarioDeltaVApp\nweights\n{\n\trep = 1\n}\n";
 
-            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+            var result = AgencyScenarioProjector.Project("ScenarioDeltaVApp", input, agency);
 
             Assert.AreEqual(input, result,
                 "Unknown scenarios must pass through unchanged.");
@@ -372,6 +377,313 @@ namespace ServerTest
             // distinct content so we can tell apart.)
             Assert.IsFalse(result.Contains("completed = True"),
                 "Shared content of stripped entries must be gone, not just the entry names.");
+        }
+
+        // --- ContractSystem projection — Stage 5.18d slice (j) --------------
+        //
+        // Keeps shared CONTRACTS entries with state Offered/Generated; strips
+        // others (pre-5.17d leftovers); splices per-agency Contracts;
+        // strips CONTRACTS_FINISHED entirely.
+
+        [TestMethod]
+        public void Project_ContractSystem_KeepsSharedOfferedAndGenerated()
+        {
+            // CC's ContractPreLoader needs Offered + Generated visible across
+            // agencies — those entries must survive projection. Input shape
+            // matches GetScenarioInConfigNodeFormat (inner content only).
+            var input =
+                "CONTRACTS\n" +
+                "{\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Offered\n" +
+                "\t\tname = TestOffered\n" +
+                "\t}\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Generated\n" +
+                "\t\tname = TestGenerated\n" +
+                "\t}\n" +
+                "}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            StringAssert.Contains(result, "TestOffered", "Offered contracts must survive.");
+            StringAssert.Contains(result, "TestGenerated", "Generated contracts must survive.");
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_StripsSharedNonOfferedGenerated()
+        {
+            // Pre-5.17d-shape entries (Active/Completed/etc) in the shared pool
+            // get stripped — under steady-state 5.17d the router removes them on
+            // Accept; this projection strip catches upgrade-in-place leakage.
+            // Input shape matches GetScenarioInConfigNodeFormat output (inner
+            // content, no outer ContractSystem brace-wrap).
+            var input =
+                "CONTRACTS\n" +
+                "{\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Active\n" +
+                "\t\tname = SharedActiveLeak\n" +
+                "\t}\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Completed\n" +
+                "\t\tname = SharedCompletedLeak\n" +
+                "\t}\n" +
+                "}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            Assert.IsFalse(result.Contains("SharedActiveLeak"),
+                "Active shared-pool entry must be stripped.");
+            Assert.IsFalse(result.Contains("SharedCompletedLeak"),
+                "Completed shared-pool entry must be stripped.");
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_StripsContractsFinished()
+        {
+            // Pre-0.31 CONTRACTS_FINISHED data would otherwise leak to every
+            // per-agency client. There is no per-agency Finished surface today;
+            // strip the whole container's children.
+            var input =
+                "CONTRACTS_FINISHED\n" +
+                "{\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Completed\n" +
+                "\t\tname = OldFinishedLeak\n" +
+                "\t}\n" +
+                "}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            Assert.IsFalse(result.Contains("OldFinishedLeak"),
+                "Pre-0.31 CONTRACTS_FINISHED entries must be stripped.");
+            StringAssert.Contains(result, "CONTRACTS_FINISHED",
+                "The CONTRACTS_FINISHED container itself stays (empty); just its children are stripped.");
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_SplicesAgencyContracts()
+        {
+            // Agency Active contract spliced into the outgoing CONTRACTS node.
+            var input = "CONTRACTS\n{\n}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+            var contractBytes = Encoding.UTF8.GetBytes("state = Active\nname = AgencyActive\n");
+            agency.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = Guid.NewGuid(),
+                State = "Active",
+                Data = contractBytes,
+                NumBytes = contractBytes.Length,
+            });
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            StringAssert.Contains(result, "AgencyActive",
+                "Per-agency contract must be spliced into the outgoing CONTRACTS.");
+            StringAssert.Contains(result, "state = Active",
+                "Per-agency contract's state must round-trip via the splice.");
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_TerminalAgencyContract_GoesIntoContractsFinished()
+        {
+            // Consumer-lens v1 MUST FIX: Completed/Failed/etc agency contracts
+            // must splice into CONTRACTS_FINISHED, NOT CONTRACTS. KSP treats
+            // CONTRACTS entries as live (Mission Control's Active tab); a
+            // Completed contract sitting there would persist forever as
+            // "active-but-checkmarked" UX.
+            var input = "CONTRACTS\n{\n}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+            var bytes = Encoding.UTF8.GetBytes("state = Completed\nname = OldVictoryLap\n");
+            agency.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = Guid.NewGuid(),
+                State = "Completed",
+                Data = bytes,
+                NumBytes = bytes.Length,
+            });
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            // The completed contract appears, but inside CONTRACTS_FINISHED —
+            // KSP's archived/inactive container. Asserted indirectly: the
+            // result mentions CONTRACTS_FINISHED (now non-empty) and the
+            // contract's name field.
+            StringAssert.Contains(result, "CONTRACTS_FINISHED",
+                "Terminal contract must land under CONTRACTS_FINISHED.");
+            StringAssert.Contains(result, "OldVictoryLap",
+                "Terminal contract's content must round-trip through the splice.");
+            // Specifically NOT in the live CONTRACTS container — look for the
+            // "Completed" state appearing BEFORE the CONTRACTS_FINISHED block
+            // would mean it landed in CONTRACTS. We do this by checking the
+            // ordering of substring indices.
+            var finishedIdx = result.IndexOf("CONTRACTS_FINISHED", StringComparison.Ordinal);
+            var completedStateIdx = result.IndexOf("state = Completed", StringComparison.Ordinal);
+            Assert.IsTrue(finishedIdx >= 0 && completedStateIdx > finishedIdx,
+                "Terminal contract's 'state = Completed' line must appear inside CONTRACTS_FINISHED, not the live CONTRACTS container.");
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_AgencyContractsPartitionedByState()
+        {
+            // Active stays in CONTRACTS; everything else (terminal states +
+            // unknown / empty) goes to CONTRACTS_FINISHED.
+            var input = "CONTRACTS\n{\n}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+
+            var activeBytes = Encoding.UTF8.GetBytes("state = Active\nname = LiveContract\n");
+            agency.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = Guid.NewGuid(),
+                State = "Active",
+                Data = activeBytes,
+                NumBytes = activeBytes.Length,
+            });
+
+            // Five terminal/edge-case states — verify the "anything except
+            // Active" partition rule covers them all.
+            var terminalStates = new[] { "Completed", "Failed", "Cancelled", "DeadlineExpired", "Withdrawn" };
+            foreach (var tState in terminalStates)
+            {
+                var bytes = Encoding.UTF8.GetBytes($"state = {tState}\nname = Terminal_{tState}\n");
+                agency.Contracts.Add(new AgencyContractEntry
+                {
+                    ContractGuid = Guid.NewGuid(),
+                    State = tState,
+                    Data = bytes,
+                    NumBytes = bytes.Length,
+                });
+            }
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            var finishedIdx = result.IndexOf("CONTRACTS_FINISHED", StringComparison.Ordinal);
+            Assert.IsTrue(finishedIdx > 0, "CONTRACTS_FINISHED container must be present.");
+            // LiveContract should appear BEFORE CONTRACTS_FINISHED (inside CONTRACTS).
+            var liveIdx = result.IndexOf("LiveContract", StringComparison.Ordinal);
+            Assert.IsTrue(liveIdx > 0 && liveIdx < finishedIdx,
+                "Active contract must appear inside CONTRACTS (before the CONTRACTS_FINISHED block).");
+
+            // All terminal-state contracts should appear AFTER the
+            // CONTRACTS_FINISHED marker.
+            foreach (var tState in terminalStates)
+            {
+                var idx = result.IndexOf($"Terminal_{tState}", StringComparison.Ordinal);
+                Assert.IsTrue(idx > finishedIdx,
+                    $"Terminal contract for state '{tState}' must land inside CONTRACTS_FINISHED.");
+            }
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_MixedCase_StripsAndKeepsAndSplices()
+        {
+            // The integration case: shared has Offered (KEEP) + Active (STRIP) +
+            // CONTRACTS_FINISHED (STRIP); agency has its own Active (SPLICE).
+            // Input shape matches GetScenarioInConfigNodeFormat output.
+            var input =
+                "CONTRACTS\n" +
+                "{\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Offered\n" +
+                "\t\tname = SharedOfferedKeep\n" +
+                "\t}\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Active\n" +
+                "\t\tname = SharedActiveStrip\n" +
+                "\t}\n" +
+                "}\n" +
+                "CONTRACTS_FINISHED\n" +
+                "{\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Completed\n" +
+                "\t\tname = OldFinishedStrip\n" +
+                "\t}\n" +
+                "}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+            var contractBytes = Encoding.UTF8.GetBytes("state = Active\nname = AgencyActive\n");
+            agency.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = Guid.NewGuid(),
+                State = "Active",
+                Data = contractBytes,
+                NumBytes = contractBytes.Length,
+            });
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            StringAssert.Contains(result, "SharedOfferedKeep", "Offered shared entry kept.");
+            Assert.IsFalse(result.Contains("SharedActiveStrip"), "Non-Offered shared entry stripped.");
+            Assert.IsFalse(result.Contains("OldFinishedStrip"), "CONTRACTS_FINISHED children stripped.");
+            StringAssert.Contains(result, "AgencyActive", "Per-agency contract spliced.");
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_GateOff_PassesThroughUnchanged()
+        {
+            // Dual-mode silence: gate off → projector returns input unchanged
+            // via the ProjectForClient gate (Project itself is invoked with a
+            // state but the higher-level dispatch wouldn't fire).
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+
+            var input =
+                "CONTRACTS\n" +
+                "{\n" +
+                "\tCONTRACT\n" +
+                "\t{\n" +
+                "\t\tstate = Active\n" +
+                "\t\tname = ShouldStayUnchanged\n" +
+                "\t}\n" +
+                "}\n";
+
+            // Use ProjectForClient (which honours the gate) — passing null client
+            // forces the early-bypass branch but the gate check fires first.
+            var result = AgencyScenarioProjector.ProjectForClient("ContractSystem", input, null);
+
+            Assert.AreEqual(input, result,
+                "Gate-off projection must pass through input bit-for-bit.");
+        }
+
+        [TestMethod]
+        public void Project_ContractSystem_MalformedAgencyContract_PerEntryIsolation()
+        {
+            // A malformed agency contract drops without aborting the batch.
+            // Verifies Q6 commitment (b) — per-contract exception isolation.
+            var input = "CONTRACTS\n{\n}\n";
+            var agency = new AgencyState { AgencyId = Guid.NewGuid() };
+            // Malformed entry — empty bytes; ParseClientConfigNode returns an
+            // empty node which the splice skips silently.
+            agency.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = Guid.NewGuid(),
+                State = "Active",
+                Data = new byte[0],
+                NumBytes = 0,
+            });
+            var goodBytes = Encoding.UTF8.GetBytes("state = Active\nname = GoodContract\n");
+            agency.Contracts.Add(new AgencyContractEntry
+            {
+                ContractGuid = Guid.NewGuid(),
+                State = "Active",
+                Data = goodBytes,
+                NumBytes = goodBytes.Length,
+            });
+
+            var result = AgencyScenarioProjector.Project("ContractSystem", input, agency);
+
+            StringAssert.Contains(result, "GoodContract",
+                "Sibling contracts must splice even when one entry's bytes are malformed.");
         }
     }
 }
