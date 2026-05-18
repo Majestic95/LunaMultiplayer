@@ -3,7 +3,6 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="using:LunaServerGui.ViewModels"
-             xmlns:models="using:LunaServerGui.Models"
              mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="600"
              x:Class="LunaServerGui.Views.LaunchSettingsView"
              x:DataType="vm:LaunchSettingsViewModel">
@@ -40,67 +39,129 @@
                             ItemsSource="{Binding Groups}"
                             TabStripPlacement="Left">
                     <TabControl.ItemTemplate>
-                        <DataTemplate x:DataType="models:SettingsGroup">
-                            <TextBlock Text="{Binding DisplayName}"/>
+                        <DataTemplate x:DataType="vm:SettingsGroupViewModel">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <TextBlock Text="{Binding DisplayName}"/>
+                                <Border IsVisible="{Binding HasDirty}"
+                                        Background="{DynamicResource SystemControlBackgroundAccentBrush}"
+                                        CornerRadius="6" Padding="6,1">
+                                    <TextBlock Text="{Binding DirtyCount}" FontSize="10" Foreground="White"/>
+                                </Border>
+                            </StackPanel>
                         </DataTemplate>
                     </TabControl.ItemTemplate>
                     <TabControl.ContentTemplate>
-                        <DataTemplate x:DataType="models:SettingsGroup">
-                            <Grid RowDefinitions="Auto,Auto,*" Margin="12" RowSpacing="8">
+                        <DataTemplate x:DataType="vm:SettingsGroupViewModel">
+                            <Grid RowDefinitions="Auto,Auto,Auto,*" Margin="12" RowSpacing="8">
 
-                                <!-- Header: file path + status badge -->
-                                <StackPanel Grid.Row="0" Orientation="Vertical" Spacing="4">
-                                    <TextBlock>
-                                        <Run Text="File: " FontWeight="SemiBold"/>
-                                        <Run Text="{Binding FilePath}"/>
-                                    </TextBlock>
-                                    <TextBlock>
-                                        <Run Text="Status: " FontWeight="SemiBold"/>
-                                        <Run Text="{Binding Status}"/>
-                                    </TextBlock>
-                                </StackPanel>
+                                <!-- Header: file path + status + per-group Save/Revert -->
+                                <Grid Grid.Row="0" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
+                                    <StackPanel Grid.Column="0" Orientation="Vertical" Spacing="4">
+                                        <TextBlock>
+                                            <Run Text="File: " FontWeight="SemiBold"/>
+                                            <Run Text="{Binding FilePath}"/>
+                                        </TextBlock>
+                                        <TextBlock>
+                                            <Run Text="Status: " FontWeight="SemiBold"/>
+                                            <Run Text="{Binding Status}"/>
+                                        </TextBlock>
+                                    </StackPanel>
+                                    <Button Grid.Column="1"
+                                            Content="Revert"
+                                            Command="{Binding RevertCommand}"
+                                            ToolTip.Tip="Discard in-progress edits in this group."/>
+                                    <Button Grid.Column="2"
+                                            Content="Save…"
+                                            Command="{Binding SaveCommand}"
+                                            Classes="accent"
+                                            ToolTip.Tip="Backup the current file (timestamped) and write changes. Confirm dialog shows the diff first."/>
+                                </Grid>
 
-                                <!-- Detail (missing/parse-error explanation) + defaults-shown header
-                                     when Status is not Loaded, so the operator does not mistake
-                                     placeholder POCO defaults for the file's actual content. -->
+                                <!-- Detail (missing/parse-error explanation) + defaults-shown header -->
                                 <StackPanel Grid.Row="1" Orientation="Vertical" Spacing="2">
                                     <TextBlock Text="{Binding Detail}"
                                                IsVisible="{Binding Detail, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
-                                               Foreground="{DynamicResource SystemAccentColor}"
+                                               Foreground="{DynamicResource SystemControlForegroundAccentBrush}"
                                                TextWrapping="Wrap"
                                                FontStyle="Italic"/>
-                                    <TextBlock Text="(values below are POCO defaults — not from the file)"
+                                    <TextBlock Text="(values below are POCO defaults — not from the file; Save disabled)"
                                                IsVisible="{Binding !ValuesAreFromFile}"
-                                               Foreground="{DynamicResource SystemAccentColor}"
+                                               Foreground="{DynamicResource SystemControlForegroundAccentBrush}"
                                                FontStyle="Italic"/>
                                 </StackPanel>
 
-                                <!-- Fields list. Dimmed via SettingsGroup.FieldsOpacity (1.0 / 0.55)
-                                     when values are POCO defaults rather than file content. -->
-                                <ScrollViewer Grid.Row="2"
+                                <!-- Dirty-count badge -->
+                                <TextBlock Grid.Row="2"
+                                           IsVisible="{Binding HasDirty}"
+                                           FontStyle="Italic">
+                                    <Run Text="{Binding DirtyCount}"/>
+                                    <Run Text="unsaved change(s) in this group."/>
+                                </TextBlock>
+
+                                <!-- Fields list. Dimmed via FieldsOpacity when values are POCO defaults. -->
+                                <ScrollViewer Grid.Row="3"
                                               HorizontalScrollBarVisibility="Disabled"
                                               VerticalScrollBarVisibility="Auto"
                                               Opacity="{Binding FieldsOpacity}">
                                     <ItemsControl ItemsSource="{Binding Fields}">
                                         <ItemsControl.ItemTemplate>
-                                            <DataTemplate x:DataType="models:SettingsField">
+                                            <DataTemplate x:DataType="vm:SettingsFieldViewModel">
                                                 <Border BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}"
                                                         BorderThickness="0,0,0,1"
-                                                        Padding="0,6">
+                                                        Padding="0,6"
+                                                        Background="{Binding IsDirty, Converter={x:Static vm:DirtyHighlightConverter.Instance}}">
                                                     <Grid ColumnDefinitions="220,*" ColumnSpacing="12">
+
+                                                        <!-- Left: name + type + lock indicator -->
                                                         <StackPanel Grid.Column="0" Orientation="Vertical" Spacing="2">
-                                                            <TextBlock Text="{Binding Name}"
-                                                                       FontWeight="SemiBold"
-                                                                       TextWrapping="Wrap"/>
-                                                            <TextBlock Text="{Binding DeclaredType.Name}"
+                                                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                                                <TextBlock Text="{Binding Name}"
+                                                                           FontWeight="SemiBold"
+                                                                           TextWrapping="Wrap"/>
+                                                                <TextBlock Text="🔒"
+                                                                           IsVisible="{Binding IsLocked}"
+                                                                           ToolTip.Tip="{Binding LockReason}"/>
+                                                            </StackPanel>
+                                                            <TextBlock Text="{Binding TypeName}"
                                                                        Opacity="0.55"
                                                                        FontSize="11"/>
                                                         </StackPanel>
+
+                                                        <!-- Right: editor (Text / Bool / Enum / Locked) + comment -->
                                                         <StackPanel Grid.Column="1" Orientation="Vertical" Spacing="2">
+
+                                                            <!-- Locked: read-only display -->
                                                             <SelectableTextBlock Text="{Binding DisplayValue}"
-                                                                                 FontFamily="Cascadia Mono, Consolas, Menlo, monospace"/>
-                                                            <TextBlock Text="{Binding Comment}"
-                                                                       IsVisible="{Binding Comment, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                                                                                 IsVisible="{Binding IsLocked}"
+                                                                                 FontFamily="Cascadia Mono, Consolas, Menlo, monospace"
+                                                                                 Opacity="0.7"/>
+
+                                                            <!-- Text editor -->
+                                                            <TextBox Text="{Binding TextValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                     IsVisible="{Binding IsTextEditor}"
+                                                                     FontFamily="Cascadia Mono, Consolas, Menlo, monospace"/>
+
+                                                            <!-- Bool editor — no Content; field name is already shown in the left column. -->
+                                                            <CheckBox IsChecked="{Binding BoolValue, Mode=TwoWay}"
+                                                                      IsVisible="{Binding IsBoolEditor}"/>
+
+                                                            <!-- Enum editor -->
+                                                            <ComboBox ItemsSource="{Binding EnumChoices}"
+                                                                      SelectedItem="{Binding EnumValue, Mode=TwoWay}"
+                                                                      IsVisible="{Binding IsEnumEditor}"
+                                                                      MinWidth="180"
+                                                                      HorizontalAlignment="Left"/>
+
+                                                            <!-- Parse error -->
+                                                            <TextBlock Text="{Binding ParseError}"
+                                                                       IsVisible="{Binding ParseError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                                                                       Foreground="Red"
+                                                                       FontSize="11"
+                                                                       TextWrapping="Wrap"/>
+
+                                                            <!-- Comment / help -->
+                                                            <TextBlock Text="{Binding HelpText}"
+                                                                       IsVisible="{Binding HelpText, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                                                                        Opacity="0.7"
                                                                        FontSize="11"
                                                                        TextWrapping="Wrap"/>

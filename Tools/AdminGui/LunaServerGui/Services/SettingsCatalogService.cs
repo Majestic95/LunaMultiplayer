@@ -6,34 +6,53 @@ using System.Reflection;
 using LunaServerGui.Models;
 using LunaServerGui.SettingsCatalog;
 using LunaServerGui.SettingsCatalog.Definitions;
+using LunaServerGui.ViewModels;
 
 namespace LunaServerGui.Services;
 
 /// <summary>
-/// Reflects over the duplicated Definition POCOs to produce SettingsField
-/// descriptors, and loads all priority settings files for a given config
-/// directory. Six groups in slice 1D-1 (General, Connection, Gameplay,
-/// Website, Log, MasterServer); the remaining 6 (CraftSettings,
-/// DebugSettings, DedicatedServerSettings, IntervalSettings,
-/// ScreenshotSettings, WarpSettings) land in a follow-up slice if the
-/// reflection-driven approach pays off.
+/// Loads the six priority settings files from a server's Config/ folder and
+/// builds editable group view-models. Reflects over the duplicated POCOs to
+/// produce per-field VMs in declaration order. Centralises the lock-list
+/// for fields that 1D-2 deliberately refuses to edit (PerAgencyCareer +
+/// AllowEnablePerAgencyOnExistingUniverse are deferred to slice 1D-4's
+/// confirm-dialog gate per spec §Validation-And-Safety-Rules).
+///
+/// The remaining six settings groups (CraftSettings, DebugSettings,
+/// DedicatedServerSettings, IntervalSettings, ScreenshotSettings,
+/// WarpSettings) are deliberately deferred to a follow-up slice if the
+/// reflection-driven approach pays off in production use.
 /// </summary>
 public sealed class SettingsCatalogService
 {
     private readonly SettingsXmlService _xml;
 
-    /// <summary>
-    /// Display order matches the spec §2 priority list. Stable across
-    /// reloads so the operator's selected tab survives a Refresh.
-    /// </summary>
     private static readonly (string DisplayName, string FileName, Type DefinitionType)[] PriorityGroups =
     {
-        ("General",      "GeneralSettings.xml",       typeof(GeneralSettingsDefinition)),
-        ("Connection",   "ConnectionSettings.xml",    typeof(ConnectionSettingsDefinition)),
-        ("Gameplay",     "GameplaySettings.xml",      typeof(GameplaySettingsDefinition)),
-        ("Website",      "WebsiteSettings.xml",       typeof(WebsiteSettingsDefinition)),
-        ("Log",          "LogSettings.xml",           typeof(LogSettingsDefinition)),
-        ("Master Server","MasterServerSettings.xml",  typeof(MasterServerSettingsDefinition)),
+        ("General",       "GeneralSettings.xml",      typeof(GeneralSettingsDefinition)),
+        ("Connection",    "ConnectionSettings.xml",   typeof(ConnectionSettingsDefinition)),
+        ("Gameplay",      "GameplaySettings.xml",     typeof(GameplaySettingsDefinition)),
+        ("Website",       "WebsiteSettings.xml",      typeof(WebsiteSettingsDefinition)),
+        ("Log",           "LogSettings.xml",          typeof(LogSettingsDefinition)),
+        ("Master Server", "MasterServerSettings.xml", typeof(MasterServerSettingsDefinition)),
+    };
+
+    /// <summary>
+    /// Fields the GUI deliberately refuses to edit in slice 1D-2. Keyed by
+    /// (DeclaringType, PropertyName). The value is the operator-readable
+    /// reason shown in the tooltip + the field's help text. Slice 1D-4 will
+    /// remove these entries and replace them with a confirm-dialog gate.
+    /// </summary>
+    private static readonly Dictionary<(Type Type, string Property), string> LockedFields = new()
+    {
+        [(typeof(GameplaySettingsDefinition), nameof(GameplaySettingsDefinition.PerAgencyCareer))] =
+            "PerAgencyCareer cannot be changed mid-save without losing accumulated career state. " +
+            "A dedicated confirm dialog (slice 1D-4) will gate this edit; for now, edit the XML file " +
+            "directly before the universe is first populated.",
+        [(typeof(GameplaySettingsDefinition), nameof(GameplaySettingsDefinition.AllowEnablePerAgencyOnExistingUniverse))] =
+            "Enabling per-agency on an existing universe is an irreversible operation that will hide " +
+            "accumulated shared-agency progress from per-agency clients. A dedicated advanced-confirm " +
+            "dialog (slice 1D-4) will gate this edit; do not toggle it casually.",
     };
 
     public SettingsCatalogService(SettingsXmlService xml)
@@ -42,16 +61,16 @@ public sealed class SettingsCatalogService
     }
 
     /// <summary>
-    /// Load all priority settings files from <paramref name="configDirectory"/>.
-    /// Always returns one SettingsGroup per priority entry — missing files
-    /// produce a MissingFile status with POCO defaults so the operator still
-    /// sees what fields would be present.
+    /// Load all priority settings files from <paramref name="configDirectory"/>
+    /// and produce one editable group view-model per file. Synchronous I/O;
+    /// callers (LaunchSettingsViewModel.ReloadAsync) wrap with Task.Run to
+    /// keep the UI thread free.
     /// </summary>
-    public IReadOnlyList<SettingsGroup> LoadAll(string configDirectory)
+    public IReadOnlyList<SettingsGroupViewModel> LoadGroupViewModels(string configDirectory)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(configDirectory);
 
-        var result = new List<SettingsGroup>(PriorityGroups.Length);
+        var result = new List<SettingsGroupViewModel>(PriorityGroups.Length);
         foreach (var (displayName, fileName, definitionType) in PriorityGroups)
         {
             var path = Path.Combine(configDirectory, fileName);
@@ -60,7 +79,7 @@ public sealed class SettingsCatalogService
         return result;
     }
 
-    private SettingsGroup LoadOne(string displayName, string path, Type definitionType)
+    private SettingsGroupViewModel LoadOne(string displayName, string path, Type definitionType)
     {
         object? instance;
         SettingsGroupStatus status;
@@ -83,38 +102,36 @@ public sealed class SettingsCatalogService
         catch (Exception ex)
         {
             status = SettingsGroupStatus.ParseError;
-            // Strip newlines so the single-line Detail field stays readable —
-            // XmlSerializer's InvalidOperationException messages can be
-            // multi-line.
-            detail = ex.GetBaseException().Message.Replace("\r", " ").Replace("\n", " ");
+            // Strip newlines so the single-line Detail surface stays readable
+            // (XmlSerializer's InvalidOperationException messages can be
+            // multi-line). Append a recovery hint — the GUI deliberately
+            // refuses to save over a parse-broken file, so the operator
+            // needs a path forward.
+            var msg = ex.GetBaseException().Message.Replace("\r", " ").Replace("\n", " ");
+            detail = $"{msg} — fix the file in a text editor (e.g. Notepad) and click Reload. The GUI refuses to overwrite a parse-broken file to protect from accidental data loss.";
             instance = Activator.CreateInstance(definitionType);
         }
 
-        var fields = DescribeFields(definitionType, instance!);
-        return new SettingsGroup(displayName, path, status, detail, fields);
+        var fieldVms = BuildFieldVms(definitionType, instance!);
+        return new SettingsGroupViewModel(_xml, displayName, path, status, detail, instance!, fieldVms);
     }
 
-    /// <summary>
-    /// Reflect over <paramref name="definitionType"/>'s public instance
-    /// properties (ones the XmlSerializer would round-trip) and project
-    /// them into SettingsField descriptors. Preserves declaration order
-    /// via MetadataToken sort — important so the form mirrors the layout
-    /// of the source POCO (and hence the XML file).
-    /// </summary>
-    public IReadOnlyList<SettingsField> DescribeFields(Type definitionType, object instance)
+    private static IReadOnlyList<SettingsFieldViewModel> BuildFieldVms(Type definitionType, object instance)
     {
-        ArgumentNullException.ThrowIfNull(definitionType);
-        ArgumentNullException.ThrowIfNull(instance);
-
+        // MetadataToken sort preserves declaration order — important so the
+        // form mirrors the XML file layout. Holds for the 6 priority POCOs
+        // (none use partial classes; if a future Definition does, the
+        // ordering is compiler-implementation-defined and needs revisiting).
         return definitionType
             .GetProperties(BindingFlags.Public | BindingFlags.Instance)
-            .Where(p => p.CanRead && p.GetIndexParameters().Length == 0)
+            .Where(p => p.CanRead && p.CanWrite && p.GetIndexParameters().Length == 0)
             .OrderBy(p => p.MetadataToken)
-            .Select(p => new SettingsField(
-                Name: p.Name,
-                DeclaredType: p.PropertyType,
-                Value: p.GetValue(instance),
-                Comment: p.GetCustomAttribute<XmlCommentAttribute>()?.Value ?? string.Empty))
+            .Select(p =>
+            {
+                var comment = p.GetCustomAttribute<XmlCommentAttribute>()?.Value ?? string.Empty;
+                LockedFields.TryGetValue((definitionType, p.Name), out var lockReason);
+                return new SettingsFieldViewModel(p, instance, comment, lockReason);
+            })
             .ToList();
     }
 }
