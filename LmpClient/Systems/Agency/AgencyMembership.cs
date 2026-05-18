@@ -182,5 +182,64 @@ namespace LmpClient.Systems.Agency
             // ConcurrentDictionary's atomic upsert; safe under contention.
             registry[vesselId] = authoritativeAgencyId;
         }
+
+        /// <summary>
+        /// Stage 5.18d slice (h) — economy ownership guard. Pure decision helper
+        /// for client-side <c>VesselRemoveEvents.OnVesselRecovered</c> /
+        /// <c>OnVesselTerminated</c>. Returns <c>true</c> when the local player
+        /// should be BLOCKED from recovering / terminating the vessel because it
+        /// belongs to a different agency.
+        ///
+        /// <para><b>Why client-side.</b> The server's Stage 5.17a write-path
+        /// counterpart (<c>RejectIfCrossAgencyWrite</c> in
+        /// <c>Server/Message/VesselMsgReader.cs</c>) already refuses
+        /// cross-agency <c>VesselRemoveMsgData</c>; the vessel stays in the
+        /// canonical store. But by the time the server rejects, the LOCAL KSP
+        /// has already credited recovery funds via
+        /// <c>Funding.Instance.AddFunds(value, TransactionReasons.VesselRecovery)</c>
+        /// and the client has emitted a Share*Funds broadcast carrying the
+        /// post-credit total. The 5.17e <c>AgencyCurrencyRouter</c> routes
+        /// that total to the local agency — the player keeps the funds for a
+        /// recovery that didn't actually happen server-side. This guard
+        /// prevents the local credit from happening at all.</para>
+        ///
+        /// <para><b>Bypass rules.</b> Same shape as Stage 5.17a's
+        /// cross-agency lock guard:
+        /// <list type="bullet">
+        ///   <item><paramref name="perAgencyEnabledClientGate"/> false → gate
+        ///         is off; permit (dual-mode silence).</item>
+        ///   <item><paramref name="localAgencyId"/> = <see cref="Guid.Empty"/>
+        ///         → local player has no agency mapping (pre-handshake, or
+        ///         post-transferagency / post-deleteagency where their old
+        ///         agency is gone); permit (existing 5.17a "requester has no
+        ///         agency mapping" bypass).</item>
+        ///   <item><paramref name="vesselKnown"/> false → vessel not in the
+        ///         client's <c>VesselOwnership</c> registry (relay path
+        ///         hasn't supplied a stamp yet); permit. The server-side
+        ///         guard catches this case if it's a real cross-agency
+        ///         attempt; client-side erring permissive keeps the
+        ///         interactable surface honest about what the client knows.</item>
+        ///   <item><paramref name="vesselOwningAgencyId"/> =
+        ///         <see cref="Guid.Empty"/> → Unassigned-sentinel (spec §10
+        ///         Q3); ANY agency can recover Unassigned vessels by design.
+        ///         Permit.</item>
+        ///   <item><paramref name="vesselOwningAgencyId"/> equals
+        ///         <paramref name="localAgencyId"/> → same agency; permit.</item>
+        ///   <item>Otherwise (gate on, non-Empty local agency, vessel known
+        ///         with non-Empty + different agency) → BLOCK.</item>
+        /// </list></para>
+        /// </summary>
+        public static bool IsRecoveryBlockedByAgency(
+            Guid localAgencyId,
+            bool vesselKnown,
+            Guid vesselOwningAgencyId,
+            bool perAgencyEnabledClientGate)
+        {
+            if (!perAgencyEnabledClientGate) return false;
+            if (localAgencyId == Guid.Empty) return false;
+            if (!vesselKnown) return false;
+            if (vesselOwningAgencyId == Guid.Empty) return false;
+            return vesselOwningAgencyId != localAgencyId;
+        }
     }
 }

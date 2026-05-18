@@ -1,6 +1,7 @@
 ﻿using LmpClient.Base;
 using LmpClient.Events;
 using LmpClient.Localization;
+using LmpClient.Systems.Agency;
 using LmpClient.Systems.Lock;
 using LmpClient.Systems.SettingsSys;
 using LmpClient.VesselUtilities;
@@ -66,6 +67,16 @@ namespace LmpClient.Systems.VesselRemoveSys
         {
             //quick == true when you press "space center" from the inflight menu
 
+            // Stage 5.18d slice (h): cross-agency recovery guard. Refuses the
+            // local-side recovery before KSP's Funding.Instance.AddFunds runs
+            // — preventing the leak window where the local player credits
+            // recovery funds for a vessel the server's 5.17a write-path
+            // counterpart would refuse to remove. The toast surfaces the
+            // reason so the player understands why their recovery click
+            // didn't take effect.
+            if (TryBlockCrossAgencyAction(recoveredVessel.vesselID, "recover"))
+                return;
+
             if (!LockSystem.LockQuery.CanRecoverOrTerminateTheVessel(recoveredVessel.vesselID, SettingsSystem.CurrentSettings.PlayerName))
             {
                 LunaScreenMsg.PostScreenMessage(LocalizationContainer.ScreenText.CannotRecover, 5f, ScreenMessageStyle.UPPER_CENTER);
@@ -92,6 +103,15 @@ namespace LmpClient.Systems.VesselRemoveSys
         /// </summary>
         public void OnVesselTerminated(ProtoVessel terminatedVessel)
         {
+            // Stage 5.18d slice (h): cross-agency termination guard. Mirrors the
+            // recovery guard; the same justification applies (Termination
+            // doesn't credit funds but it does remove the vessel server-side,
+            // which the 5.17a guard rejects — refusing locally produces
+            // clearer UX than letting the player click the button and have
+            // nothing happen).
+            if (TryBlockCrossAgencyAction(terminatedVessel.vesselID, "terminate"))
+                return;
+
             if (!LockSystem.LockQuery.CanRecoverOrTerminateTheVessel(terminatedVessel.vesselID, SettingsSystem.CurrentSettings.PlayerName))
             {
                 LunaScreenMsg.PostScreenMessage(LocalizationContainer.ScreenText.CannotTerminate, 5f, ScreenMessageStyle.UPPER_CENTER);
@@ -142,6 +162,89 @@ namespace LmpClient.Systems.VesselRemoveSys
                 System.RemovedVessels.TryAdd(FlightGlobals.ActiveVessel.id, DateTime.Now);
                 VesselCommon.RemoveVesselFromSystems(FlightGlobals.ActiveVessel.id);
             }
+        }
+
+        /// <summary>
+        /// Consolidated bridge from the Unity-thread <see cref="OnVesselRecovered"/> /
+        /// <see cref="OnVesselTerminated"/> callsites to the pure
+        /// <see cref="AgencyMembership.IsRecoveryBlockedByAgency"/> helper. Reads
+        /// the singleton state on the calling thread (helper itself is
+        /// unit-testable in <c>LmpClientTest</c> without KSP DLLs); on a block,
+        /// emits the operator-facing toast + the operator-greppable KSP.log line
+        /// and returns true so the caller can early-return.
+        ///
+        /// <para><b>Identity-resolution.</b> When the owning agency is in the
+        /// client's <see cref="AgencySystem.OtherAgencies"/> snapshot, the toast
+        /// surfaces its display name + owner. When it's not (late-joiner whose
+        /// handshake hasn't reached this client yet), falls back to a generic
+        /// "different agency" — better than no toast.</para>
+        ///
+        /// <para><b>TODO Stage 5.18+ i18n.</b> The literal toast strings should
+        /// be lifted to <c>LocalizationContainer.ScreenText.CannotRecoverCrossAgency</c>
+        /// + <c>CannotTerminateCrossAgency</c> alongside the existing
+        /// <c>CannotRecover</c> / <c>CannotTerminate</c> entries. The dynamic
+        /// agency-name interpolation needs a format-string convention on the
+        /// localization side; defer until a focused localization pass.</para>
+        /// </summary>
+        private static bool TryBlockCrossAgencyAction(Guid vesselId, string actionVerb)
+        {
+            var agencySystem = AgencySystem.Singleton;
+            var gateOn = SettingsSystem.ServerSettings.PerAgencyCareerEnabled;
+            var localAgencyId = agencySystem?.LocalAgencyId ?? Guid.Empty;
+
+            var vesselKnown = false;
+            var vesselOwningAgencyId = Guid.Empty;
+            if (agencySystem != null && agencySystem.TryGetOwningAgency(vesselId, out var owner))
+            {
+                vesselKnown = true;
+                vesselOwningAgencyId = owner;
+            }
+
+            if (!AgencyMembership.IsRecoveryBlockedByAgency(
+                localAgencyId, vesselKnown, vesselOwningAgencyId, gateOn))
+            {
+                return false;
+            }
+
+            // Resolve the owning agency's friendly identity from the
+            // OtherAgencies snapshot when available — surfaces display name +
+            // owner so the player knows whose vessel they're trying to take.
+            // Fall back to a generic literal when the snapshot misses (late-
+            // joining peer agency; AgencyInfo not yet broadcast).
+            var ownerLabel = "a different agency";
+            if (agencySystem != null
+                && agencySystem.OtherAgencies != null
+                && agencySystem.OtherAgencies.TryGetValue(vesselOwningAgencyId, out var info)
+                && info != null)
+            {
+                var displayName = string.IsNullOrEmpty(info.DisplayName) ? "an unnamed agency" : info.DisplayName;
+                var owningPlayer = string.IsNullOrEmpty(info.OwningPlayerName) ? "unknown owner" : info.OwningPlayerName;
+                ownerLabel = $"{displayName} ({owningPlayer})";
+            }
+
+            // Toast — dropped the leading slash from "transferagency" so the
+            // player doesn't read it as a command they should type (they
+            // can't run server admin commands). Consumer-lens v1 C2.
+            LunaScreenMsg.PostScreenMessage(
+                $"Cannot {actionVerb}: this vessel belongs to {ownerLabel}. " +
+                "Ask the owning agency to give it to you, or ask a server admin to transfer it.",
+                5f, ScreenMessageStyle.UPPER_CENTER);
+
+            // KSP.log breadcrumb with the full triage payload: action verb,
+            // vessel id, local player handle (so an operator triaging "Alice
+            // says her recover button doesn't work" can grep), local agency,
+            // and the owning agency id. Tagged [fix:per-agency-career] to
+            // match the server-side per-agency log convention so cross-side
+            // grep ("everything per-agency-career touched") returns both
+            // server-side and client-side breadcrumbs. Consumer-lens v1 S2 +
+            // client-harmony v1 C3.
+            var localPlayer = SettingsSystem.CurrentSettings?.PlayerName ?? "(unknown)";
+            LunaLog.Log(
+                $"[fix:per-agency-career] cross-agency-{actionVerb}-blocked " +
+                $"vessel={vesselId:N} local-player={localPlayer} local-agency={localAgencyId:N} " +
+                $"owning-agency={vesselOwningAgencyId:N}");
+
+            return true;
         }
 
         private static void RemoveOldVesselAndItsDebris(Vessel vessel, ProtoCrewMember.RosterStatus kerbalStatus)

@@ -339,6 +339,99 @@ namespace LmpClientTest
             AgencyMembership.ForceRecordOwnership(null, Guid.NewGuid(), Guid.NewGuid());
         }
 
+        // --- IsRecoveryBlockedByAgency — Stage 5.18d slice (h) economy guard ---
+        //
+        // Pure decision helper that backs VesselRemoveEvents.OnVesselRecovered +
+        // OnVesselTerminated's cross-agency block. The bypass shape matches
+        // 5.17a's cross-agency lock guard (gate off / local agency-less /
+        // vessel unknown / Unassigned sentinel / same-agency); only the
+        // gate-on-known-different-agency case blocks.
+
+        [TestMethod]
+        public void IsRecoveryBlockedByAgency_DifferentAgency_Blocks()
+        {
+            var local = Guid.NewGuid();
+            var other = Guid.NewGuid();
+            Assert.IsTrue(AgencyMembership.IsRecoveryBlockedByAgency(
+                localAgencyId: local,
+                vesselKnown: true,
+                vesselOwningAgencyId: other,
+                perAgencyEnabledClientGate: true),
+                "gate on + known vessel + different non-Empty agency → BLOCK");
+        }
+
+        [TestMethod]
+        public void IsRecoveryBlockedByAgency_SameAgency_Permits()
+        {
+            var same = Guid.NewGuid();
+            Assert.IsFalse(AgencyMembership.IsRecoveryBlockedByAgency(
+                localAgencyId: same,
+                vesselKnown: true,
+                vesselOwningAgencyId: same,
+                perAgencyEnabledClientGate: true),
+                "same agency → permit");
+        }
+
+        [TestMethod]
+        public void IsRecoveryBlockedByAgency_GateOff_PermitsEvenWhenDifferentAgency()
+        {
+            // Dual-mode silence (spec §11): under gate-off the per-agency
+            // surface is invisible; recovery behaviour matches the legacy
+            // shared-agency UX (any player can recover any vessel).
+            Assert.IsFalse(AgencyMembership.IsRecoveryBlockedByAgency(
+                localAgencyId: Guid.NewGuid(),
+                vesselKnown: true,
+                vesselOwningAgencyId: Guid.NewGuid(),
+                perAgencyEnabledClientGate: false),
+                "gate off → permit regardless of agency match");
+        }
+
+        [TestMethod]
+        public void IsRecoveryBlockedByAgency_LocalEmpty_Permits()
+        {
+            // Pre-handshake / post-transferagency / post-deleteagency where
+            // the local player has no agency mapping. Matches the 5.17a
+            // "requester has no agency mapping" bypass — recovering as
+            // agency-less is permitted to keep the player interactable.
+            Assert.IsFalse(AgencyMembership.IsRecoveryBlockedByAgency(
+                localAgencyId: Guid.Empty,
+                vesselKnown: true,
+                vesselOwningAgencyId: Guid.NewGuid(),
+                perAgencyEnabledClientGate: true),
+                "local agency-less → permit");
+        }
+
+        [TestMethod]
+        public void IsRecoveryBlockedByAgency_VesselUnknown_Permits()
+        {
+            // Vessel not in the client's VesselOwnership registry (relay
+            // hasn't supplied a stamp yet). Permit locally; server-side
+            // 5.17a write-path counterpart catches any real cross-agency
+            // attempt downstream.
+            Assert.IsFalse(AgencyMembership.IsRecoveryBlockedByAgency(
+                localAgencyId: Guid.NewGuid(),
+                vesselKnown: false,
+                vesselOwningAgencyId: Guid.Empty,
+                perAgencyEnabledClientGate: true),
+                "vessel unknown to client → permit");
+        }
+
+        [TestMethod]
+        public void IsRecoveryBlockedByAgency_UnassignedSentinel_Permits()
+        {
+            // Spec §10 Q3 — Unassigned-sentinel vessels (Empty agency id) are
+            // interactable by ANY agency. /deleteagency cascade lands every
+            // demoted vessel in this state; the prior owner's reconnect should
+            // be able to re-recover them, AND any other agency should be able
+            // to recover them.
+            Assert.IsFalse(AgencyMembership.IsRecoveryBlockedByAgency(
+                localAgencyId: Guid.NewGuid(),
+                vesselKnown: true,
+                vesselOwningAgencyId: Guid.Empty,
+                perAgencyEnabledClientGate: true),
+                "Unassigned-sentinel vessel → permit per spec §10 Q3");
+        }
+
         [TestMethod]
         public void ForceRecordOwnership_Idempotent_WhenSameValueWrittenTwice()
         {
