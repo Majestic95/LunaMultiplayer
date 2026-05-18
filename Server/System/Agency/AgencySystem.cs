@@ -967,6 +967,173 @@ namespace Server.System.Agency
         }
 
         /// <summary>
+        /// Stage 5.18d slice (g) <c>/deleteagency</c>. Removes an
+        /// <see cref="AgencyState"/> entirely — in-memory registry entry,
+        /// <see cref="AgencyByPlayerName"/> index, and on-disk file (canonical
+        /// + .bak). Walks <see cref="VesselStoreSystem.CurrentVessels"/>
+        /// demoting any vessel stamped with the deleted agency's id to
+        /// <see cref="Guid.Empty"/> (the Unassigned-sentinel per spec §10 Q3),
+        /// returning the set of demoted vessel ids so the caller can emit the
+        /// matching <c>AgencyVisibilityMsgData</c> broadcast and release locks.
+        ///
+        /// <para><b>Lock discipline.</b> Holds <see cref="PlayerNameLocks"/> for
+        /// the agency's prior owner + <see cref="GetAgencyLock"/> for the agency
+        /// id. Single-name-lock (not dual) because deletion only mutates one
+        /// player-name mapping (remove). The vessel walk reads
+        /// <see cref="VesselStoreSystem.CurrentVessels"/> values which is a
+        /// <see cref="ConcurrentDictionary{TKey, TValue}"/> — its
+        /// <see cref="ConcurrentDictionary{TKey, TValue}.Values"/> enumerator
+        /// is moment-in-time-safe; a vessel proto landing mid-walk that
+        /// stamps a NEW vessel with this AgencyId would not be in our snapshot
+        /// and would survive the delete as a fresh orphan (boot
+        /// <see cref="WarnAboutOrphanedVessels"/> would surface it). Acceptable
+        /// transient — the new-stamp race is narrow and the orphan diagnostic
+        /// catches it.</para>
+        ///
+        /// <para><b>Persistence-before-broadcast contract for callers.</b> The
+        /// caller MUST emit the <c>AgencyVisibilityMsgData</c> broadcast AFTER
+        /// this method returns and AFTER the canonical store mutation lands —
+        /// matches the slice (a) <see cref="AgencySystemSender.BroadcastVisibilityChange"/>
+        /// XML's mutation-ordering contract. This method handles steps 1-4 of
+        /// the cascade (vessel demote + registry remove + index remove + disk
+        /// delete) inside the lock; the broadcast is step 5, outside.</para>
+        ///
+        /// <para><b>Crash-window note.</b> Between the in-memory vessel
+        /// <see cref="Server.System.Vessel.Classes.Vessel.OwningAgencyId"/>
+        /// mutations and the next periodic <see cref="BackupSystem.RunBackup"/>
+        /// flush of vessel state to disk, a server crash leaves vessels on disk
+        /// still carrying the deleted agency's stamp — they would re-load as
+        /// orphans on next boot. The boot helper
+        /// <see cref="WarnAboutOrphanedVessels"/> surfaces them. Operator
+        /// recovery in that case: restore <c>Universe/Agencies/{guid}.txt(.bak)</c>
+        /// if still on disk (the .bak deletion below makes this unrecoverable
+        /// — same destructive contract documented on the command surface), OR
+        /// accept that the orphan-stamped vessels become operator-fixable only
+        /// via a future re-stamp (no admin command supports that today).</para>
+        ///
+        /// <para><b>Failure modes</b> (caller surfaces <paramref name="failureReason"/>):
+        /// <list type="bullet">
+        ///   <item>Gate is closed — returns false.</item>
+        ///   <item>Source state is null — returns false (defensive).</item>
+        /// </list>
+        /// No "agency not found in registry" branch because the caller has
+        /// already resolved the source via <see cref="TryResolveAgencyToken"/>;
+        /// a successful resolve guarantees the agency is in
+        /// <see cref="Agencies"/>.</para>
+        ///
+        /// <para><b>Out-of-scope concerns the CALLER handles:</b>
+        /// <list type="bullet">
+        ///   <item>Broadcast <c>AgencyVisibilityMsgData</c> with the demoted
+        ///         vessel ids.</item>
+        ///   <item>Release the prior owner's vessel-scoped locks on the demoted
+        ///         vessels (the lock subsystem is not coupled to AgencySystem).</item>
+        ///   <item>Operator-visible logging.</item>
+        /// </list></para>
+        /// </summary>
+        public static bool TryDeleteAgency(
+            AgencyState source,
+            out List<Guid> demotedVesselIds,
+            out string failureReason)
+        {
+            demotedVesselIds = new List<Guid>();
+            failureReason = string.Empty;
+
+            if (!PerAgencyEnabled)
+            {
+                failureReason = "Per-agency career is not active (gate-off or non-Career mode).";
+                return false;
+            }
+            if (source == null)
+            {
+                failureReason = "Source agency is null.";
+                return false;
+            }
+
+            var oldOwnerName = source.OwningPlayerName ?? string.Empty;
+            var agencyId = source.AgencyId;
+
+            // Single name-lock (the OWNER's name). PlayerNameLocks.GetOrAdd is
+            // idempotent — a fresh entry for an empty-string name is harmless
+            // and ConcurrentDictionary handles the GetOrAdd race cleanly.
+            //
+            // Empty-name branch (server-systems-review v1 SS-4): an AgencyState
+            // with empty OwningPlayerName shouldn't legitimately exist post-
+            // RegisterAgency (which throws on IsNullOrEmpty), but hand-edited
+            // AgencyState files can parse with empty OwningPlayerName per
+            // AgencyState.Parse's permissive zero-defaults. Use a per-call
+            // private object rather than polluting PlayerNameLocks with a
+            // shared "" anchor that any future empty-string-special-case path
+            // would race on.
+            var nameLock = string.IsNullOrEmpty(oldOwnerName)
+                ? new object()
+                : PlayerNameLocks.GetOrAdd(oldOwnerName, _ => new object());
+
+            lock (nameLock)
+            {
+                lock (GetAgencyLock(agencyId))
+                {
+                    // Demote vessels in-place. The mutation is in-memory; vessel
+                    // disk persistence happens on the next BackupSystem.RunBackup
+                    // (crash-window note above). Snapshot ids during the walk so
+                    // the caller's broadcast / lock-release passes have a stable
+                    // list independent of further VesselStoreSystem mutations.
+                    foreach (var kvp in VesselStoreSystem.CurrentVessels)
+                    {
+                        if (kvp.Value.OwningAgencyId != agencyId) continue;
+                        kvp.Value.OwningAgencyId = Guid.Empty;
+                        demotedVesselIds.Add(kvp.Key);
+                    }
+
+                    // Remove the in-memory registry entry first, then the index.
+                    // ConcurrentDictionary atomic mutations; a parallel reader
+                    // landing between TryRemove(Agencies) and TryRemove(AgencyByPlayerName)
+                    // sees an AgencyByPlayerName mapping that points at a missing
+                    // agency — TryResolveAgencyToken's name path then misses cleanly
+                    // (Agencies.TryGetValue returns false, falls back to its existing
+                    // not-found return). Reverse order would leave a stale Agencies
+                    // entry with no name mapping — harder to reason about.
+                    Agencies.TryRemove(agencyId, out _);
+                    if (!string.IsNullOrEmpty(oldOwnerName))
+                        AgencyByPlayerName.TryRemove(oldOwnerName, out _);
+
+                    // Delete the canonical file + .bak. FileHandler.FileDelete is
+                    // existence-checked + per-path-locked; safe to call on missing
+                    // files (no-op). Operators who want to preserve the file for
+                    // forensic recovery should rename it elsewhere BEFORE running
+                    // /deleteagency (the command's --confirm flag is the
+                    // destructive opt-in).
+                    var canonicalPath = source.FilePath;
+                    FileHandler.FileDelete(canonicalPath);
+                    FileHandler.FileDelete(canonicalPath + ".bak");
+
+                    // GC the per-agency lock anchor. After the registry remove,
+                    // no legitimate caller resolves this AgencyId; a stale path
+                    // that does will receive a fresh uncontended lock from
+                    // GetAgencyLock on next call, which is safe.
+                    AgencyLocks.TryRemove(agencyId, out _);
+                }
+            }
+
+            // PlayerNameLocks GC was deliberately removed (server-systems-review
+            // v1 SS-1). The prior owner reconnects with the SAME name — that's
+            // the documented "fresh agency on next reconnect" UX — so
+            // RegisterAgency hits PlayerNameLocks.GetOrAdd(oldOwnerName, ...).
+            // If we'd GC'd the entry here, two concurrent reconnects for the
+            // same name would observe DIFFERENT lock anchors (one sees the
+            // remembered one, the other gets a freshly minted one between the
+            // TryRemove and the next GetOrAdd) — defeating the same-name
+            // double-register serialisation contract at RegisterAgency. The
+            // memory cost of retaining the anchor is one heap-object per
+            // ever-registered player name (bounded by the cardinality of
+            // distinct LMP handles a server has ever served) — negligible.
+            // AgencyLocks GC above is safe by contrast: no legitimate caller
+            // resolves to a deleted AgencyId, so a fresh uncontended object on
+            // a hypothetical stale call is the right behavior.
+
+            return true;
+        }
+
+        /// <summary>
         /// Stage 5.18d slice (e) <c>/transferagency</c>. Renames the owner of an
         /// existing agency to a different LMP player handle. Vessels keep their
         /// <c>OwningAgencyId</c> stamp — the agency's identity is preserved; only

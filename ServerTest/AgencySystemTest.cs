@@ -746,6 +746,97 @@ namespace ServerTest
             Assert.AreSame(alice, resolved, "Guid form resolves by registry id, not by name-coincidence.");
         }
 
+        // --- TryDeleteAgency — Stage 5.18d slice (g) /deleteagency -----------
+
+        [TestMethod]
+        public void TryDeleteAgency_RemovesRegistryEntryAndIndex()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+            var id = alice.AgencyId;
+
+            Assert.IsTrue(AgencySystem.TryDeleteAgency(alice, out var demoted, out var reason));
+            Assert.AreEqual(string.Empty, reason);
+            Assert.AreEqual(0, demoted.Count, "no vessels in test universe = nothing to demote");
+
+            Assert.IsFalse(AgencySystem.Agencies.ContainsKey(id));
+            Assert.IsFalse(AgencySystem.AgencyByPlayerName.ContainsKey("Alice"));
+        }
+
+        [TestMethod]
+        public void TryDeleteAgency_DeletesCanonicalAndBakFiles()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+            var canonicalPath = alice.FilePath;
+            var bakPath = canonicalPath + ".bak";
+
+            // Persist twice so both canonical + .bak exist (WriteAtomic rotates).
+            AgencySystem.SaveAgency(alice.AgencyId);
+            AgencySystem.SaveAgency(alice.AgencyId);
+            Assert.IsTrue(File.Exists(canonicalPath));
+            Assert.IsTrue(File.Exists(bakPath));
+
+            Assert.IsTrue(AgencySystem.TryDeleteAgency(alice, out _, out _));
+
+            Assert.IsFalse(File.Exists(canonicalPath), "canonical file deleted");
+            Assert.IsFalse(File.Exists(bakPath), ".bak file deleted");
+        }
+
+        [TestMethod]
+        public void TryDeleteAgency_NullSource_FailsDefensively()
+        {
+            Assert.IsFalse(AgencySystem.TryDeleteAgency(null, out var demoted, out var reason));
+            StringAssert.Contains(reason, "null");
+            Assert.AreEqual(0, demoted.Count);
+        }
+
+        [TestMethod]
+        public void TryDeleteAgency_GateOff_FailsWithReason()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+
+            Assert.IsFalse(AgencySystem.TryDeleteAgency(alice, out _, out var reason));
+            StringAssert.Contains(reason, "Per-agency career is not active");
+        }
+
+        [TestMethod]
+        public void TryDeleteAgency_AfterReload_AgencyStaysDeleted()
+        {
+            // Persistence: a fresh Reset + LoadExistingAgencies after the delete
+            // must NOT reconstruct the agency. Disk is the source of truth; if
+            // the file is gone, the agency is gone.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            var id = alice.AgencyId;
+            AgencySystem.TryDeleteAgency(alice, out _, out _);
+
+            AgencySystem.Reset();
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsFalse(AgencySystem.Agencies.ContainsKey(id));
+            Assert.IsFalse(AgencySystem.AgencyByPlayerName.ContainsKey("Alice"));
+        }
+
+        [TestMethod]
+        public void TryDeleteAgency_AfterDelete_OwnerReconnectMintsFreshAgency()
+        {
+            // The prior owner's RegisterAgency on next "connect" (test invokes it
+            // directly here) hits the no-mapping branch and mints a fresh agency
+            // with the configured StartingFunds/Science/Reputation seeds. Pins the
+            // post-delete reconnect UX documented on DeleteAgencyCommand.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            var originalId = alice.AgencyId;
+
+            AgencySystem.TryDeleteAgency(alice, out _, out _);
+
+            var fresh = AgencySystem.RegisterAgency("Alice");
+
+            Assert.IsNotNull(fresh);
+            Assert.AreNotEqual(originalId, fresh.AgencyId, "fresh agency mints a new Guid");
+            Assert.AreEqual(25_000d, fresh.Funds);
+            Assert.AreEqual(10d, fresh.Science);
+            Assert.AreEqual(5d, fresh.Reputation);
+        }
+
         // --- TryRenameAgencyOwner — Stage 5.18d slice (e) /transferagency ----
         // Renames the OwningPlayerName on an existing AgencyState; vessel
         // OwningAgencyId stamps are unaffected. Pins the atomic mutation
