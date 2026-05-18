@@ -9,7 +9,19 @@ namespace LmpCommon.Message.Data.Agency
     /// Server → client. Carries the canonical state of ONE agency. Sent:
     /// - on player auth (the assigned agency's full state, so the client's local
     ///   mirror starts populated),
-    /// - on any private-field mutation that the local player is allowed to observe.
+    /// - on any private-field mutation that the local player is allowed to observe,
+    /// - as an owner-only echo following a Stage 5.17e-3 routed mutation
+    ///   (<c>Server/System/Agency/AgencyCurrencyRouter.cs</c>): when the local
+    ///   player's KSP fires <c>OnFundsChanged</c> / <c>OnScienceChanged</c> /
+    ///   <c>OnReputationChanged</c>, the resulting <c>ShareProgress*MsgData</c>
+    ///   is intercepted server-side under per-agency mode and echoes back to
+    ///   the originating client as this snapshot — full state, not a delta — so
+    ///   the Stage 5.18a client mirror can re-converge its local KSP singletons
+    ///   on the server's authoritative values. The 5.18a handler MUST bracket
+    ///   the re-apply with <c>ShareFundsSystem.Singleton.StartIgnoringEvents() /
+    ///   StopIgnoringEvents()</c> (and the equivalents for Science / Reputation)
+    ///   per BUG-025 v2 precedent, or the local re-apply will fire OnXxxChanged
+    ///   AGAIN and produce a feedback loop with the server.
     ///
     /// Other players never receive this for an agency that isn't theirs — funds /
     /// science / reputation are private per spec §10 Q1. Tracking-station labels
