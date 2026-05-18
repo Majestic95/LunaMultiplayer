@@ -321,11 +321,32 @@ namespace Server.Message
         {
             var msgData = (VesselSyncMsgData)message;
 
+            //[Stage 5.18d slice (i)] Force-full-sync on the first VesselSync per
+            //connection under gate=on. Closes the 5.18b reconnect gap where KSP's
+            //FlightGlobals.Vessels retains prior-connection vessels but their
+            //lmpOwningAgency stamp was stripped by BackupVessel — the legacy
+            //incremental diff below would skip them ("client already has these"),
+            //leaving the client-side AgencySystem.VesselOwnership registry empty
+            //for known vessels. Full-sync routes every vessel through
+            //GetVesselInConfigNodeFormat which serialises the canonical stamp.
+            var forceFullSync = AgencyVesselSyncPolicy.ShouldFullSync(
+                AgencySystem.PerAgencyEnabled, client.HasReceivedInitialVesselsSync);
+
             var allVessels = VesselStoreSystem.CurrentVessels.Keys.ToList();
 
-            //Here we only remove the vessels that the client ALREADY HAS so we only send the vessels they DON'T have
-            for (var i = 0; i < msgData.VesselsCount; i++)
-                allVessels.Remove(msgData.VesselIds[i]);
+            if (!forceFullSync)
+            {
+                //Legacy diff path: only ship vessels the client claims it doesn't have.
+                for (var i = 0; i < msgData.VesselsCount; i++)
+                    allVessels.Remove(msgData.VesselIds[i]);
+            }
+            else
+            {
+                LunaLog.Normal(
+                    $"[fix:per-agency-career] Forcing full vessel sync for {client.PlayerName} on first sync " +
+                    $"this connection ({allVessels.Count} vessels) — repopulates client-side VesselOwnership " +
+                    "stamps after the reconnect's OnDisabled clear.");
+            }
 
             var vesselsToSend = allVessels;
             foreach (var vesselId in vesselsToSend)
@@ -342,6 +363,20 @@ namespace Server.Message
                     MessageQueuer.SendToClient<VesselSrvMsg>(client, protoMsg);
                 }
             }
+
+            //[Stage 5.18d slice (i) — server-systems-review + upgrade-lens v1]
+            //Flip the per-connection "has-synced-once" flag ONLY when the full-
+            //sync branch actually executed. Under gate=off the flag stays false,
+            //so an admin who runs /changesettings PerAgencyCareer=true mid-
+            //session gets a full-sync on the next sync from each currently-
+            //connected client — the moment the gate flips on, the next sync
+            //repopulates that client's registry without requiring a kick +
+            //reconnect. The earlier "set unconditionally" logic had the
+            //inverted semantics: every gate-off sync set the flag true, so a
+            //subsequent gate-on toggle silently took the diff path and the
+            //client's registry stayed empty until reconnect.
+            if (forceFullSync)
+                client.HasReceivedInitialVesselsSync = true;
 
             if (allVessels.Count > 0)
                 LunaLog.Debug($"Sending {client.PlayerName} {vesselsToSend.Count} vessels");

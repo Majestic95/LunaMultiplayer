@@ -24,6 +24,24 @@ namespace Server.Client
 
         public bool Authenticated { get; set; }
 
+        /// <summary>
+        /// Stage 5.18d slice (i) — per-connection force-full-sync gate.
+        /// Set false at <see cref="ClientStructure"/> construction (new
+        /// <see cref="NetConnection"/> = new connection = new struct), flipped
+        /// true the FIRST time <see cref="Server.Message.VesselMsgReader.HandleVesselsSync"/>
+        /// handles a sync from this client. The handler uses it to ship ALL
+        /// vessels (not just the diff against the client's claimed set) on the
+        /// first per-connection sync under gate=on — closing the 5.18b
+        /// reconnect gap where the client's <c>FlightGlobals.Vessels</c>
+        /// retains vessels from the prior connection but KSP has stripped
+        /// their <c>lmpOwningAgency</c> stamp, leaving the client's
+        /// <c>AgencySystem.VesselOwnership</c> registry empty for known
+        /// vessels until the next authoritative VesselSync ships their proto
+        /// with the canonical stamp via
+        /// <c>VesselStoreSystem.GetVesselInConfigNodeFormat</c>.
+        /// </summary>
+        public bool HasReceivedInitialVesselsSync { get; set; }
+
         public long BytesReceived { get; set; }
         public long BytesSent { get; set; }
         public NetConnection Connection { get; }
