@@ -80,24 +80,24 @@ namespace Server.System
             //path), then call ReleasePlayerLocks for cross-agency-now-violating holders on
             //the transferred vessel. Do NOT extend force:true to bypass — that would be
             //weaponisable by any client passing force=true on a LockAcquireMsgData.
-            if (AgencySystem.PerAgencyEnabled
-                && IsVesselScopedLockType(lockDef.Type)
-                && lockDef.VesselId != Guid.Empty)
+            // [Stage 5.18d slice (c)] Cross-agency disposition delegated to the
+            // shared classifier so AcquireLock + LockSystem.IsCrossAgencyReject
+            // can't drift in the cross-agency check. The classifier returns one
+            // of five outcomes; only VesselNotInStoreReject and
+            // CrossAgencyReject cause AcquireLock to refuse.
+            switch (ClassifyCrossAgency(lockDef, out var crossAgencyOwnerForLog))
             {
-                if (!VesselStoreSystem.CurrentVessels.TryGetValue(lockDef.VesselId, out var vesselForAgency))
-                {
+                case CrossAgencyClassification.VesselNotInStoreReject:
                     LunaLog.Debug($"[fix:per-agency-career] refusing {lockDef.Type} lock on {lockDef.VesselId} for {lockDef.PlayerName} " +
-                                  $"(vessel not yet in store under gate=on; closes ingest-vs-acquire race)");
+                                  "(vessel not yet in store under gate=on; closes ingest-vs-acquire race)");
                     return false;
-                }
-                if (vesselForAgency.OwningAgencyId != Guid.Empty
-                    && AgencySystem.AgencyByPlayerName.TryGetValue(lockDef.PlayerName, out var requesterAgencyId)
-                    && requesterAgencyId != vesselForAgency.OwningAgencyId)
-                {
+                case CrossAgencyClassification.CrossAgencyReject:
                     LunaLog.Debug($"[fix:per-agency-career] refusing {lockDef.Type} lock on {lockDef.VesselId} for {lockDef.PlayerName} " +
-                                  $"(requester agency {requesterAgencyId:N} != vessel owning agency {vesselForAgency.OwningAgencyId:N})");
+                                  $"(requester agency != vessel owning agency {crossAgencyOwnerForLog:N})");
                     return false;
-                }
+                // The remaining classifications (NotApplicable / Allowed*) fall
+                // through to the legacy already-owned / existing-holder check
+                // below — they do not block the acquire on cross-agency grounds.
             }
 
             //Player tried to acquire a lock that they already own
@@ -126,6 +126,131 @@ namespace Server.System
 
         private static bool IsVesselScopedLockType(LockType type) =>
             type == LockType.Control || type == LockType.Update || type == LockType.UnloadedUpdate;
+
+        /// <summary>
+        /// Stage 5.18d slice (c) — peek helper for <see cref="LockSystemSender.SendLockAcquireMessage"/>
+        /// to detect that a just-rejected <see cref="AcquireLock"/> call would have
+        /// been refused specifically by the cross-agency guard (and not for any
+        /// of the other reasons in <see cref="AcquireLock"/>: cross-subspace past,
+        /// vessel-not-in-store under gate=on, or an existing-holder conflict).
+        /// The sender then emits a <see cref="LmpCommon.Message.Data.Lock.LockRejectMsgData"/>
+        /// to surface the reason to the originating client; other reject reasons
+        /// stay silent as they did pre-5.18d.
+        ///
+        /// <para><b>Race window.</b> Called AFTER <see cref="AcquireLock"/> returned
+        /// false, the vessel could in principle be removed between the two calls.
+        /// In that case this method returns false (vessel not in store) and the
+        /// sender falls through to the legacy silent-reject path — same UX the
+        /// player got pre-5.18d, no regression. Production path: <see cref="LockSystemSender"/>
+        /// processes lock-acquire messages on the Lidgren receive thread; vessel
+        /// removal happens on a different thread and the window is microsecond-
+        /// scale.</para>
+        ///
+        /// <para><b>Return value semantics.</b> Returns true ONLY when the lock
+        /// would be refused by the cross-agency guard specifically. Lower-precedence
+        /// reject paths (cross-subspace past, vessel-not-in-store, existing
+        /// holder) all return false here even if those are the actual reason the
+        /// acquire was refused; the sender treats those as the silent legacy
+        /// path.</para>
+        ///
+        /// <para>Outputs the vessel's <see cref="System.Agency.AgencyState.AgencyId"/>
+        /// in <paramref name="owningAgencyId"/> when the return is true, so the
+        /// sender can populate the wire message without an extra registry
+        /// lookup. <see cref="Guid.Empty"/> when the return is false.</para>
+        /// </summary>
+        public static bool IsCrossAgencyReject(LockDefinition lockDef, out Guid owningAgencyId)
+        {
+            return ClassifyCrossAgency(lockDef, out owningAgencyId) == CrossAgencyClassification.CrossAgencyReject;
+        }
+
+        /// <summary>
+        /// Cross-agency disposition shared by <see cref="AcquireLock"/> and
+        /// <see cref="IsCrossAgencyReject"/>. Encodes the full Stage 5.17a
+        /// guard's decision tree in one place so future bypass cases or new
+        /// reject paths can't introduce silent drift between the two callers
+        /// — the prior implementation duplicated the cross-agency branch
+        /// across two methods and already had begun to diverge (server-systems-
+        /// review v1 SS-2).
+        /// </summary>
+        private enum CrossAgencyClassification
+        {
+            /// <summary>
+            /// Gate off / non-vessel-scoped lock type / Empty VesselId — the
+            /// cross-agency guard never fires.
+            /// </summary>
+            NotApplicable,
+
+            /// <summary>
+            /// Permitted: vessel is in store AND (same agency OR Unassigned-
+            /// sentinel per spec §10 Q3).
+            /// </summary>
+            AllowedSameAgencyOrUnassigned,
+
+            /// <summary>
+            /// Permitted: requester has no <see cref="Agency.AgencySystem.AgencyByPlayerName"/>
+            /// mapping. 5.17a bypass for defensive direct-AcquireLock calls (test
+            /// harness) + the small pre-handshake window between Authenticated
+            /// = true and OnPlayerAuthenticated → RegisterAgency.
+            /// </summary>
+            AllowedRequesterAgencyless,
+
+            /// <summary>
+            /// Rejected SILENTLY (pre-5.18d behavior). Gate=on but the vessel
+            /// isn't in <see cref="VesselStoreSystem.CurrentVessels"/> yet —
+            /// closes the ingest-vs-acquire race documented in 5.17a's
+            /// round-1 consumer-lens review. The client gets no LockReject
+            /// message because this isn't a cross-agency reason — it's a
+            /// race that's expected to resolve on the next VesselSync.
+            /// </summary>
+            VesselNotInStoreReject,
+
+            /// <summary>
+            /// Rejected on cross-agency grounds. Server emits a
+            /// <see cref="LmpCommon.Message.Data.Lock.LockRejectMsgData"/> to
+            /// the originating client (Stage 5.18d slice (c)) so the player's
+            /// UI can surface the reason via a toast.
+            /// </summary>
+            CrossAgencyReject,
+        }
+
+        /// <summary>
+        /// Single source of truth for the cross-agency decision. Both
+        /// <see cref="AcquireLock"/> and <see cref="IsCrossAgencyReject"/>
+        /// call this; the peek returns true exclusively when the result is
+        /// <see cref="CrossAgencyClassification.CrossAgencyReject"/>.
+        ///
+        /// <para><b>Locking note for slice (e) <c>/transferagency</c>
+        /// interaction.</b> The classifier reads
+        /// <see cref="Agency.AgencySystem.AgencyByPlayerName"/> without
+        /// holding the per-name lock the rename writer uses. Slice (e)'s
+        /// Add-then-Remove swap means a concurrent reader during a rename
+        /// either resolves the old name (returns the same agency id — both
+        /// names mapped briefly) or the new name (same agency id) —
+        /// idempotent outcome; never a transient null window.</para>
+        /// </summary>
+        private static CrossAgencyClassification ClassifyCrossAgency(LockDefinition lockDef, out Guid owningAgencyId)
+        {
+            owningAgencyId = Guid.Empty;
+
+            if (!Agency.AgencySystem.PerAgencyEnabled) return CrossAgencyClassification.NotApplicable;
+            if (!IsVesselScopedLockType(lockDef.Type)) return CrossAgencyClassification.NotApplicable;
+            if (lockDef.VesselId == Guid.Empty) return CrossAgencyClassification.NotApplicable;
+
+            if (!VesselStoreSystem.CurrentVessels.TryGetValue(lockDef.VesselId, out var vessel))
+                return CrossAgencyClassification.VesselNotInStoreReject;
+
+            if (vessel.OwningAgencyId == Guid.Empty)
+                return CrossAgencyClassification.AllowedSameAgencyOrUnassigned;
+
+            if (!Agency.AgencySystem.AgencyByPlayerName.TryGetValue(lockDef.PlayerName, out var requesterAgencyId))
+                return CrossAgencyClassification.AllowedRequesterAgencyless;
+
+            if (requesterAgencyId == vessel.OwningAgencyId)
+                return CrossAgencyClassification.AllowedSameAgencyOrUnassigned;
+
+            owningAgencyId = vessel.OwningAgencyId;
+            return CrossAgencyClassification.CrossAgencyReject;
+        }
 
         public static bool ReleaseLock(LockDefinition lockDef)
         {

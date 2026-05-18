@@ -4,7 +4,9 @@ using LmpCommon.Message.Client;
 using LmpCommon.Enums;
 using LmpCommon.Message.Data.Agency;
 using LmpCommon.Message.Data.Chat;
+using LmpCommon.Locks;
 using LmpCommon.Message.Data.Kerbal;
+using LmpCommon.Message.Data.Lock;
 using LmpCommon.Message.Data.Settings;
 using LmpCommon.Message.Data.ShareProgress;
 using LmpCommon.Message.Data.Vessel;
@@ -246,6 +248,27 @@ namespace LmpCommonTest
             Assert.AreEqual(c2Original.Length, roundTripped.Contracts[1].NumBytes);
             for (var i = 0; i < c2Original.Length; i++)
                 Assert.AreEqual(c2Original[i], roundTripped.Contracts[1].Data[i], $"c2 byte mismatch at offset {i}");
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeLockRejectMsg()
+        {
+            // Stage 5.18d slice (c) — server-side reject feedback. Pin lock
+            // round-trip + reason byte + owning-agency id.
+            var owningAgency = Guid.NewGuid();
+            var vesselId = Guid.NewGuid();
+            var msgData = Factory.CreateNewMessageData<LockRejectMsgData>();
+            msgData.Lock = new LockDefinition(LockType.Control, "Alice", vesselId);
+            msgData.Reason = LockRejectReason.CrossAgency;
+            msgData.OwningAgencyId = owningAgency;
+
+            var roundTripped = RoundTripServer<LockSrvMsg, LockRejectMsgData>(msgData);
+
+            Assert.AreEqual(LockType.Control, roundTripped.Lock.Type);
+            Assert.AreEqual(vesselId, roundTripped.Lock.VesselId);
+            Assert.AreEqual("Alice", roundTripped.Lock.PlayerName);
+            Assert.AreEqual(LockRejectReason.CrossAgency, roundTripped.Reason);
+            Assert.AreEqual(owningAgency, roundTripped.OwningAgencyId);
         }
 
         [TestMethod]

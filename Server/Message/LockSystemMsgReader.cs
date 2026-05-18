@@ -1,8 +1,8 @@
-﻿using System;
-using LmpCommon.Message.Data.Lock;
+﻿using LmpCommon.Message.Data.Lock;
 using LmpCommon.Message.Interface;
 using LmpCommon.Message.Types;
 using Server.Client;
+using Server.Log;
 using Server.Message.Base;
 using Server.System;
 
@@ -30,8 +30,21 @@ namespace Server.Message
                     if (releaseData.Lock.PlayerName == client.PlayerName)
                         LockSystemSender.ReleaseAndSendLockReleaseMessage(client, releaseData.Lock);
                     break;
+                case LockMessageType.ListReply:
+                case LockMessageType.Reject:
+                    // [Stage 5.18d slice (c)] These subtypes are server-→-client only. The
+                    // CliMsg dictionary lists them so MessageBase.GetMessageData can
+                    // deserialise them without throwing (BUG-010 wire-symmetry rule); a
+                    // misbehaving / malicious client that ships one of them should be
+                    // log+dropped rather than crashing the Lidgren receive thread via
+                    // the prior `default: throw` arm. Same pattern as
+                    // AgencyMsgReader's S-only-subtype log-drop arm.
+                    LunaLog.Warning($"[fix:per-agency-career] Dropping inbound {data.LockMessageType} from {client.PlayerName} (server-→-client subtype)");
+                    break;
                 default:
-                    throw new ArgumentOutOfRangeException();
+                    // Future-unknown subtypes — log + drop, never throw.
+                    LunaLog.Warning($"[fix:per-agency-career] Unknown LockMessageType {data.LockMessageType} from {client.PlayerName}; dropping");
+                    break;
             }
         }
     }

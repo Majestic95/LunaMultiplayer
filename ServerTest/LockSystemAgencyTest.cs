@@ -233,6 +233,108 @@ namespace ServerTest
                 "Both cross-subspace and cross-agency mismatch must reject.");
         }
 
+        // --- IsCrossAgencyReject — Stage 5.18d slice (c) peek helper -------
+        //
+        // Backs the LockSystemSender.SendLockAcquireMessage reject-message
+        // emission. Distinguishes the cross-agency reject path specifically
+        // from the other reject reasons (cross-subspace past, vessel-not-in-
+        // store, existing-holder) so the LockRejectMsgData wire emission
+        // fires only for cross-agency. These cases pin the peek's return
+        // value against each bypass and the actual-reject branch.
+
+        [TestMethod]
+        public void IsCrossAgencyReject_CrossAgency_ReturnsTrueWithOwningAgencyOut()
+        {
+            // Alice owns the vessel; Bob asks for a Control lock. The peek
+            // returns true and surfaces Alice's agency id for the wire payload.
+            SeedVessel(_vesselId, _agencyAlice);
+            AgencySystem.AgencyByPlayerName["alice"] = _agencyAlice;
+            AgencySystem.AgencyByPlayerName["bob"] = _agencyBob;
+
+            var lockDef = new LockDefinition(LockType.Control, "bob", _vesselId);
+            Assert.IsTrue(LockSystem.IsCrossAgencyReject(lockDef, out var owningAgencyId));
+            Assert.AreEqual(_agencyAlice, owningAgencyId);
+        }
+
+        [TestMethod]
+        public void IsCrossAgencyReject_SameAgency_ReturnsFalse()
+        {
+            SeedVessel(_vesselId, _agencyAlice);
+            AgencySystem.AgencyByPlayerName["alice"] = _agencyAlice;
+
+            var lockDef = new LockDefinition(LockType.Control, "alice", _vesselId);
+            Assert.IsFalse(LockSystem.IsCrossAgencyReject(lockDef, out var owningAgencyId));
+            Assert.AreEqual(Guid.Empty, owningAgencyId);
+        }
+
+        [TestMethod]
+        public void IsCrossAgencyReject_UnassignedSentinelVessel_ReturnsFalse()
+        {
+            // Spec §10 Q3: Unassigned vessels (Empty owner) are interactable
+            // by any agency; the reject path doesn't fire. Peek must agree.
+            SeedVessel(_vesselId, Guid.Empty);
+            AgencySystem.AgencyByPlayerName["bob"] = _agencyBob;
+
+            var lockDef = new LockDefinition(LockType.Control, "bob", _vesselId);
+            Assert.IsFalse(LockSystem.IsCrossAgencyReject(lockDef, out var owningAgencyId));
+            Assert.AreEqual(Guid.Empty, owningAgencyId);
+        }
+
+        [TestMethod]
+        public void IsCrossAgencyReject_GateOff_ReturnsFalse()
+        {
+            // Gate off: the cross-agency surface is invisible. AcquireLock
+            // would succeed here, but verify the peek also says no-reject so
+            // the sender emits no Reject message under gate-off.
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            SeedVessel(_vesselId, _agencyAlice);
+            AgencySystem.AgencyByPlayerName["alice"] = _agencyAlice;
+            AgencySystem.AgencyByPlayerName["bob"] = _agencyBob;
+
+            var lockDef = new LockDefinition(LockType.Control, "bob", _vesselId);
+            Assert.IsFalse(LockSystem.IsCrossAgencyReject(lockDef, out _));
+        }
+
+        [TestMethod]
+        public void IsCrossAgencyReject_NonVesselScopedLock_ReturnsFalse()
+        {
+            // Spectator/AsteroidComet/Contract/Kerbal aren't gated by the
+            // cross-agency check; the peek should also pass them.
+            SeedVessel(_vesselId, _agencyAlice);
+            AgencySystem.AgencyByPlayerName["alice"] = _agencyAlice;
+            AgencySystem.AgencyByPlayerName["bob"] = _agencyBob;
+
+            var lockDef = new LockDefinition(LockType.Spectator, "bob");
+            Assert.IsFalse(LockSystem.IsCrossAgencyReject(lockDef, out _));
+        }
+
+        [TestMethod]
+        public void IsCrossAgencyReject_VesselNotInStore_ReturnsFalse()
+        {
+            // The vessel-not-in-store reject path is silent (different reason
+            // than cross-agency). Peek returns false; sender falls through to
+            // the legacy silent-reject path. Acceptable — vessel-not-in-store
+            // is typically a race window, not an operator-visible decision.
+            AgencySystem.AgencyByPlayerName["bob"] = _agencyBob;
+
+            var lockDef = new LockDefinition(LockType.Control, "bob", Guid.NewGuid());
+            Assert.IsFalse(LockSystem.IsCrossAgencyReject(lockDef, out _));
+        }
+
+        [TestMethod]
+        public void IsCrossAgencyReject_RequesterHasNoAgencyMapping_ReturnsFalse()
+        {
+            // Bob has no agency mapping — the 5.17a bypass case. Cross-agency
+            // check does NOT fire (lock-acquire succeeds via bypass); peek
+            // must also return false.
+            SeedVessel(_vesselId, _agencyAlice);
+            AgencySystem.AgencyByPlayerName["alice"] = _agencyAlice;
+            // bob deliberately absent from AgencyByPlayerName
+
+            var lockDef = new LockDefinition(LockType.Control, "bob", _vesselId);
+            Assert.IsFalse(LockSystem.IsCrossAgencyReject(lockDef, out _));
+        }
+
         private static void SeedVessel(Guid vesselId, Guid owningAgencyId)
         {
             var vessel = LoadSampleVessel();

@@ -21,7 +21,8 @@ namespace LmpCommon.Message.Client
         {
             [(ushort)LockMessageType.ListRequest] = typeof(LockListRequestMsgData),
             [(ushort)LockMessageType.Acquire] = typeof(LockAcquireMsgData),
-            [(ushort)LockMessageType.Release] = typeof(LockReleaseMsgData)
+            [(ushort)LockMessageType.Release] = typeof(LockReleaseMsgData),
+            [(ushort)LockMessageType.Reject] = typeof(LockRejectMsgData),
         };
 
         public override ClientMessageType MessageType => ClientMessageType.Lock;
