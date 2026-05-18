@@ -9,10 +9,13 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
 {
     private readonly ServerFolderService _folderService = new();
     private readonly ServerProcessService _processService = new();
+    private readonly SettingsXmlService _settingsXml = new();
+    private readonly SettingsCatalogService _settingsCatalog;
     private bool _disposed;
 
     public FolderSetupViewModel FolderSetup { get; }
     public ServerControlViewModel ServerControl { get; }
+    public LaunchSettingsViewModel LaunchSettings { get; }
     public AdminActionsViewModel AdminActions { get; }
 
     /// <summary>
@@ -24,8 +27,10 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
 
     public MainWindowViewModel()
     {
+        _settingsCatalog = new SettingsCatalogService(_settingsXml);
         FolderSetup = new FolderSetupViewModel(_folderService, OnValidationChanged);
         ServerControl = new ServerControlViewModel(_processService);
+        LaunchSettings = new LaunchSettingsViewModel(_settingsCatalog);
         AdminActions = new AdminActionsViewModel(_processService)
         {
             // AdminActions.Restart needs to bring the server back up after
@@ -72,6 +77,18 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
     private void OnValidationChanged(ServerFolderValidation validation)
     {
         ServerControl.Entrypoint = validation.CanLaunch ? validation.Entrypoint : null;
+        // LaunchSettings loads files under <folder>/Config — forward only if
+        // the folder itself exists, so an invalid pick (bad path, file
+        // instead of folder) shows the "select a folder" placeholder rather
+        // than a misleading "Config not yet created" message. Missing
+        // entrypoint is still OK: admins inspecting an unpacked release zip
+        // with no Server.exe should still be able to read settings.
+        var folderForSettings =
+            !string.IsNullOrWhiteSpace(validation.Path)
+            && System.IO.Directory.Exists(validation.Path)
+                ? validation.Path
+                : null;
+        LaunchSettings.SetServerFolder(folderForSettings);
     }
 
     public void Dispose()

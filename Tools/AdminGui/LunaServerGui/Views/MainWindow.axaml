@@ -20,6 +20,9 @@
             <TabItem Header="Folder &amp; Setup">
                 <ContentControl Content="{Binding FolderSetup}"/>
             </TabItem>
+            <TabItem Header="Launch Settings">
+                <ContentControl Content="{Binding LaunchSettings}"/>
+            </TabItem>
             <TabItem Header="Server Console">
                 <ContentControl Content="{Binding ServerControl}"/>
             </TabItem>
