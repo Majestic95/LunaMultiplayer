@@ -14,9 +14,9 @@ using System.Runtime.CompilerServices;
 [assembly: ComVisible(false)]
 [assembly: Guid("cc8e38bb-d6d5-4bb9-ab74-a3a1a11ddc8d")]
 
-[assembly: AssemblyVersion("0.30.0")]
-[assembly: AssemblyFileVersion("0.30.0")]
-[assembly: AssemblyInformationalVersion("0.30.0-compiled")]
+[assembly: AssemblyVersion("0.31.0")]
+[assembly: AssemblyFileVersion("0.31.0")]
+[assembly: AssemblyInformationalVersion("0.31.0-compiled")]
 
 [assembly: TypeForwardedTo(typeof(LmpCommon.PlayerStatus))]
 [assembly: TypeForwardedTo(typeof(LmpCommon.Message.ClientMessageFactory))]
@@ -46,4 +46,4 @@ using System.Runtime.CompilerServices;
 [assembly: TypeForwardedTo(typeof(LmpCommon.Enums.MasterServerMessageType))]
 [assembly: TypeForwardedTo(typeof(LmpCommon.Enums.ServerMessageType))]
 
-[assembly: KSPAssembly("LMP", 0, 30)]
+[assembly: KSPAssembly("LMP", 0, 31)]
