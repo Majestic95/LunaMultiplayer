@@ -27,6 +27,7 @@ namespace Server.Command
             RegisterCommand("dekessler", new DekesslerCommand().Execute, "Clears out debris from the server");
             RegisterCommand("help", new DisplayHelpCommand().Execute, "Displays this help");
             RegisterCommand("kick", new KickCommand().Execute, "Kicks a player from the server");
+            RegisterCommand("listagencies", new ListAgenciesCommand().Execute, "Lists per-agency career registry entries (gate-aware)");
             RegisterCommand("listclients", new ListClientsCommand().Execute, "Lists connected clients");
             RegisterCommand("listlocks", new ListLocksCommand().Execute, "Lists current locks");
             RegisterCommand("nukeksc", new NukeCommand().Execute, "Clears ALL vessels from KSC and the runway");
