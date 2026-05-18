@@ -13,6 +13,7 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
 
     public FolderSetupViewModel FolderSetup { get; }
     public ServerControlViewModel ServerControl { get; }
+    public AdminActionsViewModel AdminActions { get; }
 
     /// <summary>
     /// When non-null, the most recent attempt to close the window was blocked.
@@ -25,6 +26,18 @@ public sealed partial class MainWindowViewModel : ViewModelBase, IDisposable
     {
         FolderSetup = new FolderSetupViewModel(_folderService, OnValidationChanged);
         ServerControl = new ServerControlViewModel(_processService);
+        AdminActions = new AdminActionsViewModel(_processService)
+        {
+            // AdminActions.Restart needs to bring the server back up after
+            // its Stop completes. Reuse ServerControl's Start path so the
+            // entrypoint resolution and CanExecute gating stay in one place.
+            StartAsyncCallback = async () =>
+            {
+                if (ServerControl.StartCommand.CanExecute(null))
+                    await ServerControl.StartCommand.ExecuteAsync(null);
+            },
+            CanStartCallback = () => ServerControl.Entrypoint is not null,
+        };
     }
 
     /// <summary>

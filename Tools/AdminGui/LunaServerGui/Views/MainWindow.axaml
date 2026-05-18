@@ -23,6 +23,9 @@
             <TabItem Header="Server Console">
                 <ContentControl Content="{Binding ServerControl}"/>
             </TabItem>
+            <TabItem Header="Admin Actions">
+                <ContentControl Content="{Binding AdminActions}"/>
+            </TabItem>
         </TabControl>
 
         <!-- Surfaced when MainWindow.OnClosing refuses to close because the

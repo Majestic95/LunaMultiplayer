@@ -1,0 +1,22 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d" d:DesignWidth="450" d:DesignHeight="200"
+        x:Class="LunaServerGui.Views.ConfirmDialog"
+        Title="Confirm"
+        Width="450"
+        SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        CanResize="False"
+        ShowInTaskbar="False">
+
+    <StackPanel Margin="16" Spacing="16">
+        <TextBlock Name="MessageText" TextWrapping="Wrap"/>
+        <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Name="CancelButton" Content="Cancel" Click="OnCancel" MinWidth="80" IsCancel="True"/>
+            <Button Name="ConfirmButton" Content="Confirm" Click="OnConfirm" MinWidth="80"/>
+        </StackPanel>
+    </StackPanel>
+
+</Window>

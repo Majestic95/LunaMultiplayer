@@ -1,0 +1,89 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:vm="using:LunaServerGui.ViewModels"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="600"
+             x:Class="LunaServerGui.Views.AdminActionsView"
+             x:DataType="vm:AdminActionsViewModel">
+
+    <ScrollViewer>
+        <StackPanel Margin="16" Spacing="16">
+
+            <TextBlock TextWrapping="Wrap"
+                       Text="Admin actions send /commands to the running server. Output appears in the Console tab. Destructive actions (Ban, Restart) require a confirmation step."/>
+
+            <TextBlock Foreground="{DynamicResource SystemControlForegroundAccentBrush}"
+                       Text="{Binding StatusMessage}"
+                       IsVisible="{Binding StatusMessage, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                       TextWrapping="Wrap"/>
+
+            <!-- ====== Broadcast ====== -->
+            <HeaderedContentControl>
+                <HeaderedContentControl.Header>
+                    <TextBlock Text="Broadcast" FontWeight="SemiBold" FontSize="14"/>
+                </HeaderedContentControl.Header>
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8" Margin="0,4,0,0">
+                    <TextBox Grid.Column="0"
+                             Text="{Binding BroadcastMessage, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                             PlaceholderText="Type a message to broadcast..."/>
+                    <Button Grid.Column="1" Content="Say" Command="{Binding BroadcastCommand}" MinWidth="80"/>
+                </Grid>
+            </HeaderedContentControl>
+
+            <!-- ====== Player listings (no input) ====== -->
+            <HeaderedContentControl>
+                <HeaderedContentControl.Header>
+                    <TextBlock Text="Player info (output appears in Console)" FontWeight="SemiBold" FontSize="14"/>
+                </HeaderedContentControl.Header>
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                    <Button Content="List clients" Command="{Binding ListClientsCommand}"/>
+                    <Button Content="List locks" Command="{Binding ListLocksCommand}"/>
+                    <Button Content="Connection stats" Command="{Binding ConnectionStatsCommand}"/>
+                </StackPanel>
+            </HeaderedContentControl>
+
+            <!-- ====== Kick / Ban — shared player+reason inputs ====== -->
+            <HeaderedContentControl>
+                <HeaderedContentControl.Header>
+                    <TextBlock Text="Kick / Ban" FontWeight="SemiBold" FontSize="14"/>
+                </HeaderedContentControl.Header>
+                <StackPanel Spacing="8" Margin="0,4,0,0">
+                    <Grid ColumnDefinitions="120,*" ColumnSpacing="8">
+                        <TextBlock Grid.Column="0" Text="Player name" VerticalAlignment="Center"/>
+                        <TextBox Grid.Column="1"
+                                 Text="{Binding PlayerName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 PlaceholderText="LMP player handle (case-sensitive)"/>
+                    </Grid>
+                    <Grid ColumnDefinitions="120,*" ColumnSpacing="8">
+                        <TextBlock Grid.Column="0" Text="Reason (optional)" VerticalAlignment="Center"/>
+                        <TextBox Grid.Column="1"
+                                 Text="{Binding PlayerReason, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 PlaceholderText="Defaults to 'No reason specified'"/>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button Content="Kick" Command="{Binding KickCommand}" MinWidth="80"/>
+                        <Button Content="Ban" Command="{Binding BanCommand}" MinWidth="80"
+                                Background="{DynamicResource SystemControlForegroundCriticalBrush}"
+                                Foreground="White"/>
+                    </StackPanel>
+                </StackPanel>
+            </HeaderedContentControl>
+
+            <!-- ====== Maintenance ====== -->
+            <HeaderedContentControl>
+                <HeaderedContentControl.Header>
+                    <TextBlock Text="Maintenance" FontWeight="SemiBold" FontSize="14"/>
+                </HeaderedContentControl.Header>
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                    <Button Content="Backup now" Command="{Binding BackupNowCommand}"/>
+                    <Button Content="Restart server" Command="{Binding RestartServerCommand}"
+                            Background="{DynamicResource SystemControlForegroundCriticalBrush}"
+                            Foreground="White"/>
+                </StackPanel>
+            </HeaderedContentControl>
+
+        </StackPanel>
+    </ScrollViewer>
+
+</UserControl>
