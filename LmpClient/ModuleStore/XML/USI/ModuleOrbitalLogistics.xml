@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<!--
+  PartSync targets for KolonyTools.ModuleOrbitalLogistics
+  (MKS Source/KolonyTools/OrbitalLogistics/ModuleOrbitalLogistics.cs at SHA ed0f6aa6).
+
+  Synced field:
+    ModuleId - string, [KSPField(isPersistant=true)] at line 14-15. Per-part
+               identifier used by ScenarioOrbitalLogistics to route transfers;
+               must sync so peers address the same module.
+
+  NOT synced here (intentional):
+    OpenWindow - [KSPEvent] at line 40-47. Opens an IMGUI window; UI-only with
+                 no state mutation. Syncing would force-open the window on
+                 every peer (intrusive and incorrect - only the initiating
+                 player should see their own UI).
+    MaxTransferMass - non-persistent [KSPField] at line 17-18 (config).
+    TransportCredits - non-persistent [KSPField] at line 20-21 (display-only).
+
+  Resource mutation flows through ScenarioOrbitalLogistics, NOT this part
+  module - see R2 in section 6 of the handoff. Phase 2/3 must gate that
+  surface separately (transfer.Deliver authority guard); ModuleOrbitalLogistics
+  itself only needs identifier sync.
+
+  Extends PartModule directly (line 11) - no parent ModuleStore XML to inherit;
+  this is a fresh module definition.
+
+  Pinned audit references (MKS x LMP compat handoff v3.2):
+    docs/research/mks-lmp-compatibility-handoff.md - section 5.3 (ModuleOrbitalLogistics row)
+    docs/research/mks-lmp-compatibility-handoff.md - section 7 Phase 1 step 2
+    docs/research/mks-lmp-compatibility-handoff.md - section 15 (external audit follow-up)
+-->
+<ModuleDefinition xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <Fields>
+        <FieldDefinition>
+            <FieldName>ModuleId</FieldName>
+        </FieldDefinition>
+    </Fields>
+    <Methods></Methods>
+</ModuleDefinition>

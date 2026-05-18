@@ -873,6 +873,9 @@
     <Content Include="ModuleStore\XML\Squad\ModuleDeployablePart.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleDeployableSolarPanel.xml" />
     <Content Include="ModuleStore\XML\Squad\BaseConverter.xml" />
+    <Content Include="ModuleStore\XML\Squad\ModuleResourceConverter.xml" />
+    <Content Include="ModuleStore\XML\USI\MKSModule.xml" />
+    <Content Include="ModuleStore\XML\USI\ModuleOrbitalLogistics.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleCommand.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleParachute.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleEngines.xml" />

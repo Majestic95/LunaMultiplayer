@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!--
+  PartSync targets for KolonyTools.MKSModule
+  (MKS Source/KolonyTools/Converters/MKSModule.cs at SHA ed0f6aa6).
+
+  Synced field:
+    Governor - float 0..1, [KSPField(isPersistant=true, guiActive=true)] at
+               line 24-25. Live player adjustment via the in-game UI slider;
+               must sync so peers see the same throttle setting.
+
+  NOT synced here (intentional):
+    lastCheck - private double, [KSPField(isPersistant=true)] at line 27-28.
+                Used for elapsed-time kolonization research accrual; Phase 3
+                ShareKolony will own this surface via Harmony postfix on
+                KolonizationManager.TrackLogEntry (MKS Source/KolonyTools/
+                Kolonization/KolonizationManager.cs:90). Syncing it here would
+                compete with Phase 3 routing. Revisit only if Phase 1 soak
+                surfaces a kolonization-research desync before Phase 3 lands.
+
+  Non-persistent [KSPField] (BonusEffect, EfficiencyMultiplier, ApplyBonuses)
+  are config-side (set from part.cfg, not mutated at runtime) - not synced.
+
+  Pinned audit references (MKS x LMP compat handoff v3.2):
+    docs/research/mks-lmp-compatibility-handoff.md - section 5.3 (MKSModule row)
+    docs/research/mks-lmp-compatibility-handoff.md - section 7 Phase 1 step 2
+    docs/research/mks-lmp-compatibility-handoff.md - section 15 (external audit)
+-->
+<ModuleDefinition xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <Fields>
+        <FieldDefinition>
+            <FieldName>Governor</FieldName>
+        </FieldDefinition>
+    </Fields>
+    <Methods></Methods>
+</ModuleDefinition>
