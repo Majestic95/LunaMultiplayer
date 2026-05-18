@@ -269,6 +269,93 @@ namespace Server.System.Agency
             // already covered by the Tech warning since parts are inlined inside
             // Tech blocks). Same triggering conditions and recovery workflow.
             WarnAboutSharedResearchOnUpgrade();
+
+            // [Stage 5.17e-6] Sibling diagnostic for Strategy / Progress /
+            // Facility scenarios — same shape and recovery workflow.
+            WarnAboutSharedProgressFacilityOnUpgrade();
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-6 upgrade-lens diagnostic] Sibling of the Tech / Research
+        /// warnings for the three new non-R&amp;D scenarios touched by 5.17e-6:
+        /// shared Strategies, ProgressTracking achievements, and facility upgrade
+        /// tiers. The projector strips/overrides these per-agency on send, so
+        /// accumulated shared values vanish on first per-agency client connect.
+        /// Combined into one warning to avoid log spam — the operator sees a
+        /// consolidated picture of what's at risk.
+        /// </summary>
+        private static void WarnAboutSharedProgressFacilityOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return;
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return;
+
+            int strategies = 0, achievements = 0, facilities = 0;
+            if (ScenarioStoreSystem.CurrentScenarios.TryGetValue("StrategySystem", out var stratScenario))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("StrategySystem"))
+                {
+                    var stratsContainer = stratScenario.GetNode("STRATEGIES")?.Value;
+                    if (stratsContainer != null)
+                        strategies = stratsContainer.GetNodes("STRATEGY").Count();
+                }
+            }
+            if (ScenarioStoreSystem.CurrentScenarios.TryGetValue("ProgressTracking", out var progScenario))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("ProgressTracking"))
+                {
+                    var progContainer = progScenario.GetNode("Progress")?.Value;
+                    if (progContainer != null)
+                    {
+                        // ProgressTracking children have dynamic names; we don't
+                        // enumerate-all here (LunaConfigNode API constraint —
+                        // see 5.17e-6 projector comment). Treat any non-null
+                        // Progress container with at least one child as a flag.
+                        var anySharedChild = progContainer.GetNode("Kerbin") != null
+                            || progContainer.GetNode("FirstLaunch") != null
+                            || progContainer.GetNode("FirstCrewToSurvive") != null;
+                        achievements = anySharedChild ? 1 : 0; // sentinel >0 indicates "has shared progress"
+                    }
+                }
+            }
+            if (ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScenario))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("ScenarioUpgradeableFacilities"))
+                {
+                    // Same dynamic-naming constraint; count known KSC facility ids
+                    // as a heuristic for "has accumulated facility upgrades."
+                    var knownFacilityKeys = new[]
+                    {
+                        "SpaceCenter/LaunchPad", "SpaceCenter/VehicleAssemblyBuilding",
+                        "SpaceCenter/Runway", "SpaceCenter/SpaceplaneHangar",
+                        "SpaceCenter/TrackingStation", "SpaceCenter/AstronautComplex",
+                        "SpaceCenter/MissionControl", "SpaceCenter/Administration",
+                        "SpaceCenter/ResearchAndDevelopment",
+                    };
+                    foreach (var k in knownFacilityKeys)
+                    {
+                        var fac = facScenario.GetNode(k)?.Value;
+                        if (fac == null) continue;
+                        var lvl = fac.GetValue("lvl")?.Value;
+                        if (string.IsNullOrEmpty(lvl)) continue;
+                        if (float.TryParse(lvl, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed > 0f)
+                            facilities++;
+                    }
+                }
+            }
+
+            if (strategies == 0 && achievements == 0 && facilities == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:per-agency-career] PerAgencyCareer=true on an upgrade universe carries " +
+                $"shared-agency progression state: {strategies} active strategy/strategies, " +
+                $"{(achievements > 0 ? "some" : "0")} ProgressTracking entries, " +
+                $"{facilities} upgraded facility/facilities. The Stage 5.17e-6 projector strips or " +
+                "overrides these on send so per-agency clients start with empty strategy lists, no " +
+                "world firsts, and stock-default facility tiers. Operator workflow remains fresh-start-" +
+                "only per spec §10: stop the server, archive Universe/ before any player connects.");
         }
 
         /// <summary>

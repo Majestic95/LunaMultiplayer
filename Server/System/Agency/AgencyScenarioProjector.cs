@@ -70,6 +70,10 @@ namespace Server.System.Agency
             "Funding",
             "ResearchAndDevelopment",
             "Reputation",
+            // [Stage 5.17e-6]
+            "StrategySystem",
+            "ProgressTracking",
+            "ScenarioUpgradeableFacilities",
         };
 
         // Precompiled regexes — one per key. Re-using compiled instances across every
@@ -145,9 +149,190 @@ namespace Server.System.Agency
                     return SpliceAgencyTechIntoResearchAndDevelopment(sciReplaced, targetAgency);
                 case "Reputation":
                     return ReplaceRootValue(serializedText, RepRegex, "rep", targetAgency.Reputation);
+                // [Stage 5.17e-6] Strategy / Achievement / Facility scenarios.
+                case "StrategySystem":
+                    return SpliceAgencyStrategiesIntoScenario(serializedText, targetAgency);
+                case "ProgressTracking":
+                    return SpliceAgencyAchievementsIntoScenario(serializedText, targetAgency);
+                case "ScenarioUpgradeableFacilities":
+                    return OverrideFacilityLevelsInScenario(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-6] Strip shared STRATEGIES → STRATEGY child nodes and
+        /// splice in per-agency Strategies. Shared StrategySystem scenario shape:
+        /// <c>StrategySystem { STRATEGIES { STRATEGY { name = X, ... } } }</c>.
+        /// Per-entry isolation on parse failures. Same parse-fallback pattern
+        /// as <see cref="SpliceAgencyTechIntoResearchAndDevelopment"/>: on
+        /// whole-scenario parse failure, log + return input unchanged so the
+        /// player gets the shared blob rather than a hung handshake.
+        /// </summary>
+        private static string SpliceAgencyStrategiesIntoScenario(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "StrategySystem" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:per-agency-career] StrategySystem projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Find or create STRATEGIES container, strip its children, splice per-agency.
+            var stratsContainer = node.GetNode("STRATEGIES")?.Value;
+            if (stratsContainer == null)
+            {
+                stratsContainer = new ConfigNode("") { Name = "STRATEGIES" };
+                node.AddNode(stratsContainer);
+            }
+            else
+            {
+                foreach (var existing in stratsContainer.GetNodes("STRATEGY").ToArray())
+                    stratsContainer.RemoveNode(existing.Value);
+            }
+
+            AgencyStrategyEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+                snapshot = targetAgency.Strategies.Values.ToArray();
+
+            foreach (var entry in snapshot)
+            {
+                if (entry == null || entry.Data == null || entry.NumBytes <= 0)
+                    continue;
+                try
+                {
+                    var strategyNode = ScenarioDataUpdater.ParseClientConfigNode(entry.Data, entry.NumBytes, "STRATEGY");
+                    if (strategyNode.IsEmpty())
+                        continue;
+                    stratsContainer.AddNode(strategyNode);
+                }
+                catch (Exception)
+                {
+                    // Per-entry isolation — drop this strategy, keep others.
+                }
+            }
+
+            return node.ToString();
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-6] Strip shared Progress → {achievement-named-node}
+        /// children and splice in per-agency Achievements. ProgressTracking
+        /// scenario shape: <c>ProgressTracking { Progress { Kerbin { RocketLaunch
+        /// { ... } } FirstLaunch { ... } } }</c>. KSP names progress nodes
+        /// dynamically by the achievement path; the per-agency entry's Id
+        /// becomes the spliced ConfigNode's Name.
+        /// </summary>
+        private static string SpliceAgencyAchievementsIntoScenario(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "ProgressTracking" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:per-agency-career] ProgressTracking projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            var progressContainer = node.GetNode("Progress")?.Value;
+            if (progressContainer == null)
+            {
+                progressContainer = new ConfigNode("") { Name = "Progress" };
+                node.AddNode(progressContainer);
+            }
+
+            AgencyAchievementEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+                snapshot = targetAgency.Achievements.Values.ToArray();
+
+            // Upsert pattern (matches the legacy ScenarioAchievementsDataUpdater
+            // writer's ReplaceNode-or-AddNode): for each per-agency Achievement,
+            // remove the matching shared child by name, then add the per-agency
+            // version. Shared achievements with no per-agency override stay —
+            // the WarnAboutSharedResearchOnUpgrade boot diagnostic (5.17e-5) +
+            // a future 5.17e-6 equivalent informs operators about the partial
+            // bleed-through under upgrade-in-place universes. This trades
+            // strict-isolation for a simpler projector + compatibility with the
+            // dynamic-naming KSP uses for Progress children (no enumerate-all).
+            foreach (var entry in snapshot)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.Id) || entry.Data == null || entry.NumBytes <= 0)
+                    continue;
+                try
+                {
+                    // Remove existing same-named child if any (upsert semantics).
+                    var existing = progressContainer.GetNode(entry.Id);
+                    if (existing != null)
+                        progressContainer.RemoveNode(existing.Value);
+                    var achNode = ScenarioDataUpdater.ParseClientConfigNode(entry.Data, entry.NumBytes, entry.Id);
+                    if (achNode.IsEmpty())
+                        continue;
+                    progressContainer.AddNode(achNode);
+                }
+                catch (Exception)
+                {
+                    // Per-entry isolation.
+                }
+            }
+
+            return node.ToString();
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-6] Override <c>lvl</c> values for facilities the
+        /// agency has upgraded. ScenarioUpgradeableFacilities shape:
+        /// <c>ScenarioUpgradeableFacilities { SpaceCenter/LaunchPad { lvl = X }
+        /// SpaceCenter/VehicleAssemblyBuilding { lvl = Y } ... }</c>. Each
+        /// facility is a top-level named child node. We don't strip-and-resplice
+        /// here — facilities NOT in the per-agency dict keep the shared scenario
+        /// default (which is the stock baseline for a fresh universe; an
+        /// upgrade-in-place universe's tier values for unmentioned facilities
+        /// already get the WarnAboutSharedFacilityOnUpgrade diagnostic).
+        /// </summary>
+        private static string OverrideFacilityLevelsInScenario(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "ScenarioUpgradeableFacilities" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:per-agency-career] ScenarioUpgradeableFacilities projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            KeyValuePair<string, float>[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+                snapshot = targetAgency.FacilityLevels.ToArray();
+
+            foreach (var kvp in snapshot)
+            {
+                if (string.IsNullOrEmpty(kvp.Key))
+                    continue;
+                var facilityNode = node.GetNode(kvp.Key)?.Value;
+                if (facilityNode == null)
+                {
+                    // Facility not in shared scenario — add a fresh node so
+                    // KSP-side ScenarioUpgradeableFacilities reads the per-agency
+                    // tier correctly. Otherwise the player sees the unupgraded
+                    // default for this facility.
+                    facilityNode = new ConfigNode("") { Name = kvp.Key };
+                    facilityNode.CreateValue(new CfgNodeValue<string, string>("lvl",
+                        kvp.Value.ToString(CultureInfo.InvariantCulture)));
+                    node.AddNode(facilityNode);
+                }
+                else
+                {
+                    facilityNode.UpdateValue("lvl", kvp.Value.ToString(CultureInfo.InvariantCulture));
+                }
+            }
+
+            return node.ToString();
         }
 
         /// <summary>

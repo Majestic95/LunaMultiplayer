@@ -120,6 +120,38 @@ namespace Server.System.Agency
             new Dictionary<string, int>(StringComparer.Ordinal);
 
         /// <summary>
+        /// Per-agency active strategies (KSP <c>Strategy</c> records — Mission
+        /// Control's "Aggressive Negotiations" / "Open-Source Tech" / etc.).
+        /// Keyed by strategy name. Same concurrency contract as
+        /// <see cref="TechNodes"/>: reads and writes both need
+        /// <see cref="AgencySystem.GetAgencyLock"/>.
+        /// </summary>
+        public Dictionary<string, AgencyStrategyEntry> Strategies { get; } =
+            new Dictionary<string, AgencyStrategyEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Per-agency achievements / world firsts (KSP <c>ProgressTracking</c>
+        /// child nodes — first launch, first orbit, first Mun flyby, etc.).
+        /// Keyed by the achievement node's name (e.g. <c>Kerbin/RocketLaunch</c>);
+        /// the projector uses that name as the spliced ConfigNode's name when
+        /// re-adding under the <c>Progress</c> parent block.
+        /// </summary>
+        public Dictionary<string, AgencyAchievementEntry> Achievements { get; } =
+            new Dictionary<string, AgencyAchievementEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Per-agency KSC facility upgrade levels (Launchpad/VAB/SPH/etc.).
+        /// Keyed by FacilityId (e.g. <c>SpaceCenter/LaunchPad</c>), value is
+        /// the normalised level (0.0-1.0 mapped to KSP's tier slots).
+        /// Projector overrides matching facility nodes' <c>lvl</c> values in
+        /// the <c>ScenarioUpgradeableFacilities</c> scenario; unmentioned
+        /// facilities keep the shared scenario's value (which is the
+        /// stock-default baseline for a fresh universe).
+        /// </summary>
+        public Dictionary<string, float> FacilityLevels { get; } =
+            new Dictionary<string, float>(StringComparer.Ordinal);
+
+        /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
         /// Created at server boot via <see cref="Server.Context.Universe.CheckUniverse"/>
         /// alongside the other Universe child folders, so <see cref="FileHandler.WriteAtomic"/>
@@ -269,6 +301,62 @@ namespace Server.System.Agency
                         node.AddNode(expRoot);
                     }
                     expRoot.CreateValue(new CfgNodeValue<string, string>(kvp.Key,
+                        kvp.Value.ToString(CultureInfo.InvariantCulture)));
+                }
+            }
+
+            // [Stage 5.17e-6] Strategies — same shape as TECHTREE / SUBJECTS.
+            if (Strategies.Count > 0)
+            {
+                var stratRoot = new ConfigNode("") { Name = "STRATEGIES" };
+                node.AddNode(stratRoot);
+                foreach (var entry in Strategies.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.StrategyName))
+                        continue;
+                    var stratNode = new ConfigNode("") { Name = "STRATEGY" };
+                    stratNode.CreateValue(new CfgNodeValue<string, string>("Name", entry.StrategyName));
+                    var dataBytes = entry.Data ?? Array.Empty<byte>();
+                    var len = Math.Min(entry.NumBytes, dataBytes.Length);
+                    var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
+                    stratNode.CreateValue(new CfgNodeValue<string, string>("Data", base64));
+                    stratRoot.AddNode(stratNode);
+                }
+            }
+
+            // [Stage 5.17e-6] Achievements — same shape, ACHIEVEMENT child nodes.
+            if (Achievements.Count > 0)
+            {
+                var achRoot = new ConfigNode("") { Name = "ACHIEVEMENTS" };
+                node.AddNode(achRoot);
+                foreach (var entry in Achievements.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.Id))
+                        continue;
+                    var achNode = new ConfigNode("") { Name = "ACHIEVEMENT" };
+                    achNode.CreateValue(new CfgNodeValue<string, string>("Id", entry.Id));
+                    var dataBytes = entry.Data ?? Array.Empty<byte>();
+                    var len = Math.Min(entry.NumBytes, dataBytes.Length);
+                    var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
+                    achNode.CreateValue(new CfgNodeValue<string, string>("Data", base64));
+                    achRoot.AddNode(achNode);
+                }
+            }
+
+            // [Stage 5.17e-6] Facility levels — flat key=value pairs.
+            if (FacilityLevels.Count > 0)
+            {
+                ConfigNode facRoot = null;
+                foreach (var kvp in FacilityLevels)
+                {
+                    if (string.IsNullOrEmpty(kvp.Key))
+                        continue;
+                    if (facRoot == null)
+                    {
+                        facRoot = new ConfigNode("") { Name = "FACILITY_LEVELS" };
+                        node.AddNode(facRoot);
+                    }
+                    facRoot.CreateValue(new CfgNodeValue<string, string>(kvp.Key,
                         kvp.Value.ToString(CultureInfo.InvariantCulture)));
                 }
             }
@@ -473,6 +561,70 @@ namespace Server.System.Agency
                     if (count <= 0)
                         continue;
                     state.ExperimentalParts[partValue.Key] = count;
+                }
+            }
+
+            // [Stage 5.17e-6] Strategies / Achievements / FacilityLevels —
+            // Stage 5.17e-6 additions. Same forward-compat shape: missing nodes
+            // load as empty collections; per-entry parse failures isolated.
+            var strategiesRoot = node.GetNode("STRATEGIES")?.Value;
+            if (strategiesRoot != null)
+            {
+                foreach (var strategyEntry in strategiesRoot.GetNodes("STRATEGY"))
+                {
+                    var entryNode = strategyEntry.Value;
+                    var name = entryNode.GetValue("Name")?.Value;
+                    if (string.IsNullOrEmpty(name))
+                        continue;
+                    var entry = new AgencyStrategyEntry { StrategyName = name };
+                    var base64 = entryNode.GetValue("Data")?.Value;
+                    if (!string.IsNullOrEmpty(base64))
+                    {
+                        try
+                        {
+                            entry.Data = Convert.FromBase64String(base64);
+                            entry.NumBytes = entry.Data.Length;
+                        }
+                        catch (FormatException) { entry.Data = Array.Empty<byte>(); entry.NumBytes = 0; }
+                    }
+                    state.Strategies[name] = entry;
+                }
+            }
+
+            var achievementsRoot = node.GetNode("ACHIEVEMENTS")?.Value;
+            if (achievementsRoot != null)
+            {
+                foreach (var achEntry in achievementsRoot.GetNodes("ACHIEVEMENT"))
+                {
+                    var entryNode = achEntry.Value;
+                    var id = entryNode.GetValue("Id")?.Value;
+                    if (string.IsNullOrEmpty(id))
+                        continue;
+                    var entry = new AgencyAchievementEntry { Id = id };
+                    var base64 = entryNode.GetValue("Data")?.Value;
+                    if (!string.IsNullOrEmpty(base64))
+                    {
+                        try
+                        {
+                            entry.Data = Convert.FromBase64String(base64);
+                            entry.NumBytes = entry.Data.Length;
+                        }
+                        catch (FormatException) { entry.Data = Array.Empty<byte>(); entry.NumBytes = 0; }
+                    }
+                    state.Achievements[id] = entry;
+                }
+            }
+
+            var facilityRoot = node.GetNode("FACILITY_LEVELS")?.Value;
+            if (facilityRoot != null)
+            {
+                foreach (var facilityValue in facilityRoot.GetAllValues())
+                {
+                    if (string.IsNullOrEmpty(facilityValue.Key))
+                        continue;
+                    if (!float.TryParse(facilityValue.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var level))
+                        continue;
+                    state.FacilityLevels[facilityValue.Key] = level;
                 }
             }
 
