@@ -581,6 +581,7 @@
     <Compile Include="Windows\Systems\SystemsWindow.cs" />
     <Compile Include="Utilities\InstallChecker.cs" />
     <Compile Include="Systems\Warp\WarpSystem.cs" />
+    <Compile Include="Systems\Warp\KolonyProximityWarpRoutine.cs" />
     <Compile Include="Windows\Debug\DebugDrawer.cs" />
     <Compile Include="Windows\Debug\DebugWindow.cs" />
     <Compile Include="Windows\Mod\ModDrawer.cs" />

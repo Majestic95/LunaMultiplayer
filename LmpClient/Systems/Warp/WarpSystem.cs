@@ -116,6 +116,7 @@ namespace LmpClient.Systems.Warp
             WaitingSubspaceIdFromServer = false;
             SyncedToLastSubspace = false;
             _currentRequestSeq = 0;
+            KolonyProximityWarpRoutine.OnDisabled();
         }
 
         protected override void OnEnabled()
@@ -127,6 +128,7 @@ namespace LmpClient.Systems.Warp
             {
                 SetupRoutine(new RoutineDefinition(100, RoutineExecution.Update, CheckWarpStopped));
                 SetupRoutine(new RoutineDefinition(1000, RoutineExecution.Update, WarpIfSpectatingToController));
+                SetupRoutine(new RoutineDefinition(1000, RoutineExecution.Update, KolonyProximityWarpRoutine.Run));
                 SetupRoutine(new RoutineDefinition(SteadyStateRetryRoutineMs, RoutineExecution.Update, CheckSteadyStateRetry));
                 SetupRoutine(new RoutineDefinition(5000, RoutineExecution.Update, CheckStuckAtWarp));
             }
