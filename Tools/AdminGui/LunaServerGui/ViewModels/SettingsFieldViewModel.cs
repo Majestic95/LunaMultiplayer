@@ -40,6 +40,7 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
     private readonly object _instance;
     private readonly object? _originalValue;
     private readonly IReadOnlyList<FieldValidationRule> _rules;
+    private readonly IReadOnlyList<FieldWarningRule> _warnings;
 
     public string Name => _property.Name;
     public string TypeName => _property.PropertyType.Name;
@@ -78,6 +79,17 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
     /// </summary>
     [ObservableProperty] private string? _crossFieldError;
 
+    /// <summary>
+    /// First-firing warning rule's operator-facing message, or null on
+    /// no-warning. Distinct from <see cref="ValidationError"/>: warnings
+    /// render amber and do NOT block Save — they flag dangerous-but-legal
+    /// edits (e.g. PerAgencyCareer flipping mid-save). Spec §Validation-
+    /// And-Safety-Rules requires the warning surface for the two
+    /// PerAgency fields; slice 1D-4 also routes them into the Save-
+    /// confirm dialog body via <see cref="LaunchSettingsViewModel"/>.
+    /// </summary>
+    [ObservableProperty] private string? _warningMessage;
+
     /// <summary>Display-only string for locked / read-only contexts (same shape as 1D-1's SettingsField.DisplayValue).</summary>
     public string DisplayValue { get; }
 
@@ -86,13 +98,15 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
         object instance,
         string comment,
         string? lockReason,
-        IReadOnlyList<FieldValidationRule>? rules = null)
+        IReadOnlyList<FieldValidationRule>? rules = null,
+        IReadOnlyList<FieldWarningRule>? warnings = null)
     {
         _property = property ?? throw new ArgumentNullException(nameof(property));
         _instance = instance ?? throw new ArgumentNullException(nameof(instance));
         Comment = comment ?? string.Empty;
         LockReason = lockReason;
         _rules = rules ?? Array.Empty<FieldValidationRule>();
+        _warnings = warnings ?? Array.Empty<FieldWarningRule>();
         _originalValue = property.GetValue(instance);
         DisplayValue = FormatForDisplay(_originalValue);
 
@@ -129,19 +143,19 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
     partial void OnTextValueChanged(string value)
     {
         if (Editor != FieldEditorKind.Text) return;
-        // Parse defensively so the dirty flag and parse error are always in
-        // sync with the latest text. The actual commit happens on Save.
         if (TryParseTextToValue(value, out var parsed, out var error))
         {
             ParseError = null;
             IsDirty = !Equals(parsed, _originalValue);
             ValidationError = RunRules(parsed);
+            WarningMessage = RunWarnings(parsed);
         }
         else
         {
             ParseError = error;
-            IsDirty = true; // Differs from baseline; just doesn't parse cleanly.
-            ValidationError = null; // Parse-failed values don't get rule-checked.
+            IsDirty = true;
+            ValidationError = null;
+            WarningMessage = null;
         }
     }
 
@@ -150,16 +164,15 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
         if (Editor != FieldEditorKind.Bool) return;
         IsDirty = !Equals(value, _originalValue);
         ValidationError = RunRules(value);
+        WarningMessage = RunWarnings(value);
     }
 
     partial void OnEnumValueChanged(string? value)
     {
         if (Editor != FieldEditorKind.Enum) return;
         IsDirty = !Equals(value, _originalValue?.ToString());
-        // Enum rules are vanishingly rare today (no spec-defined ones in
-        // 1D-3); run anyway so a future MaxLengthRule on a string enum
-        // works without code change.
         ValidationError = RunRules(value);
+        WarningMessage = RunWarnings(value);
     }
 
     /// <summary>
@@ -177,6 +190,40 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
             if (msg is not null) return msg;
         }
         return null;
+    }
+
+    /// <summary>
+    /// First-firing warning's message, or null if no warning applies.
+    /// Warnings don't block Save; they flag dangerous-but-legal edits.
+    /// </summary>
+    private string? RunWarnings(object? parsedValue)
+    {
+        foreach (var w in _warnings)
+        {
+            var msg = w.Evaluate(parsedValue);
+            if (msg is not null) return msg;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Return the value Save would commit for this field — the parsed
+    /// editor surface for Text editors, the typed BoolValue/EnumValue for
+    /// the others, the on-disk original for locked fields. Returns null
+    /// for a Text editor whose surface fails to parse. Used by the
+    /// LaunchSettingsViewModel difficulty-flip check to compare each
+    /// Gameplay field's would-be-saved value against the preset.
+    /// </summary>
+    internal object? GetEffectiveValue()
+    {
+        if (Editor == FieldEditorKind.Locked) return _originalValue;
+        return Editor switch
+        {
+            FieldEditorKind.Bool => BoolValue,
+            FieldEditorKind.Enum when EnumValue is not null && Enum.TryParse(_property.PropertyType, EnumValue, out var e) => e,
+            FieldEditorKind.Text when TryParseTextToValue(TextValue, out var parsed, out _) => parsed,
+            _ => null,
+        };
     }
 
     /// <summary>
@@ -246,10 +293,11 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Run rules against the current editor surface. Used by the parent
-    /// group on construction to populate ValidationError for fields that
-    /// inherit a validation failure from the loaded XML (e.g. operator
-    /// edited the file by hand and put MaxPlayers=99999).
+    /// Run rules + warnings against the current editor surface. Used by
+    /// the parent group on construction to populate ValidationError +
+    /// WarningMessage for fields that inherit a validation failure or
+    /// warning from the loaded XML (e.g. operator edited the file by
+    /// hand and put MaxPlayers=99999, or already had PerAgencyCareer=true).
     /// </summary>
     public void EvaluateRulesNow()
     {
@@ -262,6 +310,7 @@ public sealed partial class SettingsFieldViewModel : ObservableObject
             _ => null,
         };
         ValidationError = RunRules(currentValue);
+        WarningMessage = RunWarnings(currentValue);
     }
 
     /// <summary>

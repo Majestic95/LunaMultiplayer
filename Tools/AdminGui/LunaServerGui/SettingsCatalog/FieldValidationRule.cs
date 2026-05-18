@@ -115,3 +115,28 @@ public sealed record RequiredRule() : FieldValidationRule
 /// </summary>
 public delegate System.Collections.Generic.IReadOnlyDictionary<string, string>
     CrossFieldValidator(object instance);
+
+/// <summary>
+/// Per-field WARNING rule. Distinct from <see cref="FieldValidationRule"/>:
+/// warnings do NOT block Save (operator can proceed with caveat), they
+/// render in amber instead of red, and they fire on dangerous-but-legal
+/// edits where the operator should think twice. Used in slice 1D-4 for
+/// PerAgencyCareer + AllowEnablePerAgencyOnExistingUniverse — both
+/// fields are legal to change but the consequences are irreversible
+/// (spec §Validation-And-Safety-Rules).
+/// </summary>
+public abstract record FieldWarningRule
+{
+    /// <summary>Returns null on no-warning; an operator-facing message when a warning applies.</summary>
+    public abstract string? Evaluate(object? parsedValue);
+}
+
+/// <summary>
+/// Warning fires when a bool field is set to <paramref name="WhenValueIs"/>.
+/// Lets us flag "PerAgencyCareer=true" without flagging "PerAgencyCareer=false".
+/// </summary>
+public sealed record BoolValueWarning(bool WhenValueIs, string Message) : FieldWarningRule
+{
+    public override string? Evaluate(object? parsedValue)
+        => parsedValue is bool b && b == WhenValueIs ? Message : null;
+}

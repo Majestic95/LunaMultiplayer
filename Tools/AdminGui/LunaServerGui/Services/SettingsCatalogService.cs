@@ -38,21 +38,51 @@ public sealed class SettingsCatalogService
     };
 
     /// <summary>
-    /// Fields the GUI deliberately refuses to edit in slice 1D-2. Keyed by
+    /// Fields the GUI deliberately refuses to edit. Keyed by
     /// (DeclaringType, PropertyName). The value is the operator-readable
-    /// reason shown in the tooltip + the field's help text. Slice 1D-4 will
-    /// remove these entries and replace them with a confirm-dialog gate.
+    /// reason shown in the tooltip + the field's help text. Empty after
+    /// slice 1D-4 unlocked PerAgencyCareer + AllowEnablePerAgencyOnExisting-
+    /// Universe (they're now editable but go through warning + advanced-
+    /// confirm gates via <see cref="FieldWarnings"/> and the
+    /// LaunchSettingsViewModel save flow).
     /// </summary>
-    private static readonly Dictionary<(Type Type, string Property), string> LockedFields = new()
+    private static readonly Dictionary<(Type Type, string Property), string> LockedFields = new();
+
+    /// <summary>
+    /// Per-field WARNINGS (vs validation rules, which BLOCK Save). Surface
+    /// in amber below the editor + flow into the Save-confirm-dialog body.
+    /// Spec §Validation-And-Safety-Rules requires:
+    /// — PerAgencyCareer=true → warn "choose before universe population"
+    /// — AllowEnablePerAgencyOnExistingUniverse=true → strong warn +
+    ///   second-confirm dialog (handled in LaunchSettingsViewModel.SaveGroupAsync).
+    /// </summary>
+    private static readonly Dictionary<(Type Type, string Property), FieldWarningRule[]> FieldWarnings = new()
     {
-        [(typeof(GameplaySettingsDefinition), nameof(GameplaySettingsDefinition.PerAgencyCareer))] =
-            "PerAgencyCareer cannot be changed mid-save without losing accumulated career state. " +
-            "A dedicated confirm dialog (slice 1D-4) will gate this edit; for now, edit the XML file " +
-            "directly before the universe is first populated.",
-        [(typeof(GameplaySettingsDefinition), nameof(GameplaySettingsDefinition.AllowEnablePerAgencyOnExistingUniverse))] =
-            "Enabling per-agency on an existing universe is an irreversible operation that will hide " +
-            "accumulated shared-agency progress from per-agency clients. A dedicated advanced-confirm " +
-            "dialog (slice 1D-4) will gate this edit; do not toggle it casually.",
+        [(typeof(GameplaySettingsDefinition), nameof(GameplaySettingsDefinition.PerAgencyCareer))]
+            = new FieldWarningRule[]
+            {
+                // Symmetric warning per slice 1D-4 review: data-loss risk is real in
+                // BOTH directions. true→false discards per-agency state (each player's
+                // independent funds/science/contracts/tech); false→true discards
+                // accumulated shared-agency state. Spec §Validation: "do not casually
+                // change mid-save" — change, both directions.
+                new BoolValueWarning(true,
+                    "Per-agency career mode is intended to be chosen BEFORE the universe is first populated. " +
+                    "Flipping ON mid-save can lose accumulated shared-agency career state " +
+                    "(funds, science, reputation, contracts, tech). Operator must accept this trade-off explicitly."),
+                new BoolValueWarning(false,
+                    "Flipping per-agency career mode OFF discards each player's independent per-agency state " +
+                    "(funds, science, reputation, contracts, tech) — clients revert to a single shared-agency career. " +
+                    "Operator must accept this trade-off explicitly."),
+            },
+        [(typeof(GameplaySettingsDefinition), nameof(GameplaySettingsDefinition.AllowEnablePerAgencyOnExistingUniverse))]
+            = new FieldWarningRule[]
+            {
+                new BoolValueWarning(true,
+                    "[ADVANCED] Enabling per-agency on an EXISTING universe is irreversible: per-agency clients " +
+                    "will not see the accumulated shared-agency career state (the projector strips it on send). " +
+                    "A second confirm dialog fires before this is written to disk."),
+            },
     };
 
     /// <summary>
@@ -227,7 +257,8 @@ public sealed class SettingsCatalogService
                 var comment = p.GetCustomAttribute<XmlCommentAttribute>()?.Value ?? string.Empty;
                 LockedFields.TryGetValue((definitionType, p.Name), out var lockReason);
                 FieldRules.TryGetValue((definitionType, p.Name), out var rules);
-                return new SettingsFieldViewModel(p, instance, comment, lockReason, rules);
+                FieldWarnings.TryGetValue((definitionType, p.Name), out var warnings);
+                return new SettingsFieldViewModel(p, instance, comment, lockReason, rules, warnings);
             })
             .ToList();
     }

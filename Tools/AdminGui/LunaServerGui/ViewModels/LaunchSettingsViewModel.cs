@@ -7,6 +7,8 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using LunaServerGui.Services;
+using LunaServerGui.SettingsCatalog.Definitions;
+using LunaServerGui.SettingsCatalog.Enums;
 
 namespace LunaServerGui.ViewModels;
 
@@ -178,6 +180,19 @@ public sealed partial class LaunchSettingsViewModel : ViewModelBase
         }
 
         var changes = group.CollectChangeSummaries();
+        var warnings = new List<string>(group.CollectWarnings());
+
+        // Gameplay-specific: detect difficulty flip-to-Custom before save.
+        // Reads the General group's GameDifficulty effective value (operator
+        // may have edited it in another tab without saving yet) + diffs
+        // each Gameplay field against the matching preset. Per spec
+        // §Validation-And-Safety-Rules.
+        if (group.DisplayName == "Gameplay")
+        {
+            var flipWarning = CheckGameplayFlipToCustom(group);
+            if (flipWarning is not null) warnings.Add(flipWarning);
+        }
+
         var fileName = Path.GetFileName(group.FilePath);
         var backupDir = Path.Combine(Path.GetDirectoryName(group.FilePath) ?? string.Empty,
             SettingsXmlService.BackupSubdirectory);
@@ -190,11 +205,41 @@ public sealed partial class LaunchSettingsViewModel : ViewModelBase
             "version) will be removed on save — same as the server's own load-then-save cycle. " +
             "The backup preserves the file as-is so anything dropped can be restored from there.";
 
+        if (warnings.Count > 0)
+        {
+            body += "\n\n⚠ WARNINGS:\n" + string.Join("\n", warnings.Select(w => "  • " + w));
+        }
+
         var ok = await ConfirmAsync($"Save changes — {group.DisplayName}", body, "Save");
         if (!ok)
         {
             StatusMessage = $"{group.DisplayName}: save cancelled.";
             return;
+        }
+
+        // Second-confirm gate for the irreversible AllowEnablePerAgencyOn-
+        // ExistingUniverse=true edit (spec §Validation-And-Safety-Rules:
+        // "advanced warning/confirmation"). Triggers only when the field is
+        // being flipped FROM false TO true; flipping back to false is a
+        // safe-direction edit.
+        if (IsEnablingPerAgencyOnExistingUniverse(group))
+        {
+            var advancedOk = await ConfirmAsync(
+                "[ADVANCED] Enable per-agency on EXISTING universe",
+                "You are about to set AllowEnablePerAgencyOnExistingUniverse=true.\n\n" +
+                "This is IRREVERSIBLE in practice: per-agency clients will not see the accumulated " +
+                "shared-agency career state (funds, science, reputation, contracts, tech). The server's " +
+                "projector strips that state on send. Existing vessels are demoted to the Unassigned " +
+                "sentinel.\n\n" +
+                "The official supported workflow is fresh-start (spec §10). This setting exists for " +
+                "operators who explicitly accept the trade-off.\n\n" +
+                "Are you SURE you want to proceed?",
+                "I accept — enable on existing universe");
+            if (!advancedOk)
+            {
+                StatusMessage = $"{group.DisplayName}: save cancelled at advanced confirm.";
+                return;
+            }
         }
 
         SettingsXmlService.WriteResult writeResult;
@@ -231,5 +276,92 @@ public sealed partial class LaunchSettingsViewModel : ViewModelBase
         // ms); simpler than per-group surgical reload and any
         // external-edit-since-load is also picked up.
         await ReloadAsync();
+    }
+
+    // Fields ALWAYS divergent from every preset by design — the two
+    // PerAgencyCareer knobs are set false in every Set{Easy,Normal,Moderate,Hard},
+    // so naming them as the diverging field in a flip-to-Custom warning is
+    // misleading noise (slice 1D-4 review SHOULD FIX #2: when operator ticks
+    // PerAgencyCareer the dialog already has a BoolValueWarning AND a flip
+    // warning naming the same field; the flip warning should focus on OTHER
+    // divergences).
+    private static readonly HashSet<string> FlipCheckSkipFields = new()
+    {
+        nameof(GameplaySettingsDefinition.PerAgencyCareer),
+        nameof(GameplaySettingsDefinition.AllowEnablePerAgencyOnExistingUniverse),
+    };
+
+    /// <summary>
+    /// Returns a warning string if saving the Gameplay group would flip
+    /// GeneralSettings.GameDifficulty to Custom on next server start (i.e.
+    /// the effective Gameplay values diverge from the preset for the
+    /// CURRENT GameDifficulty). Returns null when no flip would occur, or
+    /// when GameDifficulty is already Custom (no flip from Custom).
+    /// Mirrors Server/Settings/SettingsHandler.HasDifferencesAgainstGivenSetting.
+    /// Counts ALL divergent non-PerAgency fields + names the first as an
+    /// example (review SHOULD FIX #2: single-field naming was misleading
+    /// when many fields diverged). Appends an unsaved-General-edit
+    /// parenthetical (review CONSIDER #5).
+    /// </summary>
+    private string? CheckGameplayFlipToCustom(SettingsGroupViewModel gameplayGroup)
+    {
+        var generalGroup = Groups.FirstOrDefault(g => g.DisplayName == "General");
+        if (generalGroup is null) return null;
+
+        var difficultyField = generalGroup.Fields
+            .FirstOrDefault(f => f.Name == nameof(GeneralSettingsDefinition.GameDifficulty));
+        if (difficultyField?.GetEffectiveValue() is not GameDifficulty currentDifficulty) return null;
+        if (currentDifficulty == GameDifficulty.Custom) return null;
+
+        var preset = new GameplaySettingsDefinition();
+        switch (currentDifficulty)
+        {
+            case GameDifficulty.Easy: preset.SetEasy(); break;
+            case GameDifficulty.Normal: preset.SetNormal(); break;
+            case GameDifficulty.Moderate: preset.SetModerate(); break;
+            case GameDifficulty.Hard: preset.SetHard(); break;
+            default: return null;
+        }
+
+        var presetType = typeof(GameplaySettingsDefinition);
+        var divergent = new List<(string Name, object? Preset, object? Effective)>();
+        foreach (var f in gameplayGroup.Fields)
+        {
+            if (FlipCheckSkipFields.Contains(f.Name)) continue;
+            var presetProp = presetType.GetProperty(f.Name);
+            if (presetProp is null) continue;
+            var presetValue = presetProp.GetValue(preset);
+            var effective = f.GetEffectiveValue();
+            if (!Equals(effective, presetValue))
+                divergent.Add((f.Name, presetValue, effective));
+        }
+        if (divergent.Count == 0) return null;
+
+        var first = divergent[0];
+        var basis = difficultyField.IsDirty
+            ? $" (based on your unsaved General-tab edit to {currentDifficulty})"
+            : string.Empty;
+        var countText = divergent.Count == 1
+            ? "one field differs"
+            : $"{divergent.Count} fields differ";
+        return $"GeneralSettings.GameDifficulty will be set to 'Custom' on next server start{basis} — " +
+               $"{countText} from the {currentDifficulty} preset " +
+               $"(e.g. {first.Name}: preset {first.Preset}, you have {first.Effective}). " +
+               $"This is the server's own behaviour; the GUI is just surfacing it.";
+    }
+
+    /// <summary>
+    /// True when the Gameplay group's
+    /// AllowEnablePerAgencyOnExistingUniverse field is dirty AND its
+    /// effective value is true (i.e. operator is flipping FROM false TO
+    /// true). The reverse direction (true → false) is a safe-direction
+    /// edit and does NOT trigger the advanced-confirm gate.
+    /// </summary>
+    private static bool IsEnablingPerAgencyOnExistingUniverse(SettingsGroupViewModel group)
+    {
+        if (group.DisplayName != "Gameplay") return false;
+        var f = group.Fields.FirstOrDefault(x =>
+            x.Name == nameof(GameplaySettingsDefinition.AllowEnablePerAgencyOnExistingUniverse));
+        return f is { IsDirty: true } && f.GetEffectiveValue() is true;
     }
 }

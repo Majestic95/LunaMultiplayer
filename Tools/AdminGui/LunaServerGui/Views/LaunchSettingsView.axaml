@@ -101,6 +101,13 @@
                                                Foreground="Red"
                                                FontStyle="Italic"
                                                Text="One or more fields have validation errors. Fix them before saving."/>
+                                    <TextBlock IsVisible="{Binding HasWarning}"
+                                               Foreground="DarkOrange"
+                                               FontStyle="Italic">
+                                        <Run Text="Warning ⚠"/>
+                                        <Run Text="{Binding WarningCount}"/>
+                                        <Run Text="non-blocking caveat(s) — Save is still enabled. Review the Save dialog before committing."/>
+                                    </TextBlock>
                                 </StackPanel>
 
                                 <!-- Fields list. Dimmed via FieldsOpacity when values are POCO defaults. -->
@@ -175,6 +182,16 @@
                                                             <TextBlock Text="{Binding CrossFieldError}"
                                                                        IsVisible="{Binding CrossFieldError, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
                                                                        Foreground="Red"
+                                                                       FontSize="11"
+                                                                       TextWrapping="Wrap"/>
+
+                                                            <!-- Warning (non-blocking, amber) — e.g. PerAgencyCareer=true.
+                                                                 Gated on IsDirty so a load of a file with PerAgencyCareer=true
+                                                                 doesn't pop amber on every reload (matches the aggregate
+                                                                 HasWarning gate in SettingsGroupViewModel — review SHOULD FIX #3). -->
+                                                            <TextBlock Text="{Binding WarningMessage}"
+                                                                       IsVisible="{Binding IsDirty}"
+                                                                       Foreground="DarkOrange"
                                                                        FontSize="11"
                                                                        TextWrapping="Wrap"/>
 

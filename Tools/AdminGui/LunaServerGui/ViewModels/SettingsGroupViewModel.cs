@@ -45,6 +45,8 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
     [ObservableProperty] private bool _hasDirty;
     [ObservableProperty] private bool _hasParseError;
     [ObservableProperty] private bool _hasValidationError;
+    [ObservableProperty] private int _warningCount;
+    [ObservableProperty] private bool _hasWarning;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SaveCommand))]
@@ -108,6 +110,7 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
             case nameof(SettingsFieldViewModel.ParseError):
             case nameof(SettingsFieldViewModel.ValidationError):
             case nameof(SettingsFieldViewModel.CrossFieldError):
+            case nameof(SettingsFieldViewModel.WarningMessage):
                 RecomputeAggregateState();
                 break;
         }
@@ -152,28 +155,39 @@ public sealed partial class SettingsGroupViewModel : ObservableObject
         var dirty = 0;
         var hasParse = false;
         var hasValidation = false;
+        var warnings = 0;
         foreach (var f in Fields)
         {
             if (f.IsDirty) dirty++;
             if (!string.IsNullOrEmpty(f.ParseError)) hasParse = true;
-            // Per-field ValidationError on a NON-dirty field is shown red
-            // (so the operator knows about it) but does NOT block Save —
-            // the operator inherited that problem from the loaded file and
-            // shouldn't be forced to fix it before saving unrelated edits.
-            // (Review finding #3: constructor-time validation was blocking
-            // save on a pre-broken file even when the operator was editing
-            // an entirely different field.) CrossFieldError IS counted
-            // regardless: it fires precisely because operator edits caused
-            // an inconsistency, so blocking save is the correct response.
             if (f.IsDirty && !string.IsNullOrEmpty(f.ValidationError)) hasValidation = true;
             if (!string.IsNullOrEmpty(f.CrossFieldError)) hasValidation = true;
+            // Count warnings on DIRTY fields only — pre-existing warnings on
+            // the loaded file (e.g. PerAgencyCareer was already true)
+            // shouldn't pop the "you should think about this" UI unless the
+            // operator is currently editing the field.
+            if (f.IsDirty && !string.IsNullOrEmpty(f.WarningMessage)) warnings++;
         }
         DirtyCount = dirty;
         HasDirty = dirty > 0;
         HasParseError = hasParse;
         HasValidationError = hasValidation;
+        WarningCount = warnings;
+        HasWarning = warnings > 0;
         CanSave = ValuesAreFromFile && HasDirty && !HasParseError && !HasValidationError;
     }
+
+    /// <summary>
+    /// Per-field warning messages for dirty fields, formatted for the
+    /// Save-confirm dialog body. Empty when no warnings apply. Used by
+    /// <see cref="LaunchSettingsViewModel"/> to compose the warnings
+    /// section of the confirm dialog.
+    /// </summary>
+    public IReadOnlyList<string> CollectWarnings()
+        => Fields
+            .Where(f => f.IsDirty && !string.IsNullOrEmpty(f.WarningMessage))
+            .Select(f => $"{f.Name}: {f.WarningMessage}")
+            .ToList();
 
     /// <summary>
     /// Lines for the confirm-dialog body: "FieldName: oldValue → newValue"
