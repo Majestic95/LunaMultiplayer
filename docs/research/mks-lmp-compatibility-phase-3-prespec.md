@@ -99,7 +99,7 @@ Phase 2's MKS-R1 (`3a355618`) closes the time-base divergence (cross-vessel UT m
 | KolonyTools/PlanetaryLogistics | [ModulePlanetaryLogistics.cs](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/PlanetaryLogistics/ModulePlanetaryLogistics.cs) | 133, 136 | `LevelResources` overflow-store branch | **Postfix anchor #3.** Same `vessel` context. |
 | KolonyTools/PlanetaryLogistics | [PlanetaryLogisticsScenario.cs](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/PlanetaryLogistics/PlanetaryLogisticsScenario.cs) | 8 | `class PlanetaryLogisticsScenario : ScenarioModule` | Scenario-module name for projection + `IgnoredScenarios.IgnoreSend` addition. |
 | KolonyTools/OrbitalLogistics | [OrbitalLogisticsTransferRequest.cs](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs) | 286-358 | `IEnumerator Deliver()` | **Prefix anchor for `AgencyOrbitalRouter`.** Reads `Origin` / `Destination` properties at line 289-301. |
-| KolonyTools/OrbitalLogistics | [OrbitalLogisticsTransferRequest.cs](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs) | 39, 42 | `_destinationId`, `_originId` | Persistent vessel-id strings (KSP `persistentId.ToString()` per [Origin setter line 117](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs#L117)). Router reads these for ownership lookup. |
+| KolonyTools/OrbitalLogistics | [OrbitalLogisticsTransferRequest.cs](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs) | 40, 43 | `_destinationId`, `_originId` | Persistent vessel-id strings (KSP `persistentId.ToString()` per [Destination setter line 149](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs#L149) and [Origin setter line 117](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs#L117)). Router reads these for ownership lookup. |
 | KolonyTools/OrbitalLogistics | [ScenarioOrbitalLogistics.cs](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/ScenarioOrbitalLogistics.cs) | 13 | `class ScenarioOrbitalLogistics : ScenarioModule` | Scenario-module name for projection + `IgnoredScenarios.IgnoreSend` addition. |
 | LMP / Server | [Server/System/ScenarioSystem.cs](file:///F:/luna-multiplayer-mks/Server/System/ScenarioSystem.cs) | 70-111 | `SendScenarioModules(ClientStructure client)` | Existing projection hook. Line 96 invokes `AgencyScenarioProjector.ProjectForClient` — Phase 3 adds switch cases inside the projector. |
 | LMP / Server | [Server/System/Agency/AgencyScenarioProjector.cs](file:///F:/luna-multiplayer-mks/Server/System/Agency/AgencyScenarioProjector.cs) | 68-77 | `CareerScenarios` HashSet | **Add 3 entries:** `"KolonizationScenario"`, `"PlanetaryLogisticsScenario"`, `"ScenarioOrbitalLogistics"`. Fast-path skip needs them. |
@@ -119,7 +119,7 @@ All three follow the `AgencyContractRouter` (5.17d) structural template: `public
 
 **Entry point:**
 ```text
-public static bool TryRoute(ClientStructure client, KolonyMutationMsgData msg)
+public static bool TryRoute(ClientStructure client, AgencyKolonyStateMsgData msg)
 ```
 
 **Body shape (modelled on `AgencyContractRouter.cs:83-132`):**
@@ -158,9 +158,9 @@ public static bool TryRoute(ClientStructure client, KolonyMutationMsgData msg)
 **Pure-helper extraction (per LMP testability convention):**
 
 ```text
-public static (List<KolonyMutationEntry> accept, List<string> rejectReasons)
+public static (List<AgencyKolonyEntry> accept, List<string> rejectReasons)
 ClassifyKolonyEntries(
-    IEnumerable<KolonyMutationEntry> incoming,
+    IEnumerable<AgencyKolonyEntry> incoming,
     Guid requesterAgencyId,
     Func<Guid, Guid?> getVesselOwningAgency)
 ```
@@ -173,10 +173,10 @@ Returns the partition. Pure, no side effects. Pinned in `ServerTest/AgencyKolony
 
 **Entry point:**
 ```text
-public static bool TryRoute(ClientStructure client, PlanetaryMutationMsgData msg)
+public static bool TryRoute(ClientStructure client, AgencyPlanetaryStateMsgData msg)
 ```
 
-Same shape as kolony. Per-entry partition key in `AgencyState.PlanetaryEntries` is `$"{bodyIndex}|{resourceName}"`. The wire `PlanetaryMutationEntry` carries `OwningVesselId` (Guid) — populated by the client-side `ModulePlanetaryLogistics.LevelResources` postfix using `this.vessel.id`. Server uses `OwningVesselId` to look up `OwningAgencyId` for the cross-agency partition decision. **Same single-try/catch isolation shape as §2.b.i step 5** — classify (Guid parse + vessel lookup + agency match) lives INSIDE the per-entry try block.
+Same shape as kolony. Per-entry partition key in `AgencyState.PlanetaryEntries` is `$"{bodyIndex}|{resourceName}"`. The wire `AgencyPlanetaryEntry` (same class as the stored type per §2.e single-class default) carries `OwningVesselId` (Guid) — populated by the client-side `ModulePlanetaryLogistics.LevelResources` postfix using `this.vessel.id`. Server uses `OwningVesselId` to look up `OwningAgencyId` for the cross-agency partition decision. **Same single-try/catch isolation shape as §2.b.i step 5** — classify (Guid parse + vessel lookup + agency match) lives INSIDE the per-entry try block.
 
 **Catch-up on reconnect:** `AgencySystemSender.SendPlanetaryCatchupTo(client, agencyId)` wired into `HandshakeSystem` immediately after `SendKolonyCatchupTo`. Same unconditional-under-gate=on contract.
 
@@ -188,17 +188,17 @@ Same shape as kolony. Per-entry partition key in `AgencyState.PlanetaryEntries` 
 
 **Two responsibilities** (the only Phase 3 router with this split):
 
-1. **Per-agency transfer-list partition** (analogous to kolony / planetary). Per-agency `OrbitalTransferEntry` in `AgencyState.OrbitalTransfers` keyed by transfer Guid; persisted; owner-only echo via `AgencyOrbitalStateMsgData`. Transfers another agency creates never appear in this agency's `PendingTransfers` projection — Agency B's orbital-logistics UI doesn't show Agency A's pending fleets.
+1. **Per-agency transfer-list partition** (analogous to kolony / planetary). Per-agency `AgencyOrbitalTransferEntry` (same class as the §2.e wire entry) in `AgencyState.OrbitalTransfers` keyed by transfer Guid; persisted; owner-only echo via `AgencyOrbitalStateMsgData`. Transfers another agency creates never appear in this agency's `PendingTransfers` projection — Agency B's orbital-logistics UI doesn't show Agency A's pending fleets.
 2. **Deliver-gate trust anchor** for the client-side `Harmony` prefix (§2.d below). The router doesn't perform delivery itself (delivery is per-frame, client-driven); the router persists the AUTHORITATIVE transfer state so reconnecting players see the correct pending-transfer list.
 
 **Entry point** (mutation messages from client when transfer is Launched / Aborted / Delivered):
 ```text
-public static bool TryRoute(ClientStructure client, OrbitalMutationMsgData msg)
+public static bool TryRoute(ClientStructure client, AgencyOrbitalStateMsgData msg)
 ```
 
-**C→S sibling message** (consumer-review finding #3): `OrbitalMutationMsgData` is the client-side wire. Emitted by a new `AgencyOrbitalSender.SendTransferMutation` when transfer state changes locally (Launched / Aborted / Delivered status transitions intercepted via a postfix on the `OrbitalLogisticsTransferRequest.Launch` / `Abort` setters + a postfix on the Status setter — confirm exact anchor at slice-D impl). Server's `AgencyMsgReader` dispatches to `AgencyOrbitalRouter.TryRoute`.
+**C→S sibling message** (consumer-review finding #3): `AgencyOrbitalStateMsgData` is reused both directions per the §2.e single-class-per-slot default. C→S sends are emitted by a new `AgencyOrbitalSender.SendTransferStateChange` when transfer state changes locally (Launched / Aborted / Delivered status transitions intercepted via a postfix on the `OrbitalLogisticsTransferRequest.Launch` / `Abort` setters + a postfix on the Status setter — confirm exact anchor at slice-D impl). Server's `AgencyMsgReader` dispatches to `AgencyOrbitalRouter.TryRoute`, which ignores the wire-supplied `AgencyId` and derives it from the sender (§2.e trust posture).
 
-**Vessel-id derivation** (Open Q3 resolved per general-review finding #6): `OrbitalLogisticsTransferRequest._destinationId` stores `vessel.persistentId.ToString()` (uint), per the setter at [OrbitalLogisticsTransferRequest.cs:117](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs#L117). The fall-through accessor at lines 102-104 also accepts `vessel.id.ToString()` (Guid form). **Phase 3 derivation path: client-side postfix resolves the destination `Vessel` via `OrbitalLogisticsTransferRequest.Destination` (the property runs both the persistentId match AND the Guid match, returning a real `Vessel` or null), then reads `vessel.id` (the canonical Guid).** Pure helper `ResolveDestinationVesselGuid(transfer)` takes the transfer + the `FlightGlobals.Vessels` lookup as a `Func`; testable independently. Falls back to `_destinationModuleId` lookup via `ModuleOrbitalLogistics.FindVesselByOrbLogModuleId` (line 108) for the vessel-id-reassignment-surgery edge case. **The wire `OrbitalTransferEntry.DestinationVesselId` always carries the canonical Guid form** — server never sees `persistentId` strings.
+**Vessel-id derivation** (Open Q3 resolved per general-review finding #6): `OrbitalLogisticsTransferRequest._destinationId` stores `vessel.persistentId.ToString()` (uint), per the **Destination** setter at [OrbitalLogisticsTransferRequest.cs:149](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs#L149) (mirror of the Origin setter at line 117). The **Destination** fall-through accessor at lines [133-135](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs#L133-L135) also accepts `vessel.id.ToString()` (Guid form). **Phase 3 derivation path: client-side postfix resolves the destination `Vessel` via `OrbitalLogisticsTransferRequest.Destination` (the property runs both the persistentId match AND the Guid match, returning a real `Vessel` or null), then reads `vessel.id` (the canonical Guid).** Pure helper `ResolveDestinationVesselGuid(transfer)` takes the transfer + the `FlightGlobals.Vessels` lookup as a `Func`; testable independently. Falls back to `_destinationModuleId` lookup via `ModuleOrbitalLogistics.FindVesselByOrbLogModuleId` ([line 141](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/OrbitalLogisticsTransferRequest.cs#L141)) for the vessel-id-reassignment-surgery edge case. **The wire `AgencyOrbitalTransferEntry.DestinationVesselId` always carries the canonical Guid form** — server never sees `persistentId` strings.
 
 Per-entry partition derived from `entry.DestinationVesselId` (Guid). Same single-try/catch isolation shape as §2.b.i step 5.
 
@@ -235,7 +235,10 @@ Per-entry partition derived from `entry.DestinationVesselId` (Guid). Same single
 
 **Critical mechanism constraint (general-review finding #1).** A naive prefix that returns `false` to skip `Deliver`'s IEnumerator **would hang ProcessTransfers**. The caller at [ScenarioOrbitalLogistics.cs:194](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/ScenarioOrbitalLogistics.cs#L194) does `while (transfer.Status == DeliveryStatus.Launched || transfer.Status == DeliveryStatus.Returning) yield return null;` and only `Deliver`'s own body flips `Status`. Skipping the body without flipping `Status` leaves the `while` loop yielding forever; the outer `for` in [ScenarioOrbitalLogistics.cs:170-203](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/ScenarioOrbitalLogistics.cs#L170-L203) never advances, and the every-2s `Update` keeps starting new ProcessTransfers coroutines on top of the hung one — accumulating stack frames forever.
 
-**Correct mechanism: the prefix mutates `__instance.Status` BEFORE returning false.** Setting `Status = DeliveryStatus.Failed` + a descriptive `StatusMessage` makes the inner `while` loop's predicate false on the next yield, so ProcessTransfers' inner else-if at line 198-200 moves the transfer to ExpiredTransfers on the skipping peer. The transfer reappears in PendingTransfers on the next 30s scenario sync (because the owning agency's still-`Launched` blob arrives + `OnLoad` clears + rebuilds — see ScenarioOrbitalLogistics.cs:52-65), the prefix skips again, transfer moves to ExpiredTransfers again. Bounded cycle (one re-skip per ~30s per transfer per peer) until the owning agency's player actually executes delivery and broadcasts the resulting `Delivered` scenario state, at which point `OnLoad` reaches steady state on every peer.
+**Correct mechanism: the prefix mutates `__instance.Status` BEFORE returning false.** Setting `Status = DeliveryStatus.Failed` + a descriptive `StatusMessage` makes the inner `while` loop's predicate false on the next yield, so ProcessTransfers' first if-branch at line 181-186 moves the transfer to ExpiredTransfers on the skipping peer. Post-skip behaviour differs by gate:
+
+- **Under gate=on (per-agency mode):** the per-agency projector ships the projection of the OWNING agency's `OrbitalTransfers` dict to each client. A skipping peer (different agency from destination's owner) does NOT receive the transfer in their projected `ScenarioOrbitalLogistics` blob — §2.b.iii's "Transfers another agency creates never appear in this agency's `PendingTransfers` projection." `OnLoad` therefore does not re-add the transfer; the skipping peer's local state is consistent immediately. No re-skip cycle.
+- **Under gate=off (shared-agency mode):** the legacy 30s scenario SHA pass is unchanged and ships the OWNING peer's still-`Launched` blob to every other peer. `OnLoad` clears + rebuilds [ScenarioOrbitalLogistics.cs:52-65](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/OrbitalLogistics/ScenarioOrbitalLogistics.cs#L52-L65), the transfer reappears in PendingTransfers, the prefix re-skips, transfer moves to ExpiredTransfers again. Bounded cycle (one re-skip per ~30s per transfer per peer) until the owning peer executes delivery and broadcasts the resulting `Delivered` scenario state. The §3.f rate-limited log line ("at most one per (transferGuid, decision) per 60s") absorbs the noise.
 
 **Shape:**
 
@@ -301,31 +304,34 @@ public static bool ShouldExecuteDelivery<TTransfer>(
 
 ### 2.e Wire surface — 3 new MsgData families
 
+**Naming default locked in (review-revision logic-pass finding #3):** one shared struct per enum slot, used both directions — mirrors Stage 5.17d `AgencyContractMsgData`'s pattern (single class type, single dictionary entry on both `AgencySrvMsg` and `AgencyCliMsg`). On inbound (C→S) the server IGNORES the wire-supplied `AgencyId` and derives the sender's agency from `AgencySystem.AgencyByPlayerName.TryGetValue(client.PlayerName, ...)` — same trust posture as 5.17d's `AgencyContractRouter.TryRoute`. This removes the "two-class-per-slot" ambiguity and matches the existing wire pattern an implementer is already familiar with.
+
+**Sender naming clarification (review-revision logic-pass finding #4):**
+- **Server-side outbound** (echo + catch-up) extends the existing `Server/System/Agency/AgencySystemSender.cs` (5.15c) with new methods `SendKolonyStateToOwner` / `SendPlanetaryStateToOwner` / `SendOrbitalStateToOwner` + the three `SendXxxCatchupTo` companions. No new server-side sender class.
+- **Client-side outbound** (mutation emit from postfix) is three NEW classes — `LmpClient/Systems/Agency/AgencyKolonySender.cs`, `AgencyPlanetarySender.cs`, `AgencyOrbitalSender.cs` — each siblings of the existing `LmpClient/Systems/Agency/AgencyMessageSender.cs` (5.18a). Each ships a single `TaskFactory.StartNew + NetworkSender.QueueOutgoingMessage` per the §3.e pattern.
+
 Per the [[reference-agency-wire-extension]] recipe steps applied to all three:
 
-**`KolonyState` (slot 6 / `AgencyKolonyStateMsgData`):**
-- Owner-only S→C echo for confirming a routed mutation + connect-catch-up payload.
-- Fields: `Guid AgencyId` + `int EntryCount` + `KolonyMutationEntry[] Entries`.
-- `KolonyMutationEntry`: `string VesselId` + `int BodyIndex` + 9 doubles (matching the [`KolonizationEntry` field set](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/Kolonization/KolonizationEntry.cs)) + 3 ints (boosters).
+**Slot 6 / `AgencyKolonyStateMsgData`:**
+- Both-directions shared class. Owner-only S→C echo for confirming a routed mutation + connect-catch-up payload; C→S per-mutation emit from postfix.
+- Fields: `Guid AgencyId` (S→C populates; C→S server ignores) + `int EntryCount` + `AgencyKolonyEntry[] Entries`.
+- `AgencyKolonyEntry`: `string VesselId` + `int BodyIndex` + 9 doubles (matching the [`KolonizationEntry` field set](file:///F:/tmp/mks-external/MKS/Source/KolonyTools/Kolonization/KolonizationEntry.cs)) + 3 ints (boosters). **SAME class used both as the wire entry AND the `AgencyState.KolonyEntries` dict value** — no compression boundary in Phase 3 (unlike 5.17d's `ContractInfo` vs `AgencyContractEntry` split for QuickLZ payloads), so a single class minimises moving parts.
 - `MaxEntryCount = 4096` DoS guard (same pattern as `AgencyContractMsgData.MaxContractCount = 4096`).
-- C→S sibling: `KolonyMutationMsgData` (same enum slot, same struct, but with `AgencyId` omitted — server derives from sender). Could also be a single shared MsgData if we follow Stage 5.17d's pattern where the server derives the agency from the sending client and never trusts a wire-supplied AgencyId on inbound.
-- **Arrival conditions documented on the type's XML** (recipe step 7): "(a) On connect/reconnect, immediately after AgencyContractMsgData catch-up. (b) On mid-session mutation, in response to client-side `KolonizationManager.TrackLogEntry` postfix relay."
-- **Client write path (recipe step 7):** new client-side `AgencyKolonySender` posts a per-entry `KolonyMutationMsgData` from the postfix. Sibling to existing `Share*Sender` infrastructure.
-- **Orthogonal concerns (recipe step 7):** entry-level reward routing (Science/Funds/Rep scalars on `KolonizationEntry`) is contained within the entry — there's no separate currency-router intercept for kolony-yield scalars in this pre-spec. If MKS' kolony rewards interact with `Funding.Instance` / `ResearchAndDevelopment.Instance` (verify at implementation), defer that interaction to follow-up; first cut treats kolony entry scalars as opaque per-agency state.
+- **Arrival conditions documented on the type's XML** (recipe step 7): "(a) On connect/reconnect, immediately after AgencyContractMsgData catch-up. (b) On mid-session mutation, in response to client-side `KolonizationManager.TrackLogEntry` postfix relay (S→C echoes the upserted entries to the owning client only)."
+- **Client write path (recipe step 7):** new `AgencyKolonySender.SendMutation` posts a per-entry message from the postfix.
+- **Orthogonal concerns (recipe step 7):** entry-level reward routing (Science/Funds/Rep scalars on `KolonizationEntry`) is contained within the entry — there's no separate currency-router intercept for kolony-yield scalars in this pre-spec. If MKS' kolony rewards interact with `Funding.Instance` / `ResearchAndDevelopment.Instance` (verify at implementation per §11 Q2), defer that interaction to follow-up; first cut treats kolony entry scalars as opaque per-agency state.
 
-**`PlanetaryState` (slot 7 / `AgencyPlanetaryStateMsgData`):**
-- Same shape. `PlanetaryMutationEntry`: `Guid OwningVesselId` (populated by client-side postfix from `this.vessel.id`) + `int BodyIndex` + `string ResourceName` + `double StoredQuantity`.
+**Slot 7 / `AgencyPlanetaryStateMsgData`:**
+- Both-directions shared class. `AgencyPlanetaryEntry` (SAME class used as wire entry AND `AgencyState.PlanetaryEntries` value): `Guid OwningVesselId` (populated by client-side postfix from `this.vessel.id`) + `int BodyIndex` + `string ResourceName` + `double StoredQuantity`.
 - `MaxEntryCount = 4096`.
-- C→S sibling: `PlanetaryMutationMsgData`. Server derives agency from sender per the kolony pattern.
-- Arrival / Client-write / Orthogonal sections mirror kolony's structure (catch-up after Kolony in HandshakeSystem; postfix on `ModulePlanetaryLogistics.LevelResources` emits per-mutation; no separate currency-router interaction expected).
+- Arrival / Client-write / Orthogonal sections mirror kolony's structure (catch-up after Kolony in HandshakeSystem; postfix on `ModulePlanetaryLogistics.LevelResources` emits per-mutation via `AgencyPlanetarySender.SendMutation`; no separate currency-router interaction expected).
 
-**`OrbitalState` (slot 8 / `AgencyOrbitalStateMsgData`):**
-- Carries a snapshot of the agency's pending + recently-completed orbital transfers.
-- `OrbitalTransferEntry`: `Guid TransferGuid` + `Guid OriginVesselId` + `Guid DestinationVesselId` + `DeliveryStatus Status` + `double StartTime` + `double Duration` + `byte[] PayloadBytes` (the original transfer's persistent serialization, opaque to LMP — passthrough to KSP when projector splices back).
+**Slot 8 / `AgencyOrbitalStateMsgData`:**
+- Both-directions shared class. Carries a snapshot of the agency's pending + recently-completed orbital transfers.
+- `AgencyOrbitalTransferEntry` (SAME class used as wire entry AND `AgencyState.OrbitalTransfers` value): `Guid TransferGuid` + `Guid OriginVesselId` + `Guid DestinationVesselId` + `DeliveryStatus Status` + `double StartTime` + `double Duration` + `byte[] PayloadBytes` (the original transfer's persistent serialization, opaque to LMP — passthrough to KSP when projector splices back).
 - `MaxEntryCount = 1024` (orbital transfers are higher per-unit cost than kolony entries — bound tighter).
-- **C→S sibling (consumer-review finding #3): `OrbitalMutationMsgData`.** Emitted by a new `LmpClient/Systems/Agency/AgencyOrbitalSender.cs` on transfer state-machine transitions. The intercept point is a Harmony postfix on `OrbitalLogisticsTransferRequest` instance methods — verify exact anchors at slice-D impl (candidates: postfix on `Launch` / `Abort` / a postfix on the `Status` field setter via `[HarmonyPatch("set_Status")]` if Status is a property, or postfix on `DoLaunchTasks` / `DoFinalLaunchTasks` for the launch path). The send carries the transfer's canonical `DestinationVesselId` Guid (resolved via §2.b.iii pure-helper `ResolveDestinationVesselGuid`).
-- **Arrival conditions:** (a) on connect/reconnect immediately after `AgencyPlanetaryStateMsgData` catch-up via `SendOrbitalCatchupTo`; (b) on mid-session mutation in response to `OrbitalMutationMsgData` C→S routed via `AgencyOrbitalRouter`.
-- **Client write path:** `AgencyOrbitalSender.SendTransferStateChange` from the relevant postfix sites; sibling to `AgencyKolonySender` / `AgencyPlanetarySender`.
+- **Emitted by** new `AgencyOrbitalSender.SendTransferStateChange` on transfer state-machine transitions. The intercept point is a Harmony postfix on `OrbitalLogisticsTransferRequest` instance methods — verify exact anchors at slice-D impl (candidates: postfix on `Launch` / `Abort` / a postfix on the `Status` field setter via `[HarmonyPatch("set_Status")]` if Status is a property, or postfix on `DoLaunchTasks` / `DoFinalLaunchTasks` for the launch path). The send carries the transfer's canonical `DestinationVesselId` Guid (resolved via §2.b.iii pure-helper `ResolveDestinationVesselGuid`).
+- **Arrival conditions:** (a) on connect/reconnect immediately after `AgencyPlanetaryStateMsgData` catch-up via `SendOrbitalCatchupTo`; (b) on mid-session mutation in response to per-entry C→S routed via `AgencyOrbitalRouter`.
 - **Orthogonal concerns:** Deliver-gate authority is the §2.d client-side prefix (separate from this state-snapshot wire). Resource mutations themselves propagate through standard `VesselResourceMsgData` (server-side `RejectIfCrossAgencyWrite` already blocks cross-agency relay). This message carries only the transfer's state-machine snapshot — not the resource amounts themselves.
 
 All three families: per-channel ReliableOrdered (existing `AgencySrvMsg` / `AgencyCliMsg` constraint). Forward-compat via `lidgrenMsg.Position < lidgrenMsg.LengthBits` tail guard for future field additions (mirrors `VesselProtoMsgData.Reason` precedent).
@@ -373,7 +379,7 @@ All mutations to `AgencyState.KolonyEntries` / `PlanetaryEntries` / `OrbitalTran
 
 ### 3.c Defensive copy of mutable wire payloads
 
-`OrbitalTransferEntry.PayloadBytes` is a `byte[]` from the wire. Storing the reference directly into `AgencyState.OrbitalTransfers` would let a subsequent re-arrival re-compress (or operator hand-edit) the same buffer in place — corruption path AgencyContractRouter caught at lines 222-231. **Copy on store** (same `Buffer.BlockCopy` pattern).
+`AgencyOrbitalTransferEntry.PayloadBytes` is a `byte[]` from the wire. Storing the reference directly into `AgencyState.OrbitalTransfers` would let a subsequent re-arrival mutate (or operator hand-edit) the same buffer in place — corruption path AgencyContractRouter caught at lines 222-231. **Copy on store** (same `Buffer.BlockCopy` pattern).
 
 ### 3.d Cross-agency rejection at the router AND at the relay
 
@@ -409,23 +415,29 @@ Each router emits one `[fix:MKS-R2]` log line per batch at Debug level (not per-
 
 ### 3.g `IgnoredScenarios` — gate-conditional broadcast suppression
 
-The existing `LmpCommon/IgnoredScenarios.IgnoreSend` is a static list; Phase 3 needs the 3 MKS scenarios suppressed-only-when-gate=on so shared-mode operators retain the legacy 30s SHA propagation. **Two implementation options** (pick at slice-A impl):
+The existing `LmpCommon/IgnoredScenarios.IgnoreSend` is a static list; Phase 3 needs the 3 MKS scenarios suppressed-only-when-gate=on so shared-mode operators retain the legacy 30s SHA propagation. **Locked default (review-revision logic-pass finding #8): Option B — runtime check in the send-filter call site.** Don't extend `IgnoredScenarios.cs`'s static list; instead add a 3-name `HashSet<string>` + `SettingsServerStructure.PerAgencyCareerEnabled` gate check directly in `LmpClient/Systems/Scenario/ScenarioSystem`'s send-filter where `IgnoredScenarios.IgnoreSend.Contains(name)` is currently evaluated. Two reasons for Option B:
 
-**Option A — extend `IgnoredScenarios` with a gated list.** Add a sibling `IgnoreSendIfPerAgencyEnabled` list containing the 3 MKS scenario names. Client-side `LmpClient/Systems/Scenario/ScenarioSystem` send-filter consults both lists and the active `SettingsServerStructure.PerAgencyCareerEnabled` flag (already propagated to clients in 5.17e settings reply). Cheap addition, no IgnoreSend ABI break.
+1. **No LmpCommon API change.** Option A (adding `IgnoreSendIfPerAgencyEnabled` to `IgnoredScenarios.cs`) expands the shared-library contract; Option B keeps the per-agency logic local to the consumer.
+2. **PerAgencyCareerEnabled is a client-side runtime flag, not a wire-protocol constant.** The static `IgnoredScenarios.IgnoreSend` list represents a permanent design decision (Funding/etc. ALWAYS use the Share* wire); the Phase 3 MKS scenarios are dual-mode (gate=off keeps SHA, gate=on routes per-agency). Mixing static + dynamic semantics in one class is a smell; Option B keeps them separate.
 
-**Option B — runtime check in the send-filter call site.** Don't add to `IgnoredScenarios`; instead add a 3-name set + gate check directly in the send-filter where `IgnoreSend.Contains(name)` is evaluated. Slightly less DRY but keeps `IgnoredScenarios.cs` static and per-agency-aware.
+`IgnoreReceive` is NOT extended either way — the server's projection still ships per-agency-filtered (under gate=on) or unfiltered (under gate=off) scenario blobs to every client; clients consume them via the standard scenario apply path. The gate-conditional filter is one-directional (broadcast suppression only).
 
-Either way: `IgnoreReceive` is NOT extended — the server's projection still ships per-agency-filtered (under gate=on) or unfiltered (under gate=off) scenario blobs to every client; clients consume them via the standard scenario apply path. The gate-conditional filter is one-directional (broadcast suppression only).
-
-**Comment convention:**
+**Implementation sketch:**
 ```text
-// Suppressed only under PerAgencyCareerEnabled (Phase 3 ShareKolony) — the
-// per-agency routers handle these scenarios via dedicated wire under gate=on;
-// under gate=off the legacy 30s SHA path operates unchanged.
-"KolonizationScenario",
-"PlanetaryLogisticsScenario",
-"ScenarioOrbitalLogistics",
+// In LmpClient/Systems/Scenario/ScenarioSystem (or wherever IgnoreSend is consulted):
+private static readonly HashSet<string> PerAgencyOnlyIgnoreSend = new HashSet<string>(StringComparer.Ordinal)
+{
+    "KolonizationScenario",       // Phase 3 — per-agency router handles under gate=on
+    "PlanetaryLogisticsScenario", // Phase 3 — per-agency router handles under gate=on
+    "ScenarioOrbitalLogistics",   // Phase 3 — per-agency router handles under gate=on
+};
+
+bool ShouldSuppressSend(string scenarioName) =>
+    IgnoredScenarios.IgnoreSend.Contains(scenarioName)
+    || (SettingsSystem.ServerSettings.PerAgencyCareerEnabled && PerAgencyOnlyIgnoreSend.Contains(scenarioName));
 ```
+
+Slice A doesn't ship this — the filter is added in Slice B alongside the first per-agency router that needs the gate. Slices B/C/D each verify the matching scenario is suppressed-under-gate=on + propagates-under-gate=off in their MockClientTest coverage.
 
 ---
 
@@ -577,7 +589,7 @@ Visibility broadcast so clients observe ownership change → router state catch-
 | Unloaded converter catch-up under per-agency | Tied to R3 catch-up; needs Strategy B integration. | Phase 5 (handoff §R3, optional product). |
 | `ContractSystem` scenario projection | Already deferred to a future step; not MKS-specific. | Stage 5.18d-or-later per CLAUDE.md note. |
 | Per-agency kolony-yield → Funds/Sci/Rep reward routing | Phase 3 stores yield scalars as opaque per-agency state. If MKS' kolony rewards interact with `Funding.Instance` / `ResearchAndDevelopment.Instance`, routing those scalars through the band-1 currency routers needs a verify-at-implementation pass. | Verify at implementation; if interaction exists, add to `AgencyCurrencyRouter` / `AgencyResearchRouter` extension. |
-| MKS' `ModuleColonyRewards.cs:33` — `TrackLogEntry` call site #2 | Phase 3's postfix on `KolonizationManager.TrackLogEntry` is a hook on the MANAGER, so it catches every entry source uniformly including `ModuleColonyRewards`. No additional per-caller hook needed — verified anchor. | (Implicit.) |
+| MKS' `ModuleColonyRewards.cs:33` — `TrackLogEntry` call site #2 | Phase 3's postfix on `KolonizationManager.TrackLogEntry` is a hook on the MANAGER, so it SHOULD catch every entry source uniformly including `ModuleColonyRewards`. The call-site exists (grep verified at MKS SHA `ed0f6aa6`); end-to-end "postfix-sees-rewards-entry" is documented as **§11 Q1 verify-at-slice-B sanity check**, not pre-verified. | Verify at Slice B impl per §11 Q1. |
 | WOLF and USI-LS gameplay mods | Separate brief (handoff §1, §12 explicit out-of-scope). | Out-of-scope, future track. |
 | Server-side delivery authority for orbital transfers | Operator confirmed client-side prefix is the right approach (session 25 Q3 sign-off). | Out-of-scope by design. |
 | Smooth UI for cross-agency kolony radius observation | If Bob is in physics range of Alice's kolony, Bob's UI shouldn't claim Alice's bonuses — that's covered. But what does Bob's *observation* of Alice's kolony LOOK LIKE in Bob's map view? Cosmetic Phase 5 polish. | Phase 5 / R5 UI polish. |
@@ -598,7 +610,7 @@ Phase 3's hooks against MKS' internal types share the same brittleness class as 
 
 3. **`OrbitalLogisticsTransferRequest.Deliver`** — `public IEnumerator Deliver()`. Public surface; lower brittleness risk. Mitigation: same `TypeByName` self-disable.
 
-4. **`KolonizationEntry` field rename / new field addition** — the 13-field wire shape (`KolonyMutationEntry`) mirrors the MKS-side struct. A new MKS field would flow through as an opaque addition (forward-compat tail). A renamed field would break the postfix's read of `entry.GeologyResearch` etc. — same brittleness as the postfix anchor. **Mitigation:** reflective read of fields via `FieldInfo.GetValue` at impl time, OR explicit accept-list of known fields with a `LogWarning` on unknown additions (similar to BUG-013 sanitiser's whitelist approach). Verify decision at impl time.
+4. **`KolonizationEntry` field rename / new field addition** — the 13-field wire shape (`AgencyKolonyEntry`) mirrors the MKS-side struct. A new MKS field would flow through as an opaque addition (forward-compat tail). A renamed field would break the postfix's read of `entry.GeologyResearch` etc. — same brittleness as the postfix anchor. **Mitigation:** reflective read of fields via `FieldInfo.GetValue` at impl time, OR explicit accept-list of known fields with a `LogWarning` on unknown additions (similar to BUG-013 sanitiser's whitelist approach). Verify decision at impl time.
 
 5. **MKS module-rename detection at boot** — append `[fix:MKS-R2] KolonizationManager type resolved` (or `... not found; per-agency kolony routing disabled until MKS is installed`) to the existing MKS-R0 / MKS-R1 module-resolution log lines. Single source-of-truth for operator grep: `grep -E "\[fix:MKS-R[012]\]" KSP.log`.
 
@@ -732,7 +744,9 @@ Expected post-fix in a two-client per-agency scenario:
 
 ## 8. Acceptance criteria
 
-- [ ] Three router files + projector splice extension + AgencyState 3-field addition + 3 wire-MsgData families + 3 enum slots + IgnoredScenarios.IgnoreSend additions all land.
+**Phase 3 is NOT complete until Slice E ships** (review-revision logic-pass finding #10). Slices A-D close the per-router design but leave the `transferagency`-MKS migration contract (§4.e) unimplemented — running `transferagency` against an MKS-bearing vessel without Slice E orphans accumulated per-agency MKS state on the source agency (the MUST-FIX hazard from consumer-review #1 + upgrade-lens #3). Acceptance criteria below are the FULL Phase 3 ship list including Slice E; partial ships (A-D only, or A-D + smoke without E) are intermediate milestones, not "Phase 3 done."
+
+- [ ] Three router files + projector splice extension + AgencyState 3-field addition + 3 wire-MsgData families + 3 enum slots + IgnoredScenarios gate-conditional filter (Option B per §3.g) all land.
 - [ ] `dotnet build -c Release` clean on `Server.csproj` (no NEW warnings vs pre-existing 29-30).
 - [ ] `dotnet build -c Release` clean on `LmpClient.csproj` (no NEW warnings vs pre-existing 7 + MKS-R0/R1 baseline).
 - [ ] `dotnet test ServerTest` passes — 348 → ~390-400 (within ±5 of slice estimate).
