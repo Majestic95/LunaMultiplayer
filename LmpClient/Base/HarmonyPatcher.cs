@@ -20,6 +20,7 @@ namespace LmpClient.Base
         {
             SuppressClickThroughBlockerPopup();
             PatchContractPreLoader();
+            PatchModuleLogisticsConsumer();
         }
 
         /// <summary>
@@ -58,6 +59,62 @@ namespace LmpClient.Base
             catch (Exception e)
             {
                 LunaLog.LogWarning($"[LMP]: Could not patch ContractPreLoader.OnLoad: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// MKS-R0 — Patches <c>USITools.ModuleLogisticsConsumer.GetResourceStockpiles</c>
+        /// and <c>GetPowerDistributors</c> with postfixes that filter the returned
+        /// vessel lists down to only those whose Update lock is held by the local
+        /// player.
+        ///
+        /// Without this filter, every client's instance of MKS would write to every
+        /// nearby warehouse's <c>PartResource.amount</c> values regardless of who
+        /// controls the warehouse, producing oscillating balances and double-spend
+        /// races against LMP's <c>VesselResourceMessageSender</c>. See
+        /// <see cref="LmpClient.Harmony.ModuleLogisticsConsumer_DepotListPostfix"/>
+        /// for the full bug trace.
+        ///
+        /// Imperative registration (rather than <c>[HarmonyPatch]</c> attributes)
+        /// because USITools is not a compile-time dependency. Graceful no-op when
+        /// USITools is not installed.
+        /// </summary>
+        internal static void PatchModuleLogisticsConsumer()
+        {
+            try
+            {
+                var mlcType = HarmonyLib.AccessTools.TypeByName("USITools.ModuleLogisticsConsumer");
+                if (mlcType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:MKS-R0] USITools.ModuleLogisticsConsumer type not found — USITools not installed, skipping depot-list filter.");
+                    return;
+                }
+
+                var stockpilesMethod = HarmonyLib.AccessTools.Method(mlcType, "GetResourceStockpiles");
+                var powerMethod = HarmonyLib.AccessTools.Method(mlcType, "GetPowerDistributors");
+                if (stockpilesMethod == null || powerMethod == null)
+                {
+                    // Stamped [fix:MKS-R0] so the operator-grep workflow surfaces it;
+                    // a silent skip here means the oscillation bug returns invisibly
+                    // (pre-spec §6 brittleness). Warning, not Error, so the loader
+                    // continues — but loud enough to be findable.
+                    LunaLog.LogWarning("[LMP]: [fix:MKS-R0] USITools.ModuleLogisticsConsumer.GetResourceStockpiles or GetPowerDistributors not found — USITools version mismatch? Depot-list filter NOT applied; remote-vessel resource oscillation will reappear.");
+                    return;
+                }
+
+                var stockpilesPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ModuleLogisticsConsumer_DepotListPostfix),
+                    nameof(LmpClient.Harmony.ModuleLogisticsConsumer_DepotListPostfix.PostfixStockpiles));
+                var powerPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ModuleLogisticsConsumer_DepotListPostfix),
+                    nameof(LmpClient.Harmony.ModuleLogisticsConsumer_DepotListPostfix.PostfixPower));
+                HarmonyInstance.Patch(stockpilesMethod, postfix: stockpilesPostfix);
+                HarmonyInstance.Patch(powerMethod, postfix: powerPostfix);
+                LunaLog.Log("[LMP]: [fix:MKS-R0] Patched USITools.ModuleLogisticsConsumer.GetResourceStockpiles + GetPowerDistributors — depot/power lists filtered to local Update-lock holder.");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:MKS-R0] Could not patch USITools.ModuleLogisticsConsumer: {e.Message}");
             }
         }
 
