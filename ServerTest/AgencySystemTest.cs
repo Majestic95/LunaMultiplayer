@@ -650,5 +650,125 @@ namespace ServerTest
             return new Server.System.Vessel.Classes.Vessel(
                 File.ReadAllText(Directory.GetFiles(dir).OrderBy(p => p, StringComparer.Ordinal).First()));
         }
+
+        // --- TryResolveAgencyToken — Stage 5.18d shared resolver ---------------
+        // Backs setagency (slice f) / transferagency (slice e) / deleteagency
+        // (slice g) admin commands. Accepts both Guid-string and OwningPlayerName
+        // forms so operators can use either /listagencies output or the player
+        // handle directly.
+
+        [TestMethod]
+        public void TryResolveAgencyToken_ByGuidN_ReturnsState()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+            Assert.IsTrue(AgencySystem.TryResolveAgencyToken(alice.AgencyId.ToString("N"), out var resolved));
+            Assert.AreSame(alice, resolved);
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_ByGuidD_ReturnsState()
+        {
+            // Operators copy-pasting from a vessel file (where lmpOwningAgency is
+            // emitted as "N") OR from Guid.ToString() default ("D" hyphenated)
+            // should both work. Guid.TryParse accepts all .NET formats.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            Assert.IsTrue(AgencySystem.TryResolveAgencyToken(alice.AgencyId.ToString("D"), out var resolved));
+            Assert.AreSame(alice, resolved);
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_ByOwnerName_ReturnsState()
+        {
+            var alice = AgencySystem.RegisterAgency("Alice");
+            Assert.IsTrue(AgencySystem.TryResolveAgencyToken("Alice", out var resolved));
+            Assert.AreSame(alice, resolved);
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_OwnerNameCaseSensitive()
+        {
+            // AgencyByPlayerName uses StringComparer.Ordinal. An operator typing
+            // "alice" when the registered owner is "Alice" must fail-soft to "not
+            // found" rather than silently match — typo discipline.
+            AgencySystem.RegisterAgency("Alice");
+            Assert.IsFalse(AgencySystem.TryResolveAgencyToken("alice", out var resolved));
+            Assert.IsNull(resolved);
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_UnknownGuid_ReturnsFalse()
+        {
+            // A Guid that parses but isn't in the registry (e.g. operator typo, or
+            // the agency was deleted by a future deleteagency).
+            var nonexistent = Guid.NewGuid();
+            Assert.IsFalse(AgencySystem.TryResolveAgencyToken(nonexistent.ToString("N"), out var resolved));
+            Assert.IsNull(resolved);
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_UnknownName_ReturnsFalse()
+        {
+            // No agency for the player handle.
+            Assert.IsFalse(AgencySystem.TryResolveAgencyToken("NotARegisteredPlayer", out var resolved));
+            Assert.IsNull(resolved);
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_EmptyOrNullToken_ReturnsFalse()
+        {
+            Assert.IsFalse(AgencySystem.TryResolveAgencyToken(null, out _));
+            Assert.IsFalse(AgencySystem.TryResolveAgencyToken(string.Empty, out _));
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_GateOff_ReturnsFalse()
+        {
+            // Stage 5.18d admin commands MUST refuse loudly under gate-off; the
+            // resolver short-circuits to false so the caller's error message is
+            // about the gate, not about a stale registry lookup.
+            AgencySystem.RegisterAgency("Alice");
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            Assert.IsFalse(AgencySystem.TryResolveAgencyToken("Alice", out _));
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_GuidParseTakesPrecedenceOverNameLookup()
+        {
+            // Pathological case: operator registers a second player under a name
+            // that happens to match the first agency's Guid hex form. The Guid
+            // path commits to the registry-by-id lookup; when it hits, that
+            // wins — the name-shaped second player never gets considered for
+            // this resolve.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            var weird = AgencySystem.RegisterAgency(alice.AgencyId.ToString("N"));
+            Assert.IsNotNull(weird);
+            Assert.IsTrue(AgencySystem.TryResolveAgencyToken(alice.AgencyId.ToString("N"), out var resolved));
+            Assert.AreSame(alice, resolved, "Guid form resolves by registry id, not by name-coincidence.");
+        }
+
+        [TestMethod]
+        public void TryResolveAgencyToken_GuidParseMisses_DoesNotFallThroughToNameLookup()
+        {
+            // Server-systems-review v1 SS-1: the resolver commits to the Guid path
+            // on a successful Guid.TryParse. A Guid that parses but misses the
+            // registry returns FALSE; it does NOT fall through to a name lookup
+            // that might silently match a hex-string-shaped LMP handle. Without
+            // this commitment, an operator with a player named after some random
+            // Guid + a typo'd target agency id would silently mutate the wrong
+            // agency.
+            var alice = AgencySystem.RegisterAgency("Alice");
+            var nonexistentButValidGuid = Guid.NewGuid();
+            Assert.AreNotEqual(alice.AgencyId, nonexistentButValidGuid);
+
+            // Register a player whose LMP handle is the hex form of the non-existent
+            // Guid. If the resolver falls through, it would match this player's
+            // agency — silently mutating the wrong agency from the operator's POV.
+            var shadow = AgencySystem.RegisterAgency(nonexistentButValidGuid.ToString("N"));
+            Assert.IsNotNull(shadow);
+
+            Assert.IsFalse(AgencySystem.TryResolveAgencyToken(nonexistentButValidGuid.ToString("N"), out var resolved),
+                "Guid form that parses + misses MUST NOT fall through to the name lookup.");
+            Assert.IsNull(resolved);
+        }
     }
 }

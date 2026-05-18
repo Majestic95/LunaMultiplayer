@@ -25,10 +25,10 @@ namespace Server.Command.Command
             //leak to all peers via the shared Funds broadcast, surprising an operator who
             //thought they were in per-agency mode. Refuse loudly in both cases; the operator
             //fixes the misconfig deliberately before issuing the command. Stage 5.18d ships
-            //the per-agency replacement (setagencyfunds <agencyId> <amount>).
+            //the per-agency replacement (setagency funds <agency-id-or-owner> <amount>).
             if (GameplaySettings.SettingsStore.PerAgencyCareer)
             {
-                LunaLog.Error("setfunds is disabled while PerAgencyCareer=true. In Career mode use setagencyfunds <agencyId> <amount> (Stage 5.18d); in Science/Sandbox the per-agency setting is misconfigured (see boot warning). Operators can also edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
+                LunaLog.Error("setfunds is disabled while PerAgencyCareer=true. In Career mode use /setagency funds <agency-id-or-owner> <amount> (Stage 5.18d slice f — run /listagencies to see ids/owners); in Science/Sandbox the per-agency setting is misconfigured (see boot warning). Operators can also edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
                 return false;
             }
             //Check parameter

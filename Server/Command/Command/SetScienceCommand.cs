@@ -24,10 +24,10 @@ namespace Server.Command.Command
             //per-agency routers (5.17e-3 onwards) are disabled and setscience WOULD work —
             //but it would leak to all peers via the shared Science broadcast, surprising an
             //operator who thought they were in per-agency mode. Refuse loudly in both cases;
-            //the operator fixes the misconfig deliberately. Stage 5.18d ships setagencyscience.
+            //the operator fixes the misconfig deliberately. Stage 5.18d ships /setagency science.
             if (GameplaySettings.SettingsStore.PerAgencyCareer)
             {
-                LunaLog.Error("setscience is disabled while PerAgencyCareer=true. In Career mode use setagencyscience <agencyId> <amount> (Stage 5.18d); in Science/Sandbox the per-agency setting is misconfigured (see boot warning). Operators can also edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
+                LunaLog.Error("setscience is disabled while PerAgencyCareer=true. In Career mode use /setagency science <agency-id-or-owner> <amount> (Stage 5.18d slice f — run /listagencies to see ids/owners); in Science/Sandbox the per-agency setting is misconfigured (see boot warning). Operators can also edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
                 return false;
             }
             //Check parameter

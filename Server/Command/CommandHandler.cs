@@ -31,6 +31,7 @@ namespace Server.Command
             RegisterCommand("listclients", new ListClientsCommand().Execute, "Lists connected clients");
             RegisterCommand("listlocks", new ListLocksCommand().Execute, "Lists current locks");
             RegisterCommand("nukeksc", new NukeCommand().Execute, "Clears ALL vessels from KSC and the runway");
+            RegisterCommand("setagency", new SetAgencyCommand().Execute, "Set a per-agency career scalar. Usage: /setagency funds|science|reputation <agency-id-or-owner> <amount>");
             RegisterCommand("setfunds", new SetFundsCommand().Execute, "Set funds value");
             RegisterCommand("setscience", new SetScienceCommand().Execute, "Set science value");
             RegisterCommand("restartserver", new RestartServerCommand().Execute, "Restarts the server");

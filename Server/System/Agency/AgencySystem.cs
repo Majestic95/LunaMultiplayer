@@ -240,8 +240,8 @@ namespace Server.System.Agency
             // an operator who follows the guidance never hits this. This warning catches
             // the operator who didn't read release notes — they see the message and can
             // stop the server before the first connect, archive Universe/, and start
-            // over without losing data. Stage 5.18d's transferagency / setagencyfunds is
-            // the proper recovery path for an already-mid-loss universe.
+            // over without losing data. Stage 5.18d's /transferagency + /setagency
+            // are the proper recovery path for an already-mid-loss universe.
             WarnAboutSavingsLossOnUpgrade();
 
             // [Stage 5.17d upgrade-lens review] Pre-existing shared-agency contract
@@ -692,8 +692,9 @@ namespace Server.System.Agency
                 "and the scenario projector will overwrite these scalars with the fresh-start values on every send — " +
                 "the accumulated values are NOT inherited. Spec §10 migration is fresh-start-only: stop the server, " +
                 "archive Universe/ before any player connects, and start fresh. If you accept the loss, this warning " +
-                "is informational. Stage 5.18d's transferagency / setagencyfunds will be the recovery path for an " +
-                "already-mid-loss universe.");
+                "is informational. Stage 5.18d's /transferagency + /setagency are the recovery path for an " +
+                "already-mid-loss universe (run /listagencies after the first player connects to see the minted " +
+                "agency's id/owner, then /setagency funds|science|reputation <id-or-owner> <amount>).");
         }
 
         private static bool TryReadScenarioRootDouble(string scenarioName, string key, out double value)
@@ -883,6 +884,86 @@ namespace Server.System.Agency
                 AgencyByPlayerName[state.OwningPlayerName] = state.AgencyId;
 
             return state;
+        }
+
+        /// <summary>
+        /// Resolves an admin-command argument token to an <see cref="AgencyState"/>.
+        /// Stage 5.18d shared helper for the <c>setagency*</c> / <c>transferagency</c> /
+        /// <c>deleteagency</c> commands so each one accepts the same set of operator-
+        /// friendly forms.
+        ///
+        /// <para><b>Accepted tokens:</b>
+        /// <list type="number">
+        ///   <item><b>Guid in any .NET format</b> — "N" (32-hex no dashes, the form
+        ///         <c>/listagencies</c> emits), "D" (hyphenated, the
+        ///         <c>Guid.ToString()</c> default), "B" / "P" braced. Tried first;
+        ///         a successful parse <i>commits the lookup to the Guid path</i> —
+        ///         the resolver does NOT fall through to the name path on a parse-
+        ///         succeeds-but-registry-misses, because a hex-shaped LMP handle
+        ///         could otherwise silently shadow an operator's typo'd agency id.
+        ///         If you typed a Guid, you meant an id.</item>
+        ///   <item><b>OwningPlayerName (the LMP player handle)</b> — case-sensitive
+        ///         match against <see cref="AgencyByPlayerName"/>. The handle is the
+        ///         join key; an operator typing "Alice" gets Alice's agency
+        ///         regardless of its display name. Reached only when the token
+        ///         did NOT parse as a Guid.</item>
+        /// </list></para>
+        ///
+        /// <para><b>What is NOT accepted:</b>
+        /// <list type="bullet">
+        ///   <item>The agency's DisplayName — free-form, may contain spaces /
+        ///         quotes / unicode that would be ambiguous on a command line.
+        ///         Operators reading <c>/listagencies</c> output should use the
+        ///         <c>id=</c> token or the <c>owner=</c> token, NOT
+        ///         <c>display=</c>.</item>
+        ///   <item>An <b>orphaned agency id</b> — a Guid that vessels in
+        ///         <see cref="VesselStoreSystem.CurrentVessels"/> reference but
+        ///         <see cref="LoadExistingAgencies"/> couldn't load (per-file
+        ///         isolation skip on corruption). Recovery is the Stage 5.18d
+        ///         <c>/transferagency</c> command (slice e), NOT <c>/setagency</c>
+        ///         (there's no <c>AgencyState</c> to mutate).</item>
+        ///   <item>A <b>renamed-player handle</b> — <see cref="AgencyByPlayerName"/>
+        ///         indexes by REGISTRATION-time name. If a player reconnects under
+        ///         a different LMP handle, this lookup misses. Operator workaround:
+        ///         use the agency id (still in the registry) or <c>/transferagency</c>
+        ///         (slice e) to rebind to the new name.</item>
+        /// </list></para>
+        ///
+        /// <para>Returns false when the gate is closed (gate-off OR non-Career
+        /// mode) — admin commands MUST refuse loudly in that case, not silently
+        /// look up against a stale registry. Returns false also when the token
+        /// matches neither path; caller produces the appropriate "agency not
+        /// found" / "no agencies registered" error.</para>
+        /// </summary>
+        public static bool TryResolveAgencyToken(string token, out AgencyState state)
+        {
+            state = null;
+            if (!PerAgencyEnabled) return false;
+            if (string.IsNullOrEmpty(token)) return false;
+
+            // Guid-first commitment (server-systems-review v1 SS-1). A successful
+            // Guid.TryParse routes the lookup through the registry-by-id path; a
+            // miss returns false IMMEDIATELY rather than falling through to the
+            // name path. Without this commitment, a player with a hex-string LMP
+            // handle could silently shadow an operator's mistyped agency id.
+            if (Guid.TryParse(token, out var parsedId))
+            {
+                if (Agencies.TryGetValue(parsedId, out var byId))
+                {
+                    state = byId;
+                    return true;
+                }
+                return false;
+            }
+
+            if (AgencyByPlayerName.TryGetValue(token, out var idByName) &&
+                Agencies.TryGetValue(idByName, out var byName))
+            {
+                state = byName;
+                return true;
+            }
+
+            return false;
         }
 
         /// <summary>
