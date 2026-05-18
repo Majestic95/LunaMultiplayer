@@ -210,17 +210,35 @@ namespace Server.System.Agency
             foreach (var existing in node.GetNodes("Tech").ToArray())
                 node.RemoveNode(existing.Value);
 
-            // Snapshot TechNodes under the per-agency lock so a concurrent router
-            // invocation (mutates the Dictionary on the same Lidgren receive thread
-            // today; cross-thread tomorrow when admin commands land in 5.18d) can't
-            // tear our iteration. The lock window is brief (memcpy of the values
-            // list) — no I/O, no parse — so it can't deadlock with the router's
-            // longer write-then-save window. AgencyState.cs TechNodes XML pins the
-            // read-also-needs-lock contract.
-            AgencyTechNodeEntry[] snapshot;
+            // [Stage 5.17e-5] Strip pre-existing Science child nodes too. Same
+            // upgrade-leak hazard as Tech — an upgrade-in-place universe with
+            // accumulated shared subjects would bleed into every fresh per-agency
+            // client otherwise.
+            foreach (var existing in node.GetNodes("Science").ToArray())
+                node.RemoveNode(existing.Value);
+
+            // [Stage 5.17e-5] Strip pre-existing ExpParts child node — same
+            // hazard. We re-add a per-agency-scoped one further below if the
+            // agency has any experimental parts.
+            foreach (var existing in node.GetNodes("ExpParts").ToArray())
+                node.RemoveNode(existing.Value);
+
+            // Snapshot all per-agency R&D collections under the per-agency lock
+            // so a concurrent router invocation can't tear our iterations. The
+            // lock window is brief (memcpy of values + part-set sizes) — no I/O,
+            // no parse. AgencyState.cs XML pins the read-also-needs-lock contract.
+            AgencyTechNodeEntry[] techSnapshot;
+            AgencyScienceSubjectEntry[] subjectSnapshot;
+            Dictionary<string, string[]> partsSnapshot;
+            KeyValuePair<string, int>[] expPartsSnapshot;
             lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
             {
-                snapshot = targetAgency.TechNodes.Values.ToArray();
+                techSnapshot = targetAgency.TechNodes.Values.ToArray();
+                subjectSnapshot = targetAgency.ScienceSubjects.Values.ToArray();
+                partsSnapshot = new Dictionary<string, string[]>(targetAgency.PurchasedParts.Count, StringComparer.Ordinal);
+                foreach (var kvp in targetAgency.PurchasedParts)
+                    partsSnapshot[kvp.Key] = kvp.Value.ToArray();
+                expPartsSnapshot = targetAgency.ExperimentalParts.ToArray();
             }
 
             // Add per-agency Tech child nodes. The stored Data field contains the
@@ -229,7 +247,12 @@ namespace Server.System.Agency
             // same ParseClientConfigNode helper the BUG-025 path uses, so any
             // future change to KSP's wire format gets the same treatment in both
             // routing and projection.
-            foreach (var entry in snapshot)
+            //
+            // [Stage 5.17e-5] As each per-agency Tech node is spliced in, we ALSO
+            // merge in matching purchased parts from partsSnapshot — KSP stores
+            // parts as `part = X` values INSIDE Tech blocks, not as top-level
+            // entries, so the part-merge has to happen at Tech-splice time.
+            foreach (var entry in techSnapshot)
             {
                 if (entry == null || entry.Data == null || entry.NumBytes <= 0)
                     continue;
@@ -238,6 +261,29 @@ namespace Server.System.Agency
                     var techNode = ScenarioDataUpdater.ParseClientConfigNode(entry.Data, entry.NumBytes, "Tech");
                     if (techNode.IsEmpty())
                         continue;
+
+                    // [Stage 5.17e-5] Merge per-agency PurchasedParts into this Tech.
+                    // The stored Tech bytes contain a snapshot of parts at the time of
+                    // first unlock; subsequent part purchases (via ShareProgressPartPurchase)
+                    // accumulate in AgencyState.PurchasedParts. Merge them so the projected
+                    // Tech node reflects the agency's current purchase set.
+                    var techId = techNode.GetValue("id")?.Value;
+                    if (!string.IsNullOrEmpty(techId) && partsSnapshot.TryGetValue(techId, out var parts))
+                    {
+                        // Dedup against the snapshot's existing `part = X` values
+                        // (some part_iD-style records ship inside the original Tech bytes).
+                        var existingParts = new HashSet<string>(StringComparer.Ordinal);
+                        foreach (var v in techNode.GetValues("part"))
+                            if (!string.IsNullOrEmpty(v.Value))
+                                existingParts.Add(v.Value);
+                        foreach (var partName in parts)
+                        {
+                            if (string.IsNullOrEmpty(partName) || existingParts.Contains(partName))
+                                continue;
+                            techNode.CreateValue(new CfgNodeValue<string, string>("part", partName));
+                        }
+                    }
+
                     node.AddNode(techNode);
                 }
                 catch (Exception)
@@ -248,6 +294,44 @@ namespace Server.System.Agency
                     // would otherwise spam the log; the entry-level corruption is
                     // already visible via AgencyState.Parse's matching warning.
                 }
+            }
+
+            // [Stage 5.17e-5] Splice per-agency Science subject child nodes.
+            foreach (var entry in subjectSnapshot)
+            {
+                if (entry == null || entry.Data == null || entry.NumBytes <= 0)
+                    continue;
+                try
+                {
+                    var subjectNode = ScenarioDataUpdater.ParseClientConfigNode(entry.Data, entry.NumBytes, "Science");
+                    if (subjectNode.IsEmpty())
+                        continue;
+                    node.AddNode(subjectNode);
+                }
+                catch (Exception)
+                {
+                    // Per-entry isolation — same rationale as Tech.
+                }
+            }
+
+            // [Stage 5.17e-5] Splice per-agency ExpParts as a single child node
+            // (matches KSP's scenario shape: one ExpParts block containing
+            // `partname = count` value pairs).
+            if (expPartsSnapshot.Length > 0)
+            {
+                var expPartsNode = new ConfigNode("") { Name = "ExpParts" };
+                foreach (var kvp in expPartsSnapshot)
+                {
+                    if (string.IsNullOrEmpty(kvp.Key) || kvp.Value <= 0)
+                        continue;
+                    expPartsNode.CreateValue(new CfgNodeValue<string, string>(kvp.Key,
+                        kvp.Value.ToString(CultureInfo.InvariantCulture)));
+                }
+                // Only add if at least one valid value made it through (otherwise the
+                // shared-scenario writer's "dummyPart" defensive shim could trigger
+                // an empty-ExpParts re-create cycle).
+                if (expPartsNode.GetAllValues().Count > 0)
+                    node.AddNode(expPartsNode);
             }
 
             return node.ToString();

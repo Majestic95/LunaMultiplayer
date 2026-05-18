@@ -263,6 +263,54 @@ namespace Server.System.Agency
             // are not migrated. Same fresh-start-only spec §10 sign-off applies;
             // operator workflow is archive + restart with PerAgencyCareer enabled.
             WarnAboutSharedTechOnUpgrade();
+
+            // [Stage 5.17e-5 upgrade-lens review] Sibling diagnostic for the three
+            // new R&D-side surfaces (Science subjects + ExpParts; PurchasedParts are
+            // already covered by the Tech warning since parts are inlined inside
+            // Tech blocks). Same triggering conditions and recovery workflow.
+            WarnAboutSharedResearchOnUpgrade();
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-5 upgrade-lens diagnostic] Sibling of
+        /// <see cref="WarnAboutSharedTechOnUpgrade"/> for the two other R&amp;D-side
+        /// surfaces stripped by the projector splice: shared <c>Science</c> child
+        /// nodes (completed experiment archive) and the shared <c>ExpParts</c> node
+        /// (experimental parts inventory). Same triggering conditions: gate-on,
+        /// zero agencies loaded, non-pristine universe. Operator workflow remains
+        /// fresh-start-only.
+        /// </summary>
+        private static void WarnAboutSharedResearchOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return;
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return;
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("ResearchAndDevelopment", out var scenario))
+                return;
+
+            int subjectCount;
+            int expPartCount;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("ResearchAndDevelopment"))
+            {
+                subjectCount = scenario.GetNodes("Science").Count();
+                var expNode = scenario.GetNode("ExpParts")?.Value;
+                expPartCount = expNode?.GetAllValues().Count ?? 0;
+            }
+
+            if (subjectCount == 0 && expPartCount == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:per-agency-career] PerAgencyCareer=true on an upgrade universe carries " +
+                $"{subjectCount} shared-agency science-subject record(s) and {expPartCount} experimental-part " +
+                "entry/entries in the R&D scenario. The Stage 5.17e-5 projector strips these on send so per-agency " +
+                "clients start with empty experiment archives + zero experimental parts — the accumulated shared " +
+                "progress is NOT migrated. Spec §10 migration is fresh-start-only: stop the server, archive " +
+                "Universe/ before any player connects, and start fresh. Operators wishing to preserve specific " +
+                "subjects / experimental parts can stop the server and hand-edit individual SUBJECT / " +
+                "EXPERIMENTAL_PARTS entries into Universe/Agencies/{guid}.txt files once agencies are minted, " +
+                "but bulk migration is not supported.");
         }
 
         /// <summary>

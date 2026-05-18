@@ -79,6 +79,47 @@ namespace Server.System.Agency
             new Dictionary<string, AgencyTechNodeEntry>(StringComparer.Ordinal);
 
         /// <summary>
+        /// Per-agency completed science subjects — KSP <c>ScienceSubject</c>
+        /// records (one per experiment outcome the player has transmitted /
+        /// recovered). Keyed by subject id for O(1) dedup on incoming
+        /// <c>ShareProgressScienceSubjectMsgData</c>. Persisted as SUBJECTS/SUBJECT
+        /// child nodes; spliced into outgoing R&amp;D scenarios as
+        /// <c>Science { ... }</c> entries by <see cref="AgencyScenarioProjector"/>.
+        /// Same concurrency contract as <see cref="TechNodes"/> — mutations AND
+        /// reads need <see cref="AgencySystem.GetAgencyLock"/>.
+        /// </summary>
+        public Dictionary<string, AgencyScienceSubjectEntry> ScienceSubjects { get; } =
+            new Dictionary<string, AgencyScienceSubjectEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Per-agency purchased parts. Keyed by <c>TechId</c> (the tech node the
+        /// part belongs to), value is the set of <c>PartName</c>s the agency has
+        /// purchased under that node. Two-level structure mirrors KSP's storage
+        /// model: parts live INSIDE Tech nodes in the scenario, not as top-level
+        /// entries. The projector reads this dictionary while splicing per-agency
+        /// Tech nodes and adds matching <c>part = X</c> values inside each spliced
+        /// Tech block. Persisted as PURCHASED_PARTS/TECH/Part hierarchy.
+        ///
+        /// **Why HashSet not List per tech.** Player can attempt to re-purchase
+        /// the same part (KSP doesn't fire ShareProgressPartPurchase if already
+        /// owned, but a buggy mod could); HashSet is O(1) dedup and the storage
+        /// cost is identical for a few hundred parts.
+        /// </summary>
+        public Dictionary<string, HashSet<string>> PurchasedParts { get; } =
+            new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Per-agency experimental parts — KSP <c>ExpParts</c> nodes inside the
+        /// R&amp;D scenario. Keyed by <c>PartName</c>, value is the count
+        /// (KSP allows multiples of the same experimental part). Count==0 means
+        /// "remove" per the shared-scenario writer's behavior; we honour the same
+        /// signal here. Persisted as EXPERIMENTAL_PARTS/Part values; spliced as
+        /// <c>ExpParts { ... }</c> child node by the projector.
+        /// </summary>
+        public Dictionary<string, int> ExperimentalParts { get; } =
+            new Dictionary<string, int>(StringComparer.Ordinal);
+
+        /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
         /// Created at server boot via <see cref="Server.Context.Universe.CheckUniverse"/>
         /// alongside the other Universe child folders, so <see cref="FileHandler.WriteAtomic"/>
@@ -162,6 +203,73 @@ namespace Server.System.Agency
                     var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
                     techNode.CreateValue(new CfgNodeValue<string, string>("Data", base64));
                     techRoot.AddNode(techNode);
+                }
+            }
+
+            // [Stage 5.17e-5] Completed science subjects — same shape as TECHTREE.
+            // One SUBJECT child node per entry; Id + Base64(Data) values.
+            if (ScienceSubjects.Count > 0)
+            {
+                var subjectsRoot = new ConfigNode("") { Name = "SUBJECTS" };
+                node.AddNode(subjectsRoot);
+                foreach (var entry in ScienceSubjects.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.SubjectId))
+                        continue;
+                    var subjectNode = new ConfigNode("") { Name = "SUBJECT" };
+                    subjectNode.CreateValue(new CfgNodeValue<string, string>("Id", entry.SubjectId));
+                    var dataBytes = entry.Data ?? Array.Empty<byte>();
+                    var len = Math.Min(entry.NumBytes, dataBytes.Length);
+                    var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
+                    subjectNode.CreateValue(new CfgNodeValue<string, string>("Data", base64));
+                    subjectsRoot.AddNode(subjectNode);
+                }
+            }
+
+            // [Stage 5.17e-5] Purchased parts — two-level structure (TECH child
+            // nodes, each containing Part values). The projector merges these
+            // into per-agency Tech blocks during R&D splice.
+            if (PurchasedParts.Count > 0)
+            {
+                var partsRoot = new ConfigNode("") { Name = "PURCHASED_PARTS" };
+                node.AddNode(partsRoot);
+                foreach (var kvp in PurchasedParts)
+                {
+                    if (string.IsNullOrEmpty(kvp.Key) || kvp.Value == null || kvp.Value.Count == 0)
+                        continue;
+                    var techNode = new ConfigNode("") { Name = "TECH" };
+                    techNode.CreateValue(new CfgNodeValue<string, string>("Id", kvp.Key));
+                    foreach (var partName in kvp.Value)
+                    {
+                        if (string.IsNullOrEmpty(partName))
+                            continue;
+                        techNode.CreateValue(new CfgNodeValue<string, string>("Part", partName));
+                    }
+                    partsRoot.AddNode(techNode);
+                }
+            }
+
+            // [Stage 5.17e-5] Experimental parts — flat key=value pairs under
+            // EXPERIMENTAL_PARTS. Count=0 entries are omitted (matches the
+            // shared-scenario writer's count==0 → remove semantics; persisting
+            // a zero entry would be a forward-compat foot-gun). Build the inner
+            // values FIRST and add the parent node only if at least one valid
+            // entry made it through — otherwise an all-zero ExperimentalParts
+            // would produce an empty EXPERIMENTAL_PARTS block on disk (noise).
+            if (ExperimentalParts.Count > 0)
+            {
+                ConfigNode expRoot = null;
+                foreach (var kvp in ExperimentalParts)
+                {
+                    if (string.IsNullOrEmpty(kvp.Key) || kvp.Value <= 0)
+                        continue;
+                    if (expRoot == null)
+                    {
+                        expRoot = new ConfigNode("") { Name = "EXPERIMENTAL_PARTS" };
+                        node.AddNode(expRoot);
+                    }
+                    expRoot.CreateValue(new CfgNodeValue<string, string>(kvp.Key,
+                        kvp.Value.ToString(CultureInfo.InvariantCulture)));
                 }
             }
 
@@ -297,6 +405,74 @@ namespace Server.System.Agency
                     }
 
                     state.TechNodes[techId] = entry;
+                }
+            }
+
+            // [Stage 5.17e-5] Forward-compat for SUBJECTS / PURCHASED_PARTS /
+            // EXPERIMENTAL_PARTS — Stage 5.17e-5 additions. Older AgencyState
+            // files predate them; missing nodes load as empty collections.
+            // Per-entry parse failures are silently skipped, matching the
+            // TECHTREE forward-compat contract.
+            var subjectsRoot = node.GetNode("SUBJECTS")?.Value;
+            if (subjectsRoot != null)
+            {
+                foreach (var subjectEntry in subjectsRoot.GetNodes("SUBJECT"))
+                {
+                    var entryNode = subjectEntry.Value;
+                    var subjectId = entryNode.GetValue("Id")?.Value;
+                    if (string.IsNullOrEmpty(subjectId))
+                        continue;
+                    var entry = new AgencyScienceSubjectEntry { SubjectId = subjectId };
+                    var base64 = entryNode.GetValue("Data")?.Value;
+                    if (!string.IsNullOrEmpty(base64))
+                    {
+                        try
+                        {
+                            entry.Data = Convert.FromBase64String(base64);
+                            entry.NumBytes = entry.Data.Length;
+                        }
+                        catch (FormatException)
+                        {
+                            entry.Data = Array.Empty<byte>();
+                            entry.NumBytes = 0;
+                        }
+                    }
+                    state.ScienceSubjects[subjectId] = entry;
+                }
+            }
+
+            var partsRoot = node.GetNode("PURCHASED_PARTS")?.Value;
+            if (partsRoot != null)
+            {
+                foreach (var techEntry in partsRoot.GetNodes("TECH"))
+                {
+                    var entryNode = techEntry.Value;
+                    var techId = entryNode.GetValue("Id")?.Value;
+                    if (string.IsNullOrEmpty(techId))
+                        continue;
+                    var partSet = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var partValue in entryNode.GetValues("Part"))
+                    {
+                        if (!string.IsNullOrEmpty(partValue.Value))
+                            partSet.Add(partValue.Value);
+                    }
+                    if (partSet.Count > 0)
+                        state.PurchasedParts[techId] = partSet;
+                }
+            }
+
+            var expRoot = node.GetNode("EXPERIMENTAL_PARTS")?.Value;
+            if (expRoot != null)
+            {
+                foreach (var partValue in expRoot.GetAllValues())
+                {
+                    if (string.IsNullOrEmpty(partValue.Key))
+                        continue;
+                    if (!int.TryParse(partValue.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var count))
+                        continue;
+                    if (count <= 0)
+                        continue;
+                    state.ExperimentalParts[partValue.Key] = count;
                 }
             }
 
