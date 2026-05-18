@@ -35,6 +35,9 @@ namespace Server.Settings.Definition
         [XmlComment(Value = "Enable per-agency career mode (each player has independent funds/science/reputation/tech/contracts). Default false preserves shared-agency behaviour. Cannot be changed mid-save: pick a value before the universe is first populated.")]
         public bool PerAgencyCareer { get; set; }
 
+        [XmlComment(Value = "[Stage 5.17e-9] Allow PerAgencyCareer=true on a universe that already has accumulated shared-agency state (vessels + career scalars/contracts/tech/etc.). Default false: server refuses to start with a loud message pointing operator to the fresh-start workflow (spec §10). Set true ONLY if you accept that the accumulated shared progress will be invisible to per-agency clients (projector strips it on send).")]
+        public bool AllowEnablePerAgencyOnExistingUniverse { get; set; }
+
         //Game systems
 
         [XmlComment(Value = "Re-Entry Heating")]
@@ -148,6 +151,7 @@ namespace Server.Settings.Definition
             AllowStockVessels = true;
             AllowOtherLaunchSites = true;
             PerAgencyCareer = false;
+            AllowEnablePerAgencyOnExistingUniverse = false;
 
             //Game systems
             ReentryHeatScale = 0.5f;
@@ -200,6 +204,7 @@ namespace Server.Settings.Definition
             AllowStockVessels = false;
             AllowOtherLaunchSites = true;
             PerAgencyCareer = false;
+            AllowEnablePerAgencyOnExistingUniverse = false;
 
             //Game systems
             ReentryHeatScale = 1.0f;
@@ -252,6 +257,7 @@ namespace Server.Settings.Definition
             AllowStockVessels = false;
             AllowOtherLaunchSites = true;
             PerAgencyCareer = false;
+            AllowEnablePerAgencyOnExistingUniverse = false;
 
             //Game systems
             ReentryHeatScale = 1.0f;
@@ -304,6 +310,7 @@ namespace Server.Settings.Definition
             AllowStockVessels = false;
             AllowOtherLaunchSites = true;
             PerAgencyCareer = false;
+            AllowEnablePerAgencyOnExistingUniverse = false;
 
             //Game systems
             ReentryHeatScale = 1.0f;

@@ -1,4 +1,5 @@
 using LmpCommon.Enums;
+using Server.Context;
 using Server.Log;
 using Server.Settings.Structures;
 using System;
@@ -273,6 +274,108 @@ namespace Server.System.Agency
             // [Stage 5.17e-6] Sibling diagnostic for Strategy / Progress /
             // Facility scenarios — same shape and recovery workflow.
             WarnAboutSharedProgressFacilityOnUpgrade();
+
+            // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
+            // warnings fired AND the operator hasn't explicitly opted into the
+            // accepted-loss path, refuse to keep running. The accumulated shared
+            // state can't be safely projected per-agency (the WarnAbout* warnings
+            // describe exactly what the projector would silently strip on first
+            // connect); fail-closed prevents the operator missing the warnings
+            // and continuing into silent data-loss territory.
+            RefuseStartupIfUpgradeHazardWithoutOverride();
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-9 boot-refusal hardening] Spec §10 Q-BootRefusal sign-off.
+        /// Detects the upgrade-in-place hazard (gate on + no agencies loaded yet +
+        /// non-pristine universe + ANY accumulated shared career/research/progress/
+        /// facility state). When detected AND
+        /// <see cref="GameplaySettingsDefinition.AllowEnablePerAgencyOnExistingUniverse"/>
+        /// is false, logs a Fatal message and flips
+        /// <see cref="ServerContext.ServerRunning"/> to false — the main loop
+        /// observes the flag and exits cleanly on its next tick.
+        ///
+        /// The operator's recovery paths are: (a) follow the spec §10 fresh-start
+        /// workflow (archive Universe/, restart) and the refusal disappears
+        /// because vessels go empty; (b) set
+        /// <c>AllowEnablePerAgencyOnExistingUniverse=true</c> to explicitly
+        /// acknowledge the projector will strip the accumulated state on first
+        /// connect. The fail-closed default protects operators from misconfiguring
+        /// into silent career-data loss.
+        /// </summary>
+        private static void RefuseStartupIfUpgradeHazardWithoutOverride()
+        {
+            if (GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse)
+                return; // Operator opted in; respect the override.
+
+            // Re-evaluate the hazard conditions — duplicates a few lines from the
+            // WarnAbout* helpers but keeps the refusal decision self-contained and
+            // independent of how those helpers structure their early-returns.
+            if (Agencies.Count > 0)
+                return; // At least one agency loaded; no upgrade hazard.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe; no upgrade hazard.
+
+            bool hasHazard = false;
+
+            // Career scalars (5.17c).
+            if (TryReadScenarioRootDouble("Funding", "funds", out var f) && f != 0d) hasHazard = true;
+            else if (TryReadScenarioRootDouble("ResearchAndDevelopment", "sci", out var s) && s != 0d) hasHazard = true;
+            else if (TryReadScenarioRootDouble("Reputation", "rep", out var r) && r != 0d) hasHazard = true;
+
+            // Contracts (5.17d), tech / research (5.17e-4/5).
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ContractSystem", out var contractScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("ContractSystem"))
+                {
+                    var c = contractScn.GetNode("CONTRACTS")?.Value;
+                    if (c != null)
+                    {
+                        foreach (var entry in c.GetNodes("CONTRACT"))
+                        {
+                            var st = entry.Value.GetValue("state")?.Value ?? string.Empty;
+                            if (st != "Offered" && st != "Generated" && st != string.Empty)
+                            {
+                                hasHazard = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ResearchAndDevelopment", out var rndScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("ResearchAndDevelopment"))
+                {
+                    if (rndScn.GetNodes("Tech").Any()) hasHazard = true;
+                    else if (rndScn.GetNodes("Science").Any()) hasHazard = true;
+                    else if ((rndScn.GetNode("ExpParts")?.Value.GetAllValues().Count ?? 0) > 0) hasHazard = true;
+                }
+            }
+            // Progress/facility (5.17e-6) — strategies or facility upgrades.
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("StrategySystem", out var stratScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("StrategySystem"))
+                {
+                    var sc = stratScn.GetNode("STRATEGIES")?.Value;
+                    if (sc != null && sc.GetNodes("STRATEGY").Any()) hasHazard = true;
+                }
+            }
+
+            if (!hasHazard)
+                return;
+
+            LunaLog.Fatal(
+                "[fix:per-agency-career] BOOT REFUSED: PerAgencyCareer=true on a non-pristine universe " +
+                "with accumulated shared-agency career/research/progress state (see WarnAbout* warnings " +
+                "above). Per spec §10 Q-BootRefusal (session 15 sign-off), the server fails closed by " +
+                "default — the projector strips accumulated shared state on first per-agency client " +
+                "connect, which would silently delete operator-visible career progress. " +
+                "Resolve by either: (a) follow spec §10 fresh-start workflow — stop server, archive " +
+                "Universe/, restart with empty universe; OR (b) set " +
+                "AllowEnablePerAgencyOnExistingUniverse=true in Settings/GameplaySettings.xml to " +
+                "explicitly accept the projection-strip and continue. The server will now shut down.");
+            ServerContext.ServerRunning = false;
         }
 
         /// <summary>
