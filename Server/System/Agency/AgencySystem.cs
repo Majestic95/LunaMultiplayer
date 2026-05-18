@@ -1,3 +1,4 @@
+using LmpCommon.Enums;
 using Server.Log;
 using Server.Settings.Structures;
 using System;
@@ -15,12 +16,24 @@ namespace Server.System.Agency
     /// Hooked into <see cref="HandshakeSystem"/> on player auth (register-or-load) and into
     /// <see cref="MainServer"/> boot (load every persisted agency).
     ///
-    /// **Gated on <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>.** Every public
-    /// entry point early-returns when the setting is <c>false</c>. The dual-mode guarantee
-    /// (Stage 5 acceptance criteria, spec §11) requires that with the setting off, this
-    /// system has zero observable effect — no disk reads, no disk writes, no registry
-    /// entries. The shared-agency code path (<see cref="Share*System"/> family) is the
-    /// authority in that mode and AgencySystem is invisible.
+    /// **Gated on <see cref="PerAgencyEnabled"/>** (the combined check
+    /// <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>=true AND
+    /// <see cref="LmpCommon.Enums.GameMode"/>=Career). Every public entry point
+    /// early-returns when the gate is closed. The dual-mode guarantee (Stage 5 acceptance
+    /// criteria, spec §11) requires that with the gate closed, this system has zero
+    /// observable effect — no disk reads, no disk writes, no registry entries. The
+    /// shared-agency code path (<see cref="Share*System"/> family) is the authority in
+    /// that mode and AgencySystem is invisible.
+    ///
+    /// **Career-only (Stage 5.17e-1, signed off session 15).** Per spec §10 product
+    /// decision Q-Mode, per-agency career is supported in <see cref="GameMode.Career"/>
+    /// only. <see cref="GameMode.Science"/> and <see cref="GameMode.Sandbox"/> close the
+    /// gate even when <see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is true —
+    /// per-agency mid-session writes (Stage 5.17e-3 onwards) would NRE in Science mode
+    /// where <c>Funding.Instance</c> doesn't exist, and Sandbox has no career scalars to
+    /// project at all. The boot-time <see cref="LoadExistingAgencies"/> path logs a one-
+    /// time operator warning when the operator misconfigured the combination so the
+    /// silent no-op isn't a head-scratcher.
     ///
     /// Stage 5.15a scope is lifecycle only — register, load, save, boot-load. Wire-protocol
     /// broadcasting of agency state to clients lands in 5.15b/5.15c. Per-agency routing of
@@ -29,6 +42,22 @@ namespace Server.System.Agency
     /// </summary>
     public static class AgencySystem
     {
+        /// <summary>
+        /// The combined dual-mode gate. <c>true</c> iff
+        /// <see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is set AND
+        /// <see cref="LmpCommon.Enums.GameMode"/> is <see cref="GameMode.Career"/>. Every
+        /// per-agency code path (registration, projection, routing, wire sender, lock
+        /// rejection, vessel stamping, admin-command refusal) reads this property — not
+        /// the raw <c>PerAgencyCareer</c> setting — so the Career-only product decision
+        /// (Stage 5.17e-1, spec §10) is enforced consistently across the codebase. If
+        /// you find yourself reaching for <c>GameplaySettings.SettingsStore.PerAgencyCareer</c>
+        /// directly outside <see cref="LoadExistingAgencies"/> and the boot-warning path,
+        /// you're almost certainly bypassing the gate.
+        /// </summary>
+        public static bool PerAgencyEnabled =>
+            GameplaySettings.SettingsStore.PerAgencyCareer &&
+            GeneralSettings.SettingsStore.GameMode == GameMode.Career;
+
         /// <summary>
         /// Authoritative registry. Key is the canonical <see cref="AgencyState.AgencyId"/> Guid
         /// per Q7 sign-off — survives player renames and is the on-disk filename.
@@ -91,16 +120,70 @@ namespace Server.System.Agency
         /// the rest of the server from booting (spec §3 isolation principle, same shape as
         /// per-contract isolation in Stage 5.17b).
         ///
-        /// No-op when <see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is false.
+        /// **Operator visibility design (Stage 5.17e-1 round-1 upgrade-lens review).** The
+        /// per-agency disk state is independent of the current runtime gate. We always
+        /// scan + load the registry whenever <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>
+        /// is true, regardless of <see cref="LmpCommon.Enums.GameMode"/> — so the operator-
+        /// facing upgrade diagnostics (<see cref="WarnAboutOrphanedVessels"/>,
+        /// <see cref="WarnAboutSavingsLossOnUpgrade"/>,
+        /// <see cref="WarnAboutSharedContractsOnUpgrade"/>) can compare disk state against
+        /// the current vessel + scenario stores accurately. Runtime mutations (Register /
+        /// Save / routing / wire sends) remain gated on <see cref="PerAgencyEnabled"/>, so
+        /// loading the registry under a non-Career game mode is observably silent except
+        /// for the diagnostics. When <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>
+        /// is false we don't load (the operator opted out entirely), but we DO scan for
+        /// stranded <c>lmpOwningAgency</c> stamps on vessels so the operator is warned if
+        /// they disabled the gate while pre-stamped vessels still exist (re-enabling later
+        /// without restoring the corresponding agency files would lock the owning players
+        /// out of those vessels via the cross-agency check).
         /// </summary>
         public static void LoadExistingAgencies()
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            var perAgencyConfigured = GameplaySettings.SettingsStore.PerAgencyCareer;
+
+            // Gate off entirely → still surface a diagnostic if vessels carry stamps from
+            // a prior per-agency-on session. Without this, an operator who flipped the
+            // gate off (or never had it on but inherited stamped vessels from a peer)
+            // would silently lose the ability to re-enable per-agency without the
+            // affected players being locked out.
+            if (!perAgencyConfigured)
+            {
+                WarnAboutStrandedAgencyStampsIfGateOff();
                 return;
+            }
+
+            // [Stage 5.17e-1] Career-only product decision (spec §10, session 15 sign-off).
+            // The operator has set the gate on but selected a non-Career game mode. Per-
+            // agency runtime is disabled (via PerAgencyEnabled) but we STILL load the disk
+            // state and run upgrade diagnostics so the operator sees what's accumulated
+            // and can recover deliberately. Without the load, WarnAboutOrphanedVessels
+            // would mark every stamped vessel as orphan; with it, the diagnostics produce
+            // accurate information for the operator's recovery decision.
+            if (GeneralSettings.SettingsStore.GameMode != GameMode.Career)
+            {
+                LunaLog.Warning(
+                    $"[fix:per-agency-career] PerAgencyCareer=true but GameMode={GeneralSettings.SettingsStore.GameMode}. " +
+                    "Per-agency career is supported in Career mode only (spec §10, session 15 sign-off — Science " +
+                    "mode has no Funding/Reputation singletons so per-agency mid-session writes would NRE; Sandbox " +
+                    "has no career scalars to project). Agency registration, projection, and per-agency routing " +
+                    "are disabled for this server, but the disk-side registry will still be loaded so the upgrade " +
+                    "diagnostics below report accurately. Either set GameMode=Career in Settings/GeneralSettings.xml " +
+                    "or set PerAgencyCareer=false in Settings/GameplaySettings.xml. Note: changing PerAgencyCareer " +
+                    "may flip GameDifficulty to Custom on next save — see CLAUDE.md Settings caveat.");
+            }
 
             var folder = AgencyState.AgenciesPath;
             if (!FileHandler.FolderExists(folder))
+            {
+                // Empty/missing folder → still run the upgrade diagnostics. The savings-loss
+                // and shared-contracts checks fire when vessels+scenarios accumulated but no
+                // agencies have been minted — that's exactly the in-place upgrade case where
+                // the operator most needs to know what'll happen at next first-connect.
+                WarnAboutOrphanedVessels();
+                WarnAboutSavingsLossOnUpgrade();
+                WarnAboutSharedContractsOnUpgrade();
                 return;
+            }
 
             var loadedCount = 0;
             foreach (var filePath in FileHandler.GetFilesInPath(folder))
@@ -295,6 +378,39 @@ namespace Server.System.Agency
             return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
         }
 
+        /// <summary>
+        /// [Stage 5.17e-1 round-1 upgrade-lens review] Fires only when
+        /// <see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is false at boot.
+        /// Scans <see cref="VesselStoreSystem.CurrentVessels"/> for any vessel carrying a
+        /// non-Empty <c>OwningAgencyId</c>. If any are found, warns the operator that
+        /// these stamps will lock the owning players out of those vessels if they later
+        /// re-enable PerAgencyCareer (since the new sessions would mint fresh GUIDs and
+        /// the cross-agency check would refuse acquires). Quiet when no stranded stamps
+        /// exist — the common fresh-universe-with-gate-off boot stays silent.
+        /// </summary>
+        private static void WarnAboutStrandedAgencyStampsIfGateOff()
+        {
+            var strandedCount = 0;
+            foreach (var vessel in VesselStoreSystem.CurrentVessels.Values)
+            {
+                if (vessel.OwningAgencyId != Guid.Empty)
+                    strandedCount++;
+            }
+
+            if (strandedCount == 0)
+                return;
+
+            LunaLog.Warning(
+                $"[fix:per-agency-career] PerAgencyCareer=false at boot, but {strandedCount} vessel(s) " +
+                "carry an lmpOwningAgency stamp from a prior per-agency session. The agency registry is not " +
+                "loaded under gate=off, but the stamps persist on disk. If you re-enable PerAgencyCareer later " +
+                "WITHOUT restoring the matching Universe/Agencies/{guid}.txt files (e.g. you deleted them), the " +
+                "owning players will mint NEW agency GUIDs on reconnect and be locked out of these vessels by " +
+                "the cross-agency lock check. Stage 5.18d's transferagency admin command will be the recovery " +
+                "path. To preserve full re-enable: keep Universe/Agencies/ intact, or accept the loss and use " +
+                "transferagency to re-own the affected vessels under the new agencies.");
+        }
+
         private static void WarnAboutOrphanedVessels()
         {
             var orphanCounts = new Dictionary<Guid, int>();
@@ -326,12 +442,12 @@ namespace Server.System.Agency
         /// Persists immediately via <see cref="SaveAgency"/> so a crash before the next
         /// periodic save doesn't lose the registration.
         ///
-        /// No-op (returns null) when <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>
-        /// is false.
+        /// No-op (returns null) when <see cref="PerAgencyEnabled"/> is false (gate off OR
+        /// non-Career game mode).
         /// </summary>
         public static AgencyState RegisterAgency(string playerName)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!PerAgencyEnabled)
                 return null;
             if (string.IsNullOrEmpty(playerName))
                 throw new ArgumentException("Player name must be non-empty", nameof(playerName));
@@ -409,12 +525,12 @@ namespace Server.System.Agency
         /// both the registry and disk. Useful for admin tooling (Stage 5.18d) and for
         /// the future wire path where a client references an agency by id.
         ///
-        /// No-op (returns null) when <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>
-        /// is false.
+        /// No-op (returns null) when <see cref="PerAgencyEnabled"/> is false (gate off OR
+        /// non-Career game mode).
         /// </summary>
         public static AgencyState LoadAgency(Guid agencyId)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!PerAgencyEnabled)
                 return null;
 
             if (Agencies.TryGetValue(agencyId, out var existing))
@@ -444,11 +560,11 @@ namespace Server.System.Agency
         /// a multi-field mutation (e.g. paying for a tech node = debit Science + flip
         /// TechNodeState) can produce a torn intermediate snapshot on disk.
         ///
-        /// No-op when <see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is false.
+        /// No-op when <see cref="PerAgencyEnabled"/> is false (gate off OR non-Career game mode).
         /// </summary>
         public static void SaveAgency(Guid agencyId)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!PerAgencyEnabled)
                 return;
             if (!Agencies.TryGetValue(agencyId, out var state))
                 return;
@@ -464,11 +580,11 @@ namespace Server.System.Agency
         /// First-connect creates a fresh agency; subsequent connects return the existing
         /// one (idempotent — <see cref="RegisterAgency"/> handles both paths).
         ///
-        /// No-op when <see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is false.
+        /// No-op when <see cref="PerAgencyEnabled"/> is false (gate off OR non-Career game mode).
         /// </summary>
         public static void OnPlayerAuthenticated(string playerName)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!PerAgencyEnabled)
                 return;
 
             RegisterAgency(playerName);

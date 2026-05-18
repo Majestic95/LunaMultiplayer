@@ -95,9 +95,18 @@ namespace Server
                 VesselStoreSystem.LoadExistingVessels();
                 var scenariosCreated = ScenarioSystem.GenerateDefaultScenarios();
                 ScenarioStoreSystem.LoadExistingScenarios(scenariosCreated);
-                // [Stage 5.15a] No-op when PerAgencyCareer is false. Sits after settings
-                // load (so the gate is readable) and after the other "load existing X"
-                // calls so per-agency state can later cross-reference vessel/scenario state.
+                // [Stage 5.15a, gate refined 5.17e-1] Boot-time agency-registry load + per-
+                // agency upgrade diagnostics. Behaviour by config:
+                //   - PerAgencyCareer=false → emits a stranded-stamp warning if any vessels
+                //     carry lmpOwningAgency from a prior session, else silent.
+                //   - PerAgencyCareer=true + GameMode=Career → loads Agencies/*.txt, runs
+                //     orphan / savings-loss / shared-contracts diagnostics.
+                //   - PerAgencyCareer=true + GameMode != Career → loads the disk registry
+                //     (so diagnostics are accurate) AND emits a Career-only misconfig
+                //     warning; runtime per-agency code paths remain no-ops via PerAgencyEnabled.
+                // Sits after settings load (so the gate is readable) and after the other
+                // "load existing X" calls so per-agency diagnostics can cross-reference
+                // vessel + scenario state.
                 AgencySystem.LoadExistingAgencies();
                 LmpPluginHandler.LoadPlugins();
                 WarpSystem.Reset();

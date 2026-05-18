@@ -23,8 +23,10 @@ namespace Server.System.Agency
     /// will extend that surface for tracking-station labels when it lands.
     ///
     /// **Dual-mode gate (spec §11).** Every entry point early-returns when
-    /// <see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is false. Same shape
-    /// as the lifecycle methods on <see cref="AgencySystem"/>.
+    /// <see cref="AgencySystem.PerAgencyEnabled"/> is false — combined check for
+    /// <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>=true AND
+    /// <see cref="LmpCommon.Enums.GameMode"/>=Career (Stage 5.17e-1, spec §10 Q-Mode).
+    /// Same shape as the lifecycle methods on <see cref="AgencySystem"/>.
     /// </summary>
     public static class AgencySystemSender
     {
@@ -42,7 +44,7 @@ namespace Server.System.Agency
         /// </summary>
         public static void SendHandshakeTo(ClientStructure client, Guid assignedAgencyId)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!AgencySystem.PerAgencyEnabled)
                 return;
             if (client == null)
                 return;
@@ -77,7 +79,7 @@ namespace Server.System.Agency
         /// </summary>
         public static void SendStateTo(ClientStructure client, AgencyState state)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!AgencySystem.PerAgencyEnabled)
                 return;
             if (client == null || state == null)
                 return;
@@ -101,7 +103,7 @@ namespace Server.System.Agency
         /// </summary>
         public static void SendStateToOwner(AgencyState state)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!AgencySystem.PerAgencyEnabled)
                 return;
             if (state == null || string.IsNullOrEmpty(state.OwningPlayerName))
                 return;
@@ -121,7 +123,7 @@ namespace Server.System.Agency
         /// </summary>
         public static void SendCreateReplyTo(ClientStructure client, Guid agencyId, string displayName, bool success, string reason)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!AgencySystem.PerAgencyEnabled)
                 return;
             if (client == null)
                 return;
@@ -141,8 +143,9 @@ namespace Server.System.Agency
         /// receive another agency's per-agency contracts (spec §10 Q1
         /// PrivateAgencyResources=true). No-op when:
         /// <list type="bullet">
-        ///   <item><see cref="GameplaySettingsDefinition.PerAgencyCareer"/> is off
-        ///        (dual-mode silence).</item>
+        ///   <item><see cref="AgencySystem.PerAgencyEnabled"/> is false — gate off OR
+        ///        non-Career game mode (Stage 5.17e-1 Career-only gate, spec §10 Q-Mode).
+        ///        Dual-mode silence preserved across the entire wire surface.</item>
         ///   <item>The owner is null (called from a code path where the source client
         ///        is unknown).</item>
         ///   <item>The batch is empty / null (nothing to send).</item>
@@ -150,7 +153,7 @@ namespace Server.System.Agency
         /// </summary>
         public static void SendContractsToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<ContractInfo> contracts)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!AgencySystem.PerAgencyEnabled)
                 return;
             if (owner == null || contracts == null || contracts.Count == 0)
                 return;
@@ -181,7 +184,7 @@ namespace Server.System.Agency
         /// </summary>
         public static void SendContractCatchupTo(ClientStructure client, AgencyState state)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!AgencySystem.PerAgencyEnabled)
                 return;
             if (client == null || state == null || state.Contracts == null || state.Contracts.Count == 0)
                 return;

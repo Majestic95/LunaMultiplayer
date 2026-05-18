@@ -39,6 +39,7 @@ namespace MockClientTest
         public void PerAgencyCareerEnabled_FirstProto_StampsSenderAgency()
         {
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerName = "h-016b-alpha";
             SeedSubspace(1, time: 100d);
@@ -75,6 +76,7 @@ namespace MockClientTest
             // Pre-fix this test would fail: stored.OwningAgencyId would be the player's
             // agency rather than Guid.Empty.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerName = "h-016b-pre";
             SeedSubspace(1, time: 100d);
@@ -119,6 +121,7 @@ namespace MockClientTest
             // in a DIFFERENT agency must preserve the original owner (the only legitimate
             // ownership mutation is the admin transferagency command — Stage 5.18d).
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerA = "h-016b-alice";
             const string playerB = "h-016b-bob";
@@ -170,6 +173,7 @@ namespace MockClientTest
             // adversarial wire content (vs. the gate-off scrub path which exercises the
             // fall-through scrub).
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerName = "h-016b-spoo2";
             SeedSubspace(1, time: 100d);

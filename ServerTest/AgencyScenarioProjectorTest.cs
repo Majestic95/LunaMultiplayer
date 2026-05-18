@@ -30,6 +30,7 @@ namespace ServerTest
         public void Teardown()
         {
             GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox; // restore default for adjacent test classes
             AgencySystem.Reset();
         }
 
@@ -179,7 +180,26 @@ namespace ServerTest
         public void ProjectForClient_Sandbox_ReturnsInputUnchanged()
         {
             // Sandbox has no career scalars — projection skips even with the gate on.
+            // [Stage 5.17e-1] Sandbox bypass is now folded into AgencySystem.PerAgencyEnabled
+            // (which requires GameMode==Career) but the test still asserts the externally
+            // observable contract: gate-on + Sandbox = input unchanged.
             GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
+            var input = "name = Funding\nfunds = 100\n";
+
+            var result = AgencyScenarioProjector.ProjectForClient("Funding", input, null);
+
+            Assert.AreEqual(input, result);
+        }
+
+        [TestMethod]
+        public void ProjectForClient_Science_ReturnsInputUnchanged()
+        {
+            // [Stage 5.17e-1, spec §10 Q-Mode] Career-only product decision: Science mode
+            // closes the gate even with PerAgencyCareer=true. Without this, projection
+            // would run, but the client's Funding.Instance is null in Science mode — the
+            // Stage 5.17e-3 write-path routers would NRE on first mutation. Bypass at
+            // projection time keeps the wire identical to the shared-agency Science path.
+            GeneralSettings.SettingsStore.GameMode = GameMode.Science;
             var input = "name = Funding\nfunds = 100\n";
 
             var result = AgencyScenarioProjector.ProjectForClient("Funding", input, null);

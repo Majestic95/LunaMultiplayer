@@ -1,3 +1,4 @@
+using LmpCommon.Enums;
 using Server;
 using Server.Context;
 using Server.Server;
@@ -179,8 +180,14 @@ namespace MockClientTest.Harness
             // runs, so a forgotten test that leaves the flag on cannot leak into
             // a follow-on non-agency test (which would then start broadcasting
             // Handshake/State messages it doesn't expect).
+            // [Stage 5.17e-1] Same logic for GameMode: AgencySystem.PerAgencyEnabled
+            // gates on PerAgencyCareer AND GameMode==Career (Career-only product
+            // decision, spec §10 Q-Mode). Restore the GeneralSettingsDefinition default
+            // (Sandbox) so an agency test leaving GameMode=Career can't accidentally
+            // activate per-agency code paths in a follow-on non-agency test.
             AgencySystem.Reset();
             GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
             // [Stage 5.16 round-2 review] Drop the locks Bug010PinnedBroadcastTest plants
             // via LockSystem.AcquireLock(force:true). Without this, prior-test locks linger
             // in LockStore and a follow-on disconnect can fire VesselPinned broadcasts that

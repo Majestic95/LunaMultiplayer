@@ -162,8 +162,17 @@ namespace MockClientTest
             // ensures clients see the canonical (shared) scenario text. This pins the
             // dual-mode behaviour for the Sandbox vs Career game-mode axis independently
             // of the per-agency gate.
+            //
+            // [Stage 5.17e-1] Career-only product decision (spec §10 Q-Mode) means
+            // Sandbox handshakes no longer register agencies — `OnPlayerAuthenticated`
+            // is a no-op when PerAgencyEnabled is false. So we register under Career
+            // first, then flip the mode to Sandbox and seed the agency's state, then
+            // exercise the request path to assert the projector early-returns the
+            // canonical scenario text. This still pins the original behaviour
+            // ("Sandbox bypass even with PerAgencyCareer=true") while honouring the
+            // tightened Career-only registration gate.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
-            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             PlantScenario("Funding", "name = Funding\nfunds = 77777");
 
@@ -172,6 +181,10 @@ namespace MockClientTest
                 Assert.IsTrue(client.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
                 var clientAgency = HandshakeAndGetAgencyId(client, "h-017c-sandb");
                 AgencySystem.Agencies[clientAgency].Funds = 11111;
+
+                // Flip to Sandbox AFTER registration. Projector now sees
+                // AgencySystem.PerAgencyEnabled=false → bypasses and ships canonical text.
+                GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
 
                 client.SendMessage<ScenarioCliMsg>(
                     ServerContext.ClientMessageFactory.CreateNewMessageData<ScenarioRequestMsgData>());

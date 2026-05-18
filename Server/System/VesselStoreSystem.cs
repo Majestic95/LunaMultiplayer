@@ -73,7 +73,7 @@ namespace Server.System
             // (despite the spec's "fresh-start" recommendation) need to know how many
             // vessels require admin transferagency (Stage 5.18d). Quiet when zero so the
             // common gate-off and fresh-universe boots emit nothing.
-            if (Settings.Structures.GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (Agency.AgencySystem.PerAgencyEnabled)
             {
                 var unassigned = CurrentVessels.Values.Count(v => v.OwningAgencyId == Guid.Empty);
                 if (unassigned > 0)

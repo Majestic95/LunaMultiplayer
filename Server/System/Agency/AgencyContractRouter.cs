@@ -82,7 +82,11 @@ namespace Server.System.Agency
         /// </summary>
         public static bool TryRoute(ClientStructure client, ShareProgressContractsMsgData msg)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            // [Stage 5.17e-1] Combined gate (PerAgencyCareer && GameMode==Career). Career-
+            // only product decision (spec §10 Q-Mode): per-agency contract routing requires
+            // a real Career singleton on the client; in Science/Sandbox the inbound is the
+            // shared-agency path's problem.
+            if (!AgencySystem.PerAgencyEnabled)
                 return false;
             if (client == null || string.IsNullOrEmpty(client.PlayerName) || msg == null)
                 return false;

@@ -80,7 +80,7 @@ namespace Server.System
             //path), then call ReleasePlayerLocks for cross-agency-now-violating holders on
             //the transferred vessel. Do NOT extend force:true to bypass — that would be
             //weaponisable by any client passing force=true on a LockAcquireMsgData.
-            if (GameplaySettings.SettingsStore.PerAgencyCareer
+            if (AgencySystem.PerAgencyEnabled
                 && IsVesselScopedLockType(lockDef.Type)
                 && lockDef.VesselId != Guid.Empty)
             {

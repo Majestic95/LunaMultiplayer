@@ -41,18 +41,19 @@ namespace Server.Message
         {
             var data = (AgencyBaseMsgData)message.Data;
 
-            // Dual-mode gate. With PerAgencyCareer=false the agency wire surface is
-            // intentionally silent (spec §11). A well-behaved 0.31.0 client knows the gate
-            // state via SettingsMsgData (Stage 5.18a wire extension, deferred) and would
-            // never send a CreateRequest in this mode. But: a buggy / mid-upgrade client
-            // that ships CreateRequest under gate=off would hang waiting for a reply that
-            // never comes — silent timeout is the worst error UX. So for CreateRequest
+            // Dual-mode gate. With per-agency career inactive (gate off OR non-Career game
+            // mode — Stage 5.17e-1 Career-only product decision, spec §10 Q-Mode), the
+            // agency wire surface is intentionally silent (spec §11). A well-behaved 0.31.0
+            // client knows the active state via SettingsMsgData (Stage 5.17e-2 wire field)
+            // and would never send a CreateRequest in this mode. But: a buggy / mid-upgrade
+            // client that ships CreateRequest under gate-off would hang waiting for a reply
+            // that never comes — silent timeout is the worst error UX. So for CreateRequest
             // specifically, ship a single targeted Success=false reply so the client can
             // surface the misconfiguration in its UI. This is the one intentional deviation
             // from dual-mode silence; it is unicast (no broadcast / no other-client leak)
             // and only triggers when a non-conforming client speaks first. Round-5
             // consumer-lens review.
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
+            if (!AgencySystem.PerAgencyEnabled)
             {
                 if (data.AgencyMessageType == AgencyMessageType.CreateRequest)
                 {
@@ -101,7 +102,7 @@ namespace Server.Message
             reply.AgencyId = Guid.Empty;
             reply.DisplayName = attemptedDisplayName;
             reply.Success = false;
-            reply.Reason = "Per-agency career disabled on this server (PerAgencyCareer=false)";
+            reply.Reason = "Per-agency career is not active on this server (requires PerAgencyCareer=true and GameMode=Career)";
             MessageQueuer.SendToClient<AgencySrvMsg>(client, reply);
 
             LunaLog.Warning($"[fix:per-agency-career] {client.PlayerName} sent CreateRequest with gate off; replying with Success=false");

@@ -42,6 +42,7 @@ namespace MockClientTest
             // therefore does NOT broadcast LockAcquireMsgData with Bob as owner. The watcher
             // (a third connected client) waits 800ms and asserts no such broadcast arrived.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
             SeedSubspace(1, time: 100d);
 
             // Bring up Alice + Bob via real handshake so each has a real agency in
@@ -107,6 +108,7 @@ namespace MockClientTest
             // broadcasts the successful LockAcquireMsgData to all clients (including the
             // watcher), and LockStore reflects the new lock.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
             SeedSubspace(1, time: 100d);
 
             using (var alice = new MockNetClient())
@@ -146,6 +148,7 @@ namespace MockClientTest
             // is the Unassigned sentinel. Any agency may interact. Bob (with his own
             // agency) acquires Control on an Unassigned vessel — should succeed.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
             SeedSubspace(1, time: 100d);
 
             using (var bob = new MockNetClient())

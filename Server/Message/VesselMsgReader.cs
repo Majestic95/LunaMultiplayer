@@ -177,7 +177,7 @@ namespace Server.Message
             //the wire bytes arrived"). Guid.Empty means "don't stamp" (gate off, or sender
             //has no agency yet — only possible if RegisterAgency hasn't run for them).
             var senderAgencyId = Guid.Empty;
-            if (GameplaySettings.SettingsStore.PerAgencyCareer
+            if (AgencySystem.PerAgencyEnabled
                 && AgencySystem.AgencyByPlayerName.TryGetValue(client.PlayerName, out var resolved))
             {
                 senderAgencyId = resolved;

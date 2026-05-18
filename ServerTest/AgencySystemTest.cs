@@ -1,3 +1,4 @@
+using LmpCommon.Enums;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Server.Context;
 using Server.Message;
@@ -34,7 +35,11 @@ namespace ServerTest
             Directory.CreateDirectory(AgencyState.AgenciesPath);
 
             // Default-on for tests; specific tests flip the gate when proving the off path.
+            // [Stage 5.17e-1] AgencySystem.PerAgencyEnabled gates on PerAgencyCareer AND
+            // GameMode=Career (Career-only product decision, spec §10 Q-Mode). Tests that
+            // exercise the on-path must set both.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
             GameplaySettings.SettingsStore.StartingFunds = 25_000f;
             GameplaySettings.SettingsStore.StartingScience = 10f;
             GameplaySettings.SettingsStore.StartingReputation = 5f;
@@ -49,6 +54,7 @@ namespace ServerTest
 
             // Restore the singleton so adjacent test classes don't inherit our overrides.
             GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox; // matches the GeneralSettingsDefinition default
             GameplaySettings.SettingsStore.StartingFunds = 0f;
             GameplaySettings.SettingsStore.StartingScience = 0f;
             GameplaySettings.SettingsStore.StartingReputation = 0f;
@@ -300,6 +306,66 @@ namespace ServerTest
 
             // Crucially: no agency file should have been written.
             Assert.AreEqual(0, Directory.GetFiles(AgencyState.AgenciesPath).Length);
+        }
+
+        [TestMethod]
+        public void AllOperations_AreNoOps_WhenGameModeIsNotCareer()
+        {
+            // [Stage 5.17e-1, spec §10 Q-Mode Career-only sign-off] PerAgencyEnabled
+            // gates on BOTH PerAgencyCareer=true AND GameMode==Career. Even with the
+            // setting on, a non-Career game mode collapses the per-agency surface to
+            // the same dual-mode silence as PerAgencyCareer=false. Pin Science here
+            // (Career-but-no-Funding-Instance product hazard) and Sandbox below as a
+            // separate assertion path.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Science;
+
+            Assert.IsFalse(AgencySystem.PerAgencyEnabled,
+                "PerAgencyEnabled must be false in Science mode regardless of PerAgencyCareer");
+
+            Assert.IsNull(AgencySystem.RegisterAgency("Majestic95"));
+            Assert.IsNull(AgencySystem.LoadAgency(Guid.NewGuid()));
+            AgencySystem.SaveAgency(Guid.NewGuid());
+            AgencySystem.OnPlayerAuthenticated("Majestic95");
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.AreEqual(0, AgencySystem.Agencies.Count, "No registry entries should land under Science mode");
+            Assert.AreEqual(0, AgencySystem.AgencyByPlayerName.Count);
+            Assert.AreEqual(0, Directory.GetFiles(AgencyState.AgenciesPath).Length,
+                "No agency file should be written when GameMode != Career");
+
+            // Sandbox path — independent assertion in case Science and Sandbox diverge
+            // in a future regression.
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
+
+            Assert.IsFalse(AgencySystem.PerAgencyEnabled);
+            Assert.IsNull(AgencySystem.RegisterAgency("AnotherPlayer"));
+            AgencySystem.OnPlayerAuthenticated("AnotherPlayer");
+
+            Assert.AreEqual(0, AgencySystem.Agencies.Count, "No registry entries should land under Sandbox mode");
+        }
+
+        [TestMethod]
+        public void PerAgencyEnabled_TrueOnlyWhenBothPerAgencyCareerAndCareerMode()
+        {
+            // Pure-property pin so future refactors don't accidentally drop one of the
+            // two conditions. The product decision is documented on the property itself
+            // (spec §10 Q-Mode) and on AgencySystem class XML.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
+            Assert.IsTrue(AgencySystem.PerAgencyEnabled);
+
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
+            Assert.IsFalse(AgencySystem.PerAgencyEnabled);
+
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Science;
+            Assert.IsFalse(AgencySystem.PerAgencyEnabled);
+
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
+            Assert.IsFalse(AgencySystem.PerAgencyEnabled);
         }
 
         [TestMethod]

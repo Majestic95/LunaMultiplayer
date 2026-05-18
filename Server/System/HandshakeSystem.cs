@@ -51,11 +51,12 @@ namespace Server.System
 
                 HandshakeSystemSender.SendHandshakeReply(client, HandshakeReply.HandshookSuccessfully, "success");
 
-                // [Stage 5.15c] Push the per-agency handshake + assigned-agency state on
-                // top of the LMP handshake reply, so the client's AgencySystem mirror
-                // (Stage 5.18a) lands populated by the time the player reaches the main
-                // menu. No-op when PerAgencyCareer is false.
-                if (GameplaySettings.SettingsStore.PerAgencyCareer
+                // [Stage 5.15c, gate refined 5.17e-1] Push the per-agency handshake +
+                // assigned-agency state on top of the LMP handshake reply, so the client's
+                // AgencySystem mirror (Stage 5.18a) lands populated by the time the player
+                // reaches the main menu. No-op when AgencySystem.PerAgencyEnabled is false
+                // (gate off OR non-Career game mode — spec §10 Q-Mode Career-only sign-off).
+                if (AgencySystem.PerAgencyEnabled
                     && AgencySystem.AgencyByPlayerName.TryGetValue(client.PlayerName, out var assignedAgencyId))
                 {
                     AgencySystemSender.SendHandshakeTo(client, assignedAgencyId);

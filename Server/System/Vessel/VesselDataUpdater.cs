@@ -115,7 +115,9 @@ namespace Server.System.Vessel
                         //registers) fall through to Empty.
                         //
                         //Dual-mode silence (spec §11): the entire stamp block is gated on
-                        //PerAgencyCareer. With the gate off, the field is left untouched — not
+                        //AgencySystem.PerAgencyEnabled — the combined check for PerAgencyCareer=true
+                        //AND GameMode=Career (Stage 5.17e-1, spec §10 Q-Mode Career-only sign-off).
+                        //With the gate off (either condition), the field is left untouched — not
                         //written, not scrubbed. Pre-0.31 vessels stay clean; new vessels get no
                         //lmpOwningAgency field on disk.
                         //
@@ -125,7 +127,7 @@ namespace Server.System.Vessel
                         //clients (one statement below in VesselMsgReader) still carry the wire-
                         //supplied value; see the relay-bytes contract note there for the Stage
                         //5.18a client-mirror obligations.
-                        if (GameplaySettings.SettingsStore.PerAgencyCareer)
+                        if (Agency.AgencySystem.PerAgencyEnabled)
                         {
                             if (existingStored != null)
                             {

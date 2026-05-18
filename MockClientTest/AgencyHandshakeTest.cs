@@ -37,6 +37,7 @@ namespace MockClientTest
         public void PerAgencyCareerEnabled_NewPlayer_ReceivesHandshakeAndState()
         {
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerName = "h-016a-alpha";
 
@@ -76,6 +77,7 @@ namespace MockClientTest
         public void SecondPlayer_HandshakeIncludesFirstPlayersAgency()
         {
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerA = "h-016a-alice";
             const string playerB = "h-016a-bob";
@@ -122,6 +124,7 @@ namespace MockClientTest
         public void CreateRequest_ValidName_AppliesAndPersistsToDisk()
         {
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerName = "h-016a-rena";
             const string newDisplayName = "Rena Space Industries";
@@ -174,6 +177,7 @@ namespace MockClientTest
         public void CreateRequest_EmptyName_RejectsWithReason_AndDoesNotMutateState()
         {
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
             const string playerName = "h-016a-empt";
 
@@ -239,6 +243,55 @@ namespace MockClientTest
 
                 Assert.IsFalse(AgencySystem.AgencyByPlayerName.ContainsKey(playerName),
                     "AgencySystem must not register a player when PerAgencyCareer is off.");
+            }
+        }
+
+        [TestMethod]
+        public void PerAgencyCareerEnabled_NonCareerGameMode_DoesNotEmitAgencyMessages()
+        {
+            // [Stage 5.17e-1, spec §10 Q-Mode Career-only sign-off] When the operator has
+            // mis-configured the combination (PerAgencyCareer=true with GameMode=Science),
+            // AgencySystem.PerAgencyEnabled returns false and the per-agency wire surface
+            // stays silent — same observable behaviour as PerAgencyCareer=false. The boot
+            // log warns the operator separately (LoadExistingAgencies). Test both Science
+            // and Sandbox here so the no-op contract isn't accidentally restricted to one
+            // mode.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Science;
+
+            const string playerScience = "h-017e1-sci";
+
+            using (var client = new MockNetClient())
+            {
+                Assert.IsTrue(client.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
+                Handshake(client, playerScience);
+
+                var stray = client.WaitForReply<AgencyBaseMsgData>(TimeSpan.FromMilliseconds(800));
+                Assert.IsNull(stray,
+                    $"Server emitted an unexpected Agency message ({stray?.GetType().Name}) while GameMode=Science (per-agency career is Career-only).");
+
+                Assert.IsFalse(AgencySystem.AgencyByPlayerName.ContainsKey(playerScience),
+                    "AgencySystem must not register a player when GameMode != Career, even with PerAgencyCareer=true.");
+            }
+
+            // Same shape under Sandbox — closes the door on a future regression where
+            // someone special-cases Sandbox but forgets Science.
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
+            AgencySystem.Reset();
+
+            const string playerSandbox = "h-017e1-sbx";
+
+            using (var client = new MockNetClient())
+            {
+                Assert.IsTrue(client.Connect(ServerHarness.Port, TimeSpan.FromSeconds(5)));
+                Handshake(client, playerSandbox);
+
+                var stray = client.WaitForReply<AgencyBaseMsgData>(TimeSpan.FromMilliseconds(800));
+                Assert.IsNull(stray,
+                    $"Server emitted an unexpected Agency message ({stray?.GetType().Name}) while GameMode=Sandbox (per-agency career is Career-only).");
+
+                Assert.IsFalse(AgencySystem.AgencyByPlayerName.ContainsKey(playerSandbox),
+                    "AgencySystem must not register a player when GameMode=Sandbox, even with PerAgencyCareer=true.");
             }
         }
 

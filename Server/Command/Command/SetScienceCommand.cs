@@ -16,14 +16,18 @@ namespace Server.Command.Command
         //Executes the SetScienceCommand
         public override bool Execute(string commandArgs)
         {
-            //[Stage 5.17c] Under PerAgencyCareer=true the projector overwrites the shared
-            //ResearchAndDevelopment scenario blob with each agency's tracked value before
-            //send. setscience would write to the shared blob, but every client sees their
-            //own agency value via the projection — the admin's intended update is silently
-            //invisible. Refuse with an explicit error. Stage 5.18d ships setagencyscience.
+            //[Stage 5.17c, gate refined 5.17e-1 round-1 upgrade-lens review] Refuse the
+            //command whenever the operator has set PerAgencyCareer=true — including the
+            //misconfigured (PerAgencyCareer=true + non-Career mode) state. Under per-agency
+            //active (mode==Career), the projector overwrites the shared ResearchAndDevelopment
+            //blob so setscience would silently fail. Under the misconfigured state, the
+            //per-agency routers (5.17e-3 onwards) are disabled and setscience WOULD work —
+            //but it would leak to all peers via the shared Science broadcast, surprising an
+            //operator who thought they were in per-agency mode. Refuse loudly in both cases;
+            //the operator fixes the misconfig deliberately. Stage 5.18d ships setagencyscience.
             if (GameplaySettings.SettingsStore.PerAgencyCareer)
             {
-                LunaLog.Error("setscience is disabled under PerAgencyCareer=true. Use setagencyscience <agencyId> <amount> (Stage 5.18d) or edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
+                LunaLog.Error("setscience is disabled while PerAgencyCareer=true. In Career mode use setagencyscience <agencyId> <amount> (Stage 5.18d); in Science/Sandbox the per-agency setting is misconfigured (see boot warning). Operators can also edit Universe/Agencies/{guid}.txt directly while the server is stopped.");
                 return false;
             }
             //Check parameter

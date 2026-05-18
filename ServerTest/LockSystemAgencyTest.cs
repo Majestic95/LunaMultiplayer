@@ -1,3 +1,4 @@
+using LmpCommon.Enums;
 using LmpCommon.Locks;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Server.Context;
@@ -40,7 +41,12 @@ namespace ServerTest
             VesselStoreSystem.CurrentVessels.Clear();
             WarpContext.Subspaces.Clear();
             AgencySystem.Reset();
+            // [Stage 5.17e-1] Combined gate requires both PerAgencyCareer AND GameMode=Career
+            // (spec §10 Q-Mode Career-only). Tests below exercise the on-path of LockSystem's
+            // cross-agency guard and the off-path bypasses; the gate-off test flips
+            // PerAgencyCareer to false locally.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
         }
 
         [TestCleanup]
@@ -50,6 +56,7 @@ namespace ServerTest
             WarpContext.Subspaces.Clear();
             AgencySystem.Reset();
             GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox; // restore default for adjacent test classes
         }
 
         [TestMethod]

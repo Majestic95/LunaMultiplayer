@@ -1,6 +1,4 @@
-using LmpCommon.Enums;
 using Server.Client;
-using Server.Settings.Structures;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -33,9 +31,12 @@ namespace Server.System.Agency
     /// </list>
     /// Other scenarios pass through unchanged.
     ///
-    /// Dual-mode silence (spec §11): with <see cref="GameplaySettingsDefinition.PerAgencyCareer"/>
-    /// off, <see cref="ProjectForClient"/> returns the input string unchanged. Game-mode
-    /// Sandbox also passes through (no career scalars exist).
+    /// Dual-mode silence (spec §11): with <see cref="AgencySystem.PerAgencyEnabled"/>
+    /// false (gate off OR non-Career game mode), <see cref="ProjectForClient"/> returns
+    /// the input string unchanged. The Career-only product decision (Stage 5.17e-1, spec
+    /// §10) folds Sandbox and Science skips into the single <c>PerAgencyEnabled</c> check
+    /// so this projector cannot fire outside Career — preserves shared-agency behaviour
+    /// bit-for-bit under any mode/gate combination other than Career+PerAgencyCareer=true.
     /// </summary>
     internal static class AgencyScenarioProjector
     {
@@ -80,11 +81,11 @@ namespace Server.System.Agency
 
         /// <summary>
         /// Project the given serialized scenario text for the requesting client. Returns
-        /// the input unchanged when (a) per-agency career is off, (b) game mode is Sandbox
-        /// (no career scalars to project), (c) the scenario is not one we project,
-        /// (d) the client has no agency registered, or (e) the agency state has been
-        /// removed mid-projection. Otherwise returns a fresh string with the
-        /// corresponding career scalar overwritten.
+        /// the input unchanged when (a) <see cref="AgencySystem.PerAgencyEnabled"/> is
+        /// false (gate off OR non-Career game mode — Stage 5.17e-1, spec §10), (b) the
+        /// scenario is not one we project, (c) the client has no agency registered, or
+        /// (d) the agency state has been removed mid-projection. Otherwise returns a
+        /// fresh string with the corresponding career scalar overwritten.
         ///
         /// The serialized input must be the bare-key-value-pair form
         /// <see cref="ScenarioStoreSystem.GetScenarioInConfigNodeFormat"/> produces (no
@@ -95,9 +96,7 @@ namespace Server.System.Agency
         /// </summary>
         internal static string ProjectForClient(string scenarioName, string serializedText, ClientStructure client)
         {
-            if (!GameplaySettings.SettingsStore.PerAgencyCareer)
-                return serializedText;
-            if (GeneralSettings.SettingsStore.GameMode == GameMode.Sandbox)
+            if (!AgencySystem.PerAgencyEnabled)
                 return serializedText;
             if (!CareerScenarios.Contains(scenarioName))
                 return serializedText;
