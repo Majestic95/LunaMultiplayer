@@ -2,6 +2,7 @@ using LmpClient.Base;
 using LmpCommon.Enums;
 using LmpCommon.Message.Data.Agency;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 
 namespace LmpClient.Systems.Agency
@@ -113,6 +114,114 @@ namespace LmpClient.Systems.Agency
         public Dictionary<Guid, AgencyInfo> OtherAgencies { get; } =
             new Dictionary<Guid, AgencyInfo>();
 
+        /// <summary>
+        /// vessel-id → owning-agency-id mirror, populated from incoming VesselProto
+        /// ConfigNodes at deserialize time (Stage 5.18b —
+        /// <see cref="VesselProtoSys.VesselProto.CreateProtoVessel"/> via
+        /// <see cref="AgencyMembership.RecordOwnership"/>). Used by future 5.18c UI
+        /// tracking-station labels + 5.18d recovery-economy / transfer-agency
+        /// guards to resolve "who owns this vessel" without re-parsing wire bytes
+        /// or asking the server. The authoritative source is the server's
+        /// <c>Vessel.OwningAgencyId</c>
+        /// (<c>Server/System/Vessel/Classes/Vessel.cs</c>); this is the client-side
+        /// mirror, fed by the same wire field that <c>VesselDataUpdater</c>'s
+        /// first-sight stamp (5.16b) writes.
+        ///
+        /// <para><b>Two-state sentinel.</b> Consumers MUST distinguish these:
+        /// <list type="bullet">
+        ///   <item><b>Vessel-id absent from dict:</b> ownership unknown — the
+        ///         vessel proto hasn't arrived yet, the wire payload was
+        ///         malformed, or the vessel was loaded from a local save without
+        ///         ever going through a wire round (rare under LMP's
+        ///         server-authoritative model; VesselSync at connect-time covers
+        ///         the common case). The local player's own freshly-launched
+        ///         vessels are also absent until the first server VesselSync
+        ///         round-trip stamps and re-sends them. <b>Reconnect gap:</b>
+        ///         <see cref="OnDisabled"/> clears the registry on disconnect;
+        ///         on reconnect, <c>HandleVesselsSync</c> only ships vessels
+        ///         the client doesn't already have (<c>Server/Message/
+        ///         VesselMsgReader.cs:202-230</c>), so vessels that survived
+        ///         the disconnect in <see cref="FlightGlobals.Vessels"/> will
+        ///         sit at dict-miss until the next periodic owner-relay (which
+        ///         may be "never" for parked vessels of offline players). The
+        ///         clean fix is a force-full-sync on reconnect, deferred to
+        ///         Stage 5.18d when economy guards make this gap user-visible.
+        ///         UI should render as "loading" or "unknown"; 5.18d economy
+        ///         guards SHOULD adopt a "deny under gate=on for absent
+        ///         entries" policy as defense-in-depth (an absent entry
+        ///         post-connect is a hazard, not a benign blank) and SHOULD
+        ///         emit an operator-visible diagnostic message — a silent
+        ///         refusal is UX-hostile when the underlying cause (server
+        ///         doesn't know about this vessel, or VesselSync didn't
+        ///         repopulate it) is invisible to the player.</item>
+        ///   <item><b>Vessel-id present, value = <see cref="Guid.Empty"/>:</b>
+        ///         Unassigned (spec §10 Q3 pre-0.31 sentinel). Any agency may
+        ///         interact pending Stage 5.18d <c>transferagency</c> admin
+        ///         flow. UI should render as "Unassigned."</item>
+        ///   <item><b>Vessel-id present, value = real Guid:</b> claimed by that
+        ///         agency. Cross-reference with <see cref="OtherAgencies"/> for
+        ///         the display name; a missing key here means the owning agency
+        ///         came online AFTER this client connected — render as "Unknown
+        ///         Agency" until 5.18c's incremental visibility wire arrives.</item>
+        /// </list></para>
+        ///
+        /// <para><b>Relay-safety.</b> Writes go through
+        /// <see cref="AgencyMembership.RecordOwnership"/>, which preserves a known
+        /// real agency id when an incoming wire payload has no
+        /// <c>lmpOwningAgency</c> field (parses to <see cref="Guid.Empty"/>). This
+        /// is mandatory because the server's relay path forwards the original
+        /// sender bytes (which KSP's <c>BackupVessel</c>/<c>protoVessel.Save</c>
+        /// strips on every local-owner resend), so without the preservation rule
+        /// every periodic resend would clobber peer-side ownership state. The
+        /// authoritative write path (VesselSync replies serialised from
+        /// <c>GetVesselInConfigNodeFormat</c>) DOES carry the field, so initial
+        /// connect + scene-load sync populates correctly; the preservation rule
+        /// guards the subsequent steady state. See
+        /// <c>Server/Message/VesselMsgReader.cs:188-198</c> for the server-side
+        /// relay-vs-store contract this mirror honours.</para>
+        ///
+        /// <para><b>Thread.</b> Populated from the Unity-thread vessel-proto drain
+        /// (<see cref="VesselProtoSys.VesselProtoSystem"/>'s <c>CheckVesselsToLoad</c>
+        /// coroutine). Future 5.18c <c>AgencyVisibilityMsgData</c> updates may write
+        /// from the network thread (before the Unity-thread switch in the message
+        /// handler), so this is <see cref="ConcurrentDictionary{TKey, TValue}"/> from
+        /// the start — readers don't need any switch-discipline.</para>
+        ///
+        /// <para><b>Cross-dict thread discipline.</b> The 5.18c UI render path
+        /// will read this registry plus <see cref="OtherAgencies"/> (a non-thread-
+        /// safe <see cref="Dictionary{TKey, TValue}"/>). Both reads must happen on
+        /// the Unity thread today. When the future 5.18c <c>AgencyVisibilityMsgData</c>
+        /// adds incremental writes that may originate on the network thread,
+        /// <see cref="OtherAgencies"/> must be promoted to
+        /// <see cref="ConcurrentDictionary{TKey, TValue}"/> in lockstep with this
+        /// one; do not let the two dicts diverge on thread-safety.</para>
+        ///
+        /// <para><b>Eviction.</b> No mid-session eviction; entries persist until
+        /// disconnect (<see cref="OnDisabled"/>). Memory cost is two Guids per
+        /// vessel (~48 bytes); even a long session with thousands of vessels stays
+        /// negligible. Vessel-removal eviction was deliberately not wired in —
+        /// stale entries are harmless because consumers always cross-check against
+        /// KSP's <see cref="FlightGlobals.Vessels"/> (vessel-id reuse is precluded
+        /// by KSP's GUID minting), and the extra coupling into <c>VesselRemoveSys</c>
+        /// isn't justified.</para>
+        /// </summary>
+        public ConcurrentDictionary<Guid, Guid> VesselOwnership { get; } =
+            new ConcurrentDictionary<Guid, Guid>();
+
+        /// <summary>
+        /// Convenience accessor over <see cref="VesselOwnership"/>. Returns true if
+        /// the registry has any entry for <paramref name="vesselId"/>; false if the
+        /// vessel id is absent. The out-param is set to <see cref="Guid.Empty"/> on
+        /// miss for caller convenience. <b>A HIT with <paramref name="agencyId"/>
+        /// = <see cref="Guid.Empty"/> means "Unassigned" (pre-0.31 sentinel), not
+        /// "unknown"</b> — see <see cref="VesselOwnership"/> XML for the
+        /// two-state distinction.
+        /// </summary>
+        public bool TryGetOwningAgency(Guid vesselId, out Guid agencyId)
+        {
+            return VesselOwnership.TryGetValue(vesselId, out agencyId);
+        }
+
         protected override void OnDisabled()
         {
             base.OnDisabled();
@@ -120,10 +229,20 @@ namespace LmpClient.Systems.Agency
             // Clear local state on disconnect so reconnect doesn't see stale identity.
             // The MessageSystem base re-creates the IncomingMessages queue so any
             // pending agency messages from the old connection are dropped.
+            // VesselOwnership count is logged so operators have visibility on
+            // reconnect repopulation (see VesselOwnership XML reconnect-gap note —
+            // a smaller-than-expected post-reconnect registry indicates VesselSync
+            // didn't cover all previously-known vessels, which 5.18d economy
+            // guards will surface as deny-on-absent).
+            var clearedOwnerships = VesselOwnership.Count;
             LocalAgencyId = Guid.Empty;
             LocalAgencyDisplayName = string.Empty;
             LocalAgencyOwningPlayerName = string.Empty;
             OtherAgencies.Clear();
+            VesselOwnership.Clear();
+
+            if (clearedOwnerships > 0)
+                LunaLog.Log($"[Agency]: Cleared {clearedOwnerships} vessel-ownership entries on disconnect.");
         }
     }
 }
