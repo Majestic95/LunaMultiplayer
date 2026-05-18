@@ -51,6 +51,34 @@ namespace Server.System.Agency
         public List<AgencyContractEntry> Contracts { get; } = new List<AgencyContractEntry>();
 
         /// <summary>
+        /// Per-agency tech tree — unlocked <c>RDTech</c> nodes owned by this agency.
+        /// Keyed by <see cref="AgencyTechNodeEntry.TechId"/> (KSP's <c>RDTech.techID</c>)
+        /// for O(1) per-agency BUG-025 dedup. Populated by
+        /// <see cref="AgencyTechRouter"/>; persisted as a <c>TECHTREE</c> child node
+        /// containing one <c>TECH</c> sub-node per entry (Id + Base64(Data)).
+        ///
+        /// **Concurrency contract.** Same shape as <see cref="Contracts"/> —
+        /// mutations MUST hold <see cref="AgencySystem.GetAgencyLock"/>. The router
+        /// does the read-check-then-write under one lock acquisition so a same-
+        /// agency double-purchase race resolves deterministically (the second purchase
+        /// sees the first's add and rejects). **Reads also need the lock** when
+        /// iterating <see cref="Dictionary{TKey,TValue}.Values"/> — Dictionary's
+        /// non-concurrent enumerator throws InvalidOperationException OR silently
+        /// returns corrupt state on a mid-iteration mutation (worse failure mode
+        /// than <see cref="Contracts"/>'s List which only ever throws). The
+        /// <see cref="AgencyScenarioProjector"/> Tech splice acquires the lock
+        /// implicitly via its read-snapshot pattern; future readers MUST do the same.
+        ///
+        /// **Why a Dictionary not a List.** Per-agency BUG-025 needs O(1) lookup by
+        /// TechId on every Share* TechnologyReceived; a tech tree at endgame has
+        /// 100+ entries and the lookup would be the inner loop of every tech
+        /// purchase. Contracts uses List because contracts are scanned in batch and
+        /// the per-entry dedup is rare (incoming batches replace, not append).
+        /// </summary>
+        public Dictionary<string, AgencyTechNodeEntry> TechNodes { get; } =
+            new Dictionary<string, AgencyTechNodeEntry>(StringComparer.Ordinal);
+
+        /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
         /// Created at server boot via <see cref="Server.Context.Universe.CheckUniverse"/>
         /// alongside the other Universe child folders, so <see cref="FileHandler.WriteAtomic"/>
@@ -111,6 +139,29 @@ namespace Server.System.Agency
                     var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
                     contractNode.CreateValue(new CfgNodeValue<string, string>("Data", base64));
                     contractsRoot.AddNode(contractNode);
+                }
+            }
+
+            // [Stage 5.17e-4] Tech tree persists as a TECHTREE child node containing one
+            // TECH sub-node per unlocked entry. Same shape as CONTRACTS — emitted only
+            // when non-empty (pristine agency files stay visually identical), bytes are
+            // Base64-encoded decompressed ConfigNode form so operators can diff readable
+            // payloads. Null/empty entries are silently dropped.
+            if (TechNodes.Count > 0)
+            {
+                var techRoot = new ConfigNode("") { Name = "TECHTREE" };
+                node.AddNode(techRoot);
+                foreach (var entry in TechNodes.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.TechId))
+                        continue;
+                    var techNode = new ConfigNode("") { Name = "TECH" };
+                    techNode.CreateValue(new CfgNodeValue<string, string>("Id", entry.TechId));
+                    var dataBytes = entry.Data ?? Array.Empty<byte>();
+                    var len = Math.Min(entry.NumBytes, dataBytes.Length);
+                    var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
+                    techNode.CreateValue(new CfgNodeValue<string, string>("Data", base64));
+                    techRoot.AddNode(techNode);
                 }
             }
 
@@ -205,6 +256,47 @@ namespace Server.System.Agency
                     }
 
                     state.Contracts.Add(entry);
+                }
+            }
+
+            // [Stage 5.17e-4] Forward-compat: TECHTREE child node is Stage 5.17e-4
+            // addition. Older AgencyState files predate it and load with an empty
+            // TechNodes dict. Per-entry parse failures (missing Id / malformed
+            // Base64) are silently skipped — same per-entry isolation rule as
+            // contracts. Duplicate TechId entries (operator hand-edited the file)
+            // keep the LAST occurrence (Dictionary assignment overwrites).
+            var techRoot = node.GetNode("TECHTREE")?.Value;
+            if (techRoot != null)
+            {
+                foreach (var techEntry in techRoot.GetNodes("TECH"))
+                {
+                    var entryNode = techEntry.Value;
+                    var techId = entryNode.GetValue("Id")?.Value;
+                    if (string.IsNullOrEmpty(techId))
+                        continue;
+
+                    var entry = new AgencyTechNodeEntry { TechId = techId };
+
+                    var base64 = entryNode.GetValue("Data")?.Value;
+                    if (!string.IsNullOrEmpty(base64))
+                    {
+                        try
+                        {
+                            entry.Data = Convert.FromBase64String(base64);
+                            entry.NumBytes = entry.Data.Length;
+                        }
+                        catch (FormatException)
+                        {
+                            // Malformed payload: keep entry with empty data so the
+                            // tech is still recognised as unlocked (BUG-025 dedup
+                            // still fires) but the payload is opaque. Operator can
+                            // diff the file and spot the broken entry.
+                            entry.Data = Array.Empty<byte>();
+                            entry.NumBytes = 0;
+                        }
+                    }
+
+                    state.TechNodes[techId] = entry;
                 }
             }
 

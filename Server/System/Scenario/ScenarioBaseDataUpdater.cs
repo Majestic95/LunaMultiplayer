@@ -36,8 +36,12 @@ namespace Server.System.Scenario
         /// Creates a ConfigNode from raw bytes, stripping the outer { } braces that KSP's
         /// ConfigNode.WriteNode() adds. LunaConfigNode's parser wraps braced content in an
         /// unnamed child node, which causes GetValue() on the root to return null.
+        ///
+        /// [Stage 5.17e-4] Promoted private→internal so <see cref="Agency.AgencyTechRouter"/>
+        /// can reuse the same brace-stripping + name-tagging without duplicating the
+        /// parse logic (which would silently drift if KSP's ConfigNode serializer changes).
         /// </summary>
-        private static ConfigNode ParseClientConfigNode(byte[] data, int numBytes, string nodeName)
+        internal static ConfigNode ParseClientConfigNode(byte[] data, int numBytes, string nodeName)
         {
             var raw = Encoding.UTF8.GetString(data, 0, numBytes);
             var trimmed = raw.Trim();

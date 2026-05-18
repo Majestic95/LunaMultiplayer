@@ -253,6 +253,59 @@ namespace Server.System.Agency
             // rewards via the existing Share*Funds path. Operator-readable warning so
             // they can archive + restart before the first connect.
             WarnAboutSharedContractsOnUpgrade();
+
+            // [Stage 5.17e-4 upgrade-lens review] Same shape as the contracts warning
+            // above. The 5.17e-4 projector extension strips ALL shared Tech nodes from
+            // the outgoing R&D scenario before splicing in per-agency entries — so a
+            // fresh-mint agency on an upgrade-in-place universe with accumulated
+            // shared-agency tech unlocks would see an EMPTY tech tree at first
+            // handshake. The 50+ hours the operator spent unlocking the shared tree
+            // are not migrated. Same fresh-start-only spec §10 sign-off applies;
+            // operator workflow is archive + restart with PerAgencyCareer enabled.
+            WarnAboutSharedTechOnUpgrade();
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-4 upgrade-lens diagnostic] Mirror of
+        /// <see cref="WarnAboutSharedContractsOnUpgrade"/> for the
+        /// <c>ResearchAndDevelopment</c> scenario's accumulated <c>Tech</c> child nodes.
+        /// Fires when (a) gate is on, (b) zero agencies loaded (fresh-mint upcoming),
+        /// (c) the universe is non-pristine (vessels exist — signals in-place upgrade),
+        /// (d) the shared R&amp;D scenario has at least one Tech node. Under those
+        /// conditions, the 5.17e-4 projector extension will STRIP those Tech entries
+        /// from the outgoing scenario blob and replace them with the (empty) per-agency
+        /// tree — the operator's accumulated tech progress is invisible on first
+        /// connect. Spec §10 fresh-start-only sign-off applies; operator workflow is
+        /// archive + restart.
+        /// </summary>
+        private static void WarnAboutSharedTechOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint upcoming check; only fire when no agencies are loaded.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("ResearchAndDevelopment", out var scenario))
+                return;
+
+            int techCount;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("ResearchAndDevelopment"))
+            {
+                techCount = scenario.GetNodes("Tech").Count();
+            }
+
+            if (techCount == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:per-agency-career] PerAgencyCareer=true on an upgrade universe carries " +
+                $"{techCount} shared-agency Tech unlock(s) in the R&D scenario. The Stage 5.17e-4 " +
+                "projector strips these on send so per-agency clients start with empty tech trees " +
+                "— the accumulated shared-tree progress is NOT migrated. Spec §10 migration is " +
+                "fresh-start-only: stop the server, archive Universe/ before any player connects, " +
+                "and start fresh. Operators wishing to preserve specific unlocks can stop the " +
+                "server and hand-edit individual TECH entries into Universe/Agencies/{guid}.txt " +
+                "files once agencies are minted, but bulk migration is not supported.");
         }
 
         /// <summary>

@@ -1,7 +1,12 @@
+using LunaConfigNode.CfgNode;
 using Server.Client;
+using Server.Log;
+using Server.System.Scenario;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Server.System.Agency
@@ -126,12 +131,126 @@ namespace Server.System.Agency
                 case "Funding":
                     return ReplaceRootValue(serializedText, FundsRegex, "funds", targetAgency.Funds);
                 case "ResearchAndDevelopment":
-                    return ReplaceRootValue(serializedText, SciRegex, "sci", targetAgency.Science);
+                    // [Stage 5.17e-4] Two-pass projection. First replace the `sci` root
+                    // scalar via the existing 5.17c regex; then splice per-agency Tech
+                    // child nodes via ConfigNode mutation. Both passes are necessary —
+                    // without the scalar pass the player's science total reverts to the
+                    // shared value; without the Tech splice their unlocked nodes
+                    // disappear on the next scene-load (Stage 5.17e-4 review caught the
+                    // bug pre-ship). Each agency sees ONLY their own unlocked techs;
+                    // the shared scenario's pre-existing Tech entries are stripped
+                    // out so an upgrade-in-place universe doesn't bleed its accumulated
+                    // shared tree into every fresh per-agency client.
+                    var sciReplaced = ReplaceRootValue(serializedText, SciRegex, "sci", targetAgency.Science);
+                    return SpliceAgencyTechIntoResearchAndDevelopment(sciReplaced, targetAgency);
                 case "Reputation":
                     return ReplaceRootValue(serializedText, RepRegex, "rep", targetAgency.Reputation);
                 default:
                     return serializedText;
             }
+        }
+
+        /// <summary>
+        /// [Stage 5.17e-4] Strips all <c>Tech</c> child nodes from the
+        /// <c>ResearchAndDevelopment</c> scenario text and re-adds one
+        /// <c>Tech { ... }</c> child per <see cref="AgencyState.TechNodes"/> entry.
+        /// Round-trips the scenario through <see cref="ConfigNode"/> so the splice
+        /// preserves all OTHER child nodes (e.g. <c>ResearchAndDevelopmentParts</c>
+        /// when 5.17e-5 adds part-purchase projection) and root scalars (sci was
+        /// already replaced by the regex pass before this is called).
+        ///
+        /// **Per-entry exception isolation.** A malformed stored payload (operator
+        /// hand-edit; future schema drift) is logged and skipped — same shape as
+        /// <see cref="AgencyContractRouter"/>'s per-contract isolation. The agency
+        /// is missing that one tech node from the projection but the rest of the
+        /// scene-load proceeds normally; the player sees an incomplete tree rather
+        /// than a hung connect.
+        ///
+        /// **Why ConfigNode round-trip rather than regex.** Tech entries are
+        /// nested <c>Tech { ... }</c> blocks with arbitrary inner content (part
+        /// lists, prereq lists, mod-extension fields). Brace-aware mutation needs
+        /// a real parser. The round-trip cost is paid per <c>SendScenarioModules</c>
+        /// per client per scene-load — meaningfully more expensive than the regex
+        /// scalar replacement but still cheap (handshake + scene-load are not high-
+        /// frequency events). If telemetry shows the round-trip becomes a hotspot,
+        /// the natural optimization is a per-agency cached projection invalidated
+        /// on <see cref="AgencyState.TechNodes"/> mutation.
+        /// </summary>
+        private static string SpliceAgencyTechIntoResearchAndDevelopment(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+
+            ConfigNode node;
+            try
+            {
+                node = new ConfigNode(scenarioText) { Name = "ResearchAndDevelopment" };
+            }
+            catch (Exception e)
+            {
+                // Parse failure: fall back to the (sci-replaced) text unchanged.
+                // The player gets the shared tree on scene-load — a regression vs
+                // the desired projection but better than failing the whole handshake.
+                // [Round-2 review] LOG the fall-through so the operator has a
+                // diagnostic — silent regression is exactly the leak this projector
+                // exists to prevent. Once-per-send under bug conditions; not flood-
+                // worthy.
+                LunaLog.Error(
+                    $"[fix:per-agency-career] ResearchAndDevelopment projection parse failed for agency {targetAgency.AgencyId:N}; " +
+                    $"falling back to shared scenario text (player will see shared tech tree on next scene-load): " +
+                    $"{e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Remove ALL existing Tech child nodes. Even if the agency has zero
+            // unlocked techs (fresh agency on an upgrade-in-place universe), we
+            // strip the shared tree so the player doesn't inherit it as their own.
+            // .ToArray() snapshots the enumeration so RemoveNode during iteration
+            // doesn't invalidate.
+            foreach (var existing in node.GetNodes("Tech").ToArray())
+                node.RemoveNode(existing.Value);
+
+            // Snapshot TechNodes under the per-agency lock so a concurrent router
+            // invocation (mutates the Dictionary on the same Lidgren receive thread
+            // today; cross-thread tomorrow when admin commands land in 5.18d) can't
+            // tear our iteration. The lock window is brief (memcpy of the values
+            // list) — no I/O, no parse — so it can't deadlock with the router's
+            // longer write-then-save window. AgencyState.cs TechNodes XML pins the
+            // read-also-needs-lock contract.
+            AgencyTechNodeEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+            {
+                snapshot = targetAgency.TechNodes.Values.ToArray();
+            }
+
+            // Add per-agency Tech child nodes. The stored Data field contains the
+            // decompressed wire payload (the same brace-stripped ConfigNode-format
+            // text the client sent originally); we re-parse + brace-strip via the
+            // same ParseClientConfigNode helper the BUG-025 path uses, so any
+            // future change to KSP's wire format gets the same treatment in both
+            // routing and projection.
+            foreach (var entry in snapshot)
+            {
+                if (entry == null || entry.Data == null || entry.NumBytes <= 0)
+                    continue;
+                try
+                {
+                    var techNode = ScenarioDataUpdater.ParseClientConfigNode(entry.Data, entry.NumBytes, "Tech");
+                    if (techNode.IsEmpty())
+                        continue;
+                    node.AddNode(techNode);
+                }
+                catch (Exception)
+                {
+                    // Per-entry isolation — drop this tech, keep the rest of the
+                    // scenario. An operator-friendly diagnostic would help, but the
+                    // projector runs per-send-per-client and a malformed entry
+                    // would otherwise spam the log; the entry-level corruption is
+                    // already visible via AgencyState.Parse's matching warning.
+                }
+            }
+
+            return node.ToString();
         }
 
         /// <summary>

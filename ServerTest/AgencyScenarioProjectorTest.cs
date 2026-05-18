@@ -177,6 +177,89 @@ namespace ServerTest
         }
 
         [TestMethod]
+        public void Project_ResearchAndDevelopment_SplicesPerAgencyTech()
+        {
+            // [Stage 5.17e-4] The projector strips shared Tech entries and splices
+            // per-agency Tech nodes from AgencyState.TechNodes. Closes the leak
+            // where Alice unlocks a tech via the router, persists to per-agency
+            // state, but the NEXT scene-load shipped the stale shared tree and
+            // overwrote her local R&D — review caught this pre-ship.
+            var agency = new AgencyState { AgencyId = Guid.NewGuid(), Science = 250 };
+            var techText = "id = basicRocketry\ncost = 5\nstate = Available";
+            agency.TechNodes["basicRocketry"] = new AgencyTechNodeEntry
+            {
+                TechId = "basicRocketry",
+                Data = System.Text.Encoding.UTF8.GetBytes(techText),
+                NumBytes = techText.Length,
+            };
+
+            var input = "name = ResearchAndDevelopment\nsci = 0\n";
+            var result = AgencyScenarioProjector.Project("ResearchAndDevelopment", input, agency);
+
+            StringAssert.Contains(result, "sci = 250", "sci scalar must still be replaced by the existing pass.");
+            StringAssert.Contains(result, "Tech", "Per-agency Tech node was not spliced into the R&D scenario.");
+            StringAssert.Contains(result, "basicRocketry", "Tech body did not survive the round-trip.");
+
+            // [Round-2 review SHOULD FIX] Parse-back assertion. A regression that
+            // produces malformed text (stray unescaped braces, lost newlines) would
+            // let the StringAssert.Contains checks pass while the client side would
+            // fail to deserialize the scenario. Verify the projected text is
+            // structurally valid by parsing it back via LunaConfigNode + checking
+            // the Tech node is reachable as a real child node, not just substring.
+            var roundTripped = new LunaConfigNode.CfgNode.ConfigNode(result) { Name = "ResearchAndDevelopment" };
+            var techNodes = roundTripped.GetNodes("Tech");
+            Assert.IsNotNull(techNodes, "Projected scenario does not parse back into ConfigNode-with-Tech-children.");
+            // Verify the spliced tech entry's `id` field is reachable through the
+            // structured ConfigNode API (not just present as a substring).
+            using (var iter = techNodes.GetEnumerator())
+            {
+                Assert.IsTrue(iter.MoveNext(), "Projected scenario has no Tech children after parse-back.");
+                var idValue = iter.Current.Value.GetValue("id")?.Value;
+                Assert.AreEqual("basicRocketry", idValue,
+                    "Spliced Tech's `id` field is not reachable as a real ConfigNode value — splice produced malformed text.");
+            }
+        }
+
+        [TestMethod]
+        public void Project_ResearchAndDevelopment_StripsSharedTechEvenWhenAgencyEmpty()
+        {
+            // Critical upgrade-lens behavior: an upgrade-in-place universe with
+            // accumulated shared Tech nodes must NOT bleed into a fresh per-agency
+            // client's R&D scenario. A fresh agency with zero TechNodes still gets
+            // the shared Tech entries stripped — they start with an empty tree.
+            var emptyAgency = new AgencyState { AgencyId = Guid.NewGuid(), Science = 0 };
+            var inputWithSharedTech =
+                "name = ResearchAndDevelopment\nsci = 1000\n" +
+                "Tech\n{\n\tid = sharedTechFromUpgrade\n\tcost = 5\n}\n";
+
+            var result = AgencyScenarioProjector.Project("ResearchAndDevelopment", inputWithSharedTech, emptyAgency);
+
+            Assert.IsFalse(result.Contains("sharedTechFromUpgrade"),
+                "Shared Tech from an upgrade universe leaked into a fresh agency's projected R&D — " +
+                "WarnAboutSharedTechOnUpgrade is the operator notice; the projector strip is the actual defence.");
+        }
+
+        [TestMethod]
+        public void Project_ResearchAndDevelopment_PreservesUnrelatedChildren()
+        {
+            // Defensive: the projector's ConfigNode round-trip must not eat other
+            // child nodes the scenario carries (e.g. mod-extension blocks). Plant
+            // an unrelated child and verify it survives.
+            var agency = new AgencyState { AgencyId = Guid.NewGuid(), Science = 100 };
+            var inputWithUnrelated =
+                "name = ResearchAndDevelopment\nsci = 0\n" +
+                "Tech\n{\n\tid = oldTech\n}\n" +
+                "ModExtension\n{\n\tcustomKey = customValue\n}\n";
+
+            var result = AgencyScenarioProjector.Project("ResearchAndDevelopment", inputWithUnrelated, agency);
+
+            Assert.IsFalse(result.Contains("oldTech"),
+                "Shared Tech entry was not stripped.");
+            StringAssert.Contains(result, "customKey",
+                "Unrelated mod-extension child node was lost during the projection round-trip.");
+        }
+
+        [TestMethod]
         public void ProjectForClient_Sandbox_ReturnsInputUnchanged()
         {
             // Sandbox has no career scalars — projection skips even with the gate on.
