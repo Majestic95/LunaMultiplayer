@@ -1,6 +1,6 @@
 # MKS × Luna Multiplayer — full implementation handoff
 
-**Document version:** 3.2 (external-codebase audit corrections applied, 2026-05-18)  
+**Document version:** 3.3 (per-agency framing made explicit for R2/Phase 3, 2026-05-18)  
 **Companion:** visual summary in Cursor — `canvases/mks-lmp-compatibility.canvas.tsx` (same machine; open beside this file).
 
 **Scope:** MKS, USITools, Community Resource Pack (CRP) vs Luna Multiplayer on `feature/per-agency`. **Out of scope:** USI-LS and other USI suite mods until this track is green.
@@ -16,6 +16,8 @@ Vanilla LMP + MKS + USITools + CRP **installs and runs**; it is **not playable**
 **Effort (revised after audit):** **Playable co-op** ≈ Phases 0–3 — **10–12 weeks** one strong LMP contributor. **Fully compatible** ≈ Phases 0–5 — **4–5 months**.
 
 **Second-pass audit (12 items, single line each):** (1) R0 fix must filter **depot** vessels, not gate on consumer. (2) Orbital `ModuleLogisticsConsumer` calls are a **documented non-issue** (`!LandedOrSplashed`). (3) Phase 0 must use **MandatoryPlugins** + no optional plugin bypass or SHA never applies. (4) Treat **unclaimed Update lock** as skip in MP, not solo. (5) ShareKolony send path must respect **ScenarioSystem** main-thread save vs **TaskFactory** send. (6) Allocate **Lidgren channels** by grepping `DefaultChannel =>` literals across `LmpCommon/Message/Server/*SrvMsg.cs` / `Client/*CliMsg.cs` — **no central `MessageChannelType.cs` exists** (audit correction, v3.1). High-water at base SHA `8f609963`: server **22**, client **21**; `AgencyVisibilityMsgData` already shipped at this base (`AgencySrvMsg.cs:50`) so the original `eb4ef6e2` coordination flag is moot — only watch for further in-flight 5.18d slots. (7) **KolonizationManager** lifecycle unverified—read file before Phase 3. (8) **WOLF GetNewFlightNumber** implementation unverified—read `ScenarioPersister.cs` before Phase 4 / upstream PR. (9) Phase 1.5 acceptance must include **Update lock handoff** and `lastUT`/`lastCheck` interaction. (10) CRP **localization** is optional Phase 0 check. (11) Phase 3 effort **~2×** original (closer to contract/R&D routing complexity than trivial Share*). (12) **Rebase discipline** against moving `feature/per-agency` (audit tip `67b0e01c` vs later head e.g. `b50860e6`); branch from **current** `feature/per-agency` after pull.
+
+**v3.3 per-agency framing pass (this revision):** under `PerAgencyCareer=true` (1 player = 1 agency, the Stage 5 design — see CLAUDE.md), each MKS scenario routes **per-agency**, not "one global writer." `KolonizationScenario` / `PlanetaryLogisticsScenario` / `ScenarioOrbitalLogistics` partition per-agency exactly like `AgencyContractRouter` (Stage 5.17d). The "one global writer" wording in the pre-v3.3 R2 mitigation would have produced a system where only one player's MKS progress counted — silent design bug. R0 / R3 / R4 are already per-agency-correct by construction (vessel `OwningAgencyId` stamping + Stage 5.17a lock guard + Stage 5.17a write-path counterpart). Phase 4 WOLF already explicit. The single material change in v3.3 is in §6 R2 and §7 Phase 3.
 
 ---
 
@@ -118,6 +120,8 @@ External clones live at `F:\tmp\mks-external\{MKS,USITools,CommunityResourcePack
 
 **Orbital `ModuleLogisticsConsumer`:** `!LandedOrSplashed` early exit — out of scope for R0; document in tests. **Distinct from orbital LOGISTICS (R2 — `ScenarioOrbitalLogistics.Update` → `transfer.Deliver`)** which IS a resource-mutation surface — do not conflate.
 
+**Per-agency framing (v3.3):** under 1-player-per-agency (`PerAgencyCareer=true`), the player-lock filter is operationally equivalent to "vessel `OwningAgencyId` matches my agency" — Stage 5.17a rejects cross-agency lock acquires, so non-agency-members structurally cannot hold Update on this vessel. R0 fix as designed is automatically per-agency correct; no additional gate or framing change needed. Defense-in-depth additions optional. Cross-agency manual-transfer UI vector is closed by Stage 5.17a write-path counterpart (vessel-state relay rejection). Cross-agency docking is closed by 5.17a's `HandleVesselCouple` check.
+
 ### R1 — Subspace × time-based kolony (P0)
 
 **Failure:** `Planetarium.GetUniversalTime()` / `lastCheck` diverge across `WarpSystem` subspaces; same kolony accrues twice; scenario sync merges badly.
@@ -130,15 +134,25 @@ External clones live at `F:\tmp\mks-external\{MKS,USITools,CommunityResourcePack
 
 **Failure (resource-mutation side, audit v3.2):** `ScenarioOrbitalLogistics.Update():150-165` runs on every client every frame. Pending `OrbitalLogisticsTransferRequest` instances fire `Deliver()` (`:286`) when `transfer.GetArrivalTime() <= Planetarium.GetUniversalTime()` (`:189`). Under LMP subspaces every peer has its own UT, so every peer's `Update` runs `Deliver` independently → `vessel.ExchangeResources` writes `PartResource.amount` (loaded vessels: `OrbitalLogisticsExtensions.cs:288/292/302/306`) or `ProtoPartResourceSnapshot.amount` (unloaded: `:237/241/252/256`). Result: each client double-spends and double-receives; vessel resource state diverges across peers; ScenarioSystem's 30s SHA pass then compounds the drift.
 
-**Mitigation:** Phase 3 **ShareKolony** for the scenario-sync side: add affected modules to `IgnoredScenarios`; **idempotent mutation messages**; server fan-out + persistence + per-scenario ingestion adapters (modelled on `ScenarioSystem.cs:228-303` per-module hooks, not "reconciliation" — audit v3.1). Effort comparable to contract/R&D routing + `AgencyResearchRouter`, not trivial Share*.
+**Mitigation (per-agency framing, v3.3):** under `PerAgencyCareer=true` Phase 3 **ShareKolony** partitions each MKS scenario **per-agency**, mirroring `AgencyContractRouter` (Stage 5.17d):
 
-**Plus Phase 2 / Phase 3 orbital-logistics authority gate:** even on a common subspace, every peer's `Update` still fires `Deliver`. Must gate `Deliver()` itself — only the Update-lock holder of the destination vessel (or a server-elected coordinator) executes; others observe. Treat as R0-class fix on the `ProcessTransfers` / `Deliver` boundary. **The protoVessel write path (unloaded branch) is unique to this surface** — R0's `GetResourceStockpiles` filter does NOT cover unloaded vessels; the orbital fix must handle both.
+- `KolonizationScenario` → new `AgencyKolonyRouter`: research level (botany / geology / kolonization bonuses) accrues from each agency's vessels (filtered by `vessel.OwningAgencyId == requesterAgencyId`), persisted under `Universe/Agencies/{AgencyId}.txt` alongside funds/sci/rep, projected to each client by a new `AgencyScenarioProjector` splice for KolonizationScenario root scalars.
+- `PlanetaryLogisticsScenario` → new `AgencyPlanetaryRouter`: per-agency planetary queue. Agency A's transfers do not appear in Agency B's screens.
+- `ScenarioOrbitalLogistics` → new `AgencyOrbitalRouter`: per-agency transfer queue + per-agency `transfer.Deliver` authority (only the owning agency's player executes the resource write).
+
+Add affected modules to `IgnoredScenarios` so the 30s SHA pass doesn't fight the routers. Idempotent mutation messages + server fan-out + reconnect catch-up + per-scenario ingestion adapter on the client (modelled on `ScenarioSystem.cs:228-303` per-module hooks — audit v3.1 framing). The 4 band-1 routers (`AgencyCurrencyRouter`/`Tech`/`Research`/`Progress`) + `AgencyContractRouter` are 5 working templates — Phase 3 imitates their shape, not invents new infrastructure.
+
+**Fallback for `PerAgencyCareer=false`:** single-writer-per-scenario model (Update-lock holder = effective owner). Same router infrastructure, different partition key — the gate=off path collapses "agency" → "single global writer." Dual-mode silence preserved.
+
+**Plus orbital-logistics authority gate (both modes):** even on a common subspace, every peer's `Update` still fires `Deliver`. Must gate `Deliver()` itself — under gate=on, only the destination vessel's owning agency's player executes; under gate=off, the Update-lock holder (or a server-elected coordinator). Treat as R0-class fix on the `ProcessTransfers` / `Deliver` boundary. **The protoVessel write path (unloaded branch) is unique to this surface** — R0's `GetResourceStockpiles` filter does NOT cover unloaded vessels; the orbital fix must handle both.
 
 ### R3 — Unloaded converter catch-up (P1)
 
 **Failure:** First loader runs `BaseConverter` catch-up; others see stale `vessel.lastUT` / resources. Tied to R1 and **lock handoff** (audit).
 
 **Mitigation:** Phase 5 — proto update path / `UpdateProtoInPlace` / post-catch-up publish (see CLAUDE.md Strategy B). Design together with Phase 1.5 acceptance (lock transfer + `lastCheck`).
+
+**Per-agency framing (v3.3):** catch-up math runs per vessel, vessels carry `OwningAgencyId`, so the authoritative-writer election naturally falls out per-agency. Under gate=on, the writer is the destination vessel's owning-agency player; under gate=off, it's the Update-lock holder. No design change needed — R3 inherits per-agency correctness via the existing vessel-ownership stamp.
 
 ### R4 — WOLF global registry (P1, refined v3.2)
 
@@ -200,24 +214,33 @@ External clones live at `F:\tmp\mks-external\{MKS,USITools,CommunityResourcePack
 
 ---
 
-### Phase 3 — ShareKolony (~6–8 weeks, revised)
+### Phase 3 — ShareKolony (~6–8 weeks, revised v3.3)
 
 **Do:**
 
-1. `IgnoredScenarios` for kolony / logistics / WOLF scenarios targeted by this phase (exact list = product decision: kolony + planetary + orbital minimum; WOLF may move to Phase 4 only—avoid double work).
-2. Message types + client handler + **server** persistence + reconnect catch-up.
-3. **Threading:** mutation hooks (Harmony postfixes on e.g. `TrackLogEntry`) run on **main thread**; **do not** call raw send from postfixed code if `ScenarioSystem` uses **async send** — use a **queue drained on a safe thread** with locking pattern analogous to **`VesselProtoMessageSender` / `VesselArraySyncLock`**.
-4. **Channels:** **no central `MessageChannelType.cs` exists** (audit correction, v3.1) — grep `DefaultChannel =>` across `LmpCommon/Message/Server/*SrvMsg.cs` and `Client/*CliMsg.cs` (~22 files each direction) to enumerate allocations. At base SHA `8f609963` high-water marks are server **22** / client **21**; pick unused IDs above those and re-check against any in-flight 5.18d slots before allocation.
+1. **Per-agency routing infrastructure (gate=on path):** author three new routers under `Server/System/Agency/`, modelled on `AgencyContractRouter` (Stage 5.17d):
+   - `AgencyKolonyRouter` — routes `KolonizationScenario` log-entry mutations (Harmony postfix on `KolonizationManager.TrackLogEntry`, `MKS Source/KolonyTools/Kolonization/KolonizationManager.cs:90`) into `AgencyState.KolonyEntries` (new field on `AgencyState`). Filters by `vessel.OwningAgencyId == requesterAgencyId` on read.
+   - `AgencyPlanetaryRouter` — routes `PlanetaryLogisticsScenario` mutations per-agency.
+   - `AgencyOrbitalRouter` — routes `ScenarioOrbitalLogistics` transfer-queue mutations per-agency AND gates `transfer.Deliver()` authority (only the destination vessel's owning-agency player executes; see R2).
+   Add a new server-side projector splice mirroring `AgencyScenarioProjector` (5.17c) for kolony / planetary / orbital scenario root scalars so each client only sees their own agency's state.
+2. **Wire surface:** new `AgencyKolonyMsgData` / `AgencyPlanetaryMsgData` / `AgencyOrbitalMsgData` (owner-only echo, channel 22 on `AgencySrvMsg`). Follow the [[reference-agency-wire-extension]] 6-step recipe.
+3. **Gate=off fallback:** single-writer per scenario (Update-lock holder = effective owner). Same router infrastructure, different partition key. Dual-mode silence: gate-check returning false makes the legacy 30s SHA path run unchanged.
+4. **IgnoredScenarios:** add kolony / planetary / orbital scenario module names so the 30s SHA pass doesn't fight the routers.
+5. **Threading:** mutation hooks (Harmony postfixes on e.g. `TrackLogEntry`) run on **main thread**; **do not** call raw send from postfixed code if `ScenarioSystem` uses **async send** — use a **queue drained on a safe thread** with locking pattern analogous to **`VesselProtoMessageSender` / `VesselArraySyncLock`**.
+6. **Channels:** **no central `MessageChannelType.cs` exists** (audit correction, v3.1) — grep `DefaultChannel =>` across `LmpCommon/Message/Server/*SrvMsg.cs` and `Client/*CliMsg.cs` (~22 files each direction) to enumerate allocations. At base SHA `8f609963` high-water marks are server **22** / client **21**; pick unused IDs above those and re-check against any in-flight 5.18d slots before allocation.
+7. **Pre-0.31 upgrade diagnostics:** mirror `WarnAboutSavingsLossOnUpgrade` (5.17c) + `WarnAboutSharedContractsOnUpgrade` (5.17d) — boot-time warning if an existing universe carries shared kolony / planetary / orbital scenario state that would silently vanish on first agency mint.
 
-**Accept:** Concurrent orbital/planetary ops without 30 s clobber; reconnect loads consistent state; stress test 30+ minutes two-client.
+**Accept:** Two-agency two-client soak: Agency A's kolony research, planetary queue, orbital transfers are invisible to Agency B (and vice versa); concurrent orbital/planetary ops on each agency's own vessels do not 30s-clobber; reconnect loads consistent per-agency state; orbital `transfer.Deliver` fires exactly once per transfer across the cohort; gate=off regression run shows shared-scenario behaviour unchanged from pre-Phase-3 baseline.
 
 ---
 
 ### Phase 4 — WOLF per-agency (~2–3 weeks)
 
-**Do:** Persist and route WOLF blobs per agency (mirror `AgencyContractRouter` / projector patterns). Read `ScenarioPersister.cs` before designing ID strategy.
+**Do:** Persist and route WOLF blobs per agency (mirror `AgencyContractRouter` / projector patterns). `ScenarioPersister.cs` already audited (v3.2) — 5 entity lists (CrewRoutes / Depots / Hoppers / Routes / Terminals); 4 of 5 IDs strong, `CrewRoute.FlightNumber` weak-but-display-only. Per-agency partition can use existing strong IDs directly; no wider ID scheme needed.
 
-**Accept:** Two agencies, same body — isolated WOLF graphs; gate off returns to Phase 3 shared behavior per Stage 5 dual-mode rules.
+**Open question for Phase 4 design (v3.3):** WOLF `CrewRoute` entities transport kerbals between depots. Kerbals are a partially-per-agency concept on this fork (the K1 grief guard, Stage 5.17e-7/8/9, in `LmpClient/Systems/Kerbal/`). When Agency A's CrewRoute moves a kerbal originally owned by Agency B (or unassigned), what's the authority rule? Default suggestion: WOLF crew routes operate only on kerbals the requesting agency owns; route attempts on cross-agency kerbals reject like a cross-agency lock acquire. Read `Server/System/Kerbal/*` + the K1 guard before designing the route-create authority gate.
+
+**Accept:** Two agencies, same body — isolated WOLF graphs; cross-agency CrewRoute creation rejected (or whatever rule the Phase 4 design lands on); gate off returns to Phase 3 shared behavior per Stage 5 dual-mode rules.
 
 ---
 
@@ -231,7 +254,7 @@ External clones live at `F:\tmp\mks-external\{MKS,USITools,CommunityResourcePack
 
 ## 8. Reuse from this fork (one paragraph)
 
-Stage 5 **agency projection and routing** is the template for kolony scenario ownership — 7 templates total (see §10 item 7), including the 4 band-1 routers (`AgencyCurrencyRouter`/`Tech`/`Research`/`Progress`). **BUG-010 / vessel pin** contributes the *vessel-scoped registry + lock-acquire-clears-it* structural pattern (`VesselPinnedSystem.cs` `ConcurrentDictionary<Guid,string>` + `LockEvent.onLockAcquire` hook); the immortal-flip semantics do NOT transfer ("freeze, no writers" ≠ kolony's "one writer, others read") — audit v3.2 framing correction. **Strategy B / UpdateProtoInPlace** is the right hook surface for catch-up. Do not rebuild these patterns—extend them.
+Stage 5 **agency projection and routing** is the template for kolony scenario ownership — 7 templates total (see §10 item 7): `AgencyContractRouter` (Stage 5.17d) is the **closest analogue** for Phase 3 ShareKolony (per-agency persistence + owner-only S→C echo + shared-pool slot freeing). The 4 band-1 routers (`AgencyCurrencyRouter`/`Tech`/`Research`/`Progress`) + `AgencyScenarioProjector` (5.17c) round out the toolkit. **BUG-010 / vessel pin** contributes the *vessel-scoped registry + lock-acquire-clears-it* structural pattern (`VesselPinnedSystem.cs` `ConcurrentDictionary<Guid,string>` + `LockEvent.onLockAcquire` hook); the immortal-flip semantics do NOT transfer ("freeze, no writers" ≠ kolony's "one writer per agency, peers read") — audit v3.2 framing correction. **Strategy B / UpdateProtoInPlace** is the right hook surface for R3 catch-up. **Stage 5.17a + write-path counterpart** already closes cross-agency lock acquires / vessel-state writes / docking — R0/R3 inherit per-agency authority for free. Do not rebuild these patterns—extend them.
 
 ---
 
@@ -293,6 +316,7 @@ Any new **message types or channel** usage: follow repo rules for **LmpVersionin
 | 2026-05-18 | Audit (LMP side) | `8f609963` | LMP-side §10 audit pass (items 2-7 + 11) by subagent against `F:\luna-multiplayer-mks`. **1 design correction** (USI_Converter inheritance gap → Phase 1 expanded from 3-5d to 6-8d, must author `ModuleResourceConverter.xml` bridge). **3 fact corrections** (phantom `MessageChannelType.cs` removed, `AgencyVisibilityMsgData` already shipped at this base, `PartModulePatcher` patches `FixedUpdate`/`Update`/`LateUpdate` too). **2 bonus discoveries** (4 additional Agency routers — `AgencyCurrencyRouter`/`Tech`/`Research`/`Progress` — as Phase 3 templates; `LockQuery.GetUpdateLockOwner` method body lives in `LmpCommon/Locks/LockQueryUpdate.cs:39`, not `LmpClient`). External clones (USITools / MKS / WOLF, §10 items 8-10) **still pending** — required prereq for R0 / Phase 3 / Phase 4 design validation. MD bumped 3.0 → 3.1. |
 | 2026-05-18 | Audit (LMP secondary) | `8f609963` | Foreground reads on apply-side surfaces: `VesselResourceMessageHandler.cs:19-20` confirms no per-part ownership filter — R0 fix MUST happen upstream in `ModuleLogisticsConsumer.GetResourceStockpiles`. `ScenarioSystem.cs:228-303` is per-module ingestion adapters, not "reconciliation" — §10 item 3 framing fixed. `VesselPinnedSystem.cs` is "freeze, no writers" not "one writer, others read" — §8 BUG-010 mapping softened to "vessel-scoped registry + lock-acquire-clears-it pattern only." |
 | 2026-05-18 | Audit (external) | external clones at SHAs above | External-codebase pass on §10 items 8/9/10 by subagent against MKS `ed0f6aa6` + USITools `4ad5cdd8` + CRP `9e933150f`. **3 design escalations:** (1) `ScenarioOrbitalLogistics` is per-frame resource-mutation surface, NOT just scenario-sync (`Update():150-165` → `transfer.Deliver()` → `vessel.ExchangeResources` writes `PartResource.amount`/`ProtoPartResourceSnapshot.amount`); R2 expanded to Local-Logistics class. (2) `ModuleLogisticsConsumer.GetResourceStockpiles/GetPowerDistributors` are `public` but NOT `virtual` — Harmony postfix brittle on signature refactor; §11 upstream PR justified, not optional. (3) WOLF ID concerns OVERSTATED — only `CrewRoute.FlightNumber` is weak (display-only), 4 of 5 entities have strong IDs by construction; Phase 4 partition can rely on existing IDs. **Confirmations:** R0 mechanism + 3 mutation paths verified; `KolonizationManager` and `PlanetaryLogisticsManager` both write-through caches (scenario-only sufficient); `TrackLogEntry` IS Phase 3 hook; `MKSModule` R3 hit confirmed; `ModuleOrbitalLogistics` is 1 persistent field + 1 UI event (Phase 1 XML is tiny); CRP 170 RESOURCE_DEFINITIONs, no DLLs/C#; `USI_Converter` 2-hop inheritance confirms v3.1 bridge requirement. MD bumped 3.1 → 3.2. **Still uncertain:** R5 GUI entry-point enumeration (Phase 5 polish, low priority). |
+| 2026-05-18 | Per-agency framing | `8f609963` | Critical re-read of all 6 risks + 6 phases against the 1-player-per-agency model (Stage 5.16/5.17a/5.17c/5.17d/5.17e). **1 material correction:** R2 / Phase 3 framed as "single global writer" in pre-v3.3 wording — would have shipped a system where only one player's MKS progress counts. Replaced with per-agency routing (`AgencyKolonyRouter` / `AgencyPlanetaryRouter` / `AgencyOrbitalRouter` modelled on `AgencyContractRouter`). **Confirmed per-agency-safe without code change:** R0 (player-lock filter equivalent to agency-vessel filter via 5.17a), R3 (catch-up runs per vessel, vessels carry agency tag), R4 (already explicit), cross-agency docking + manual-transfer UI (closed by 5.17a write-path counterpart). **New open question:** WOLF `CrewRoute` kerbal authority — Phase 4 design needs to answer whether cross-agency crew transport is rejected or allowed. **No retracted decisions** — every v3.1/v3.2 finding still holds. MD bumped 3.2 → 3.3. |
 | | | | |
 
 ---
