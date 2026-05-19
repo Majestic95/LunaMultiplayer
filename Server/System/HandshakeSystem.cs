@@ -85,6 +85,19 @@ namespace Server.System
                         // gate=on so the empty-dict case is observable by the pre-Slice-C
                         // client mirror author.
                         AgencySystemSender.SendPlanetaryCatchupTo(client, assignedState);
+                        // [Phase 3 Slice D] MKS orbital catch-up: persisted per-agency
+                        // OrbitalTransfers (populated by AgencyOrbitalRouter on prior
+                        // sessions OR by the Slice E transferagency-MKS extension
+                        // migrating a destination vessel A→B) ship to the reconnecting
+                        // owner BEFORE any per-frame ScenarioOrbitalLogistics.Update
+                        // cycle runs. Returning player's transfer queue appears in
+                        // their MKS UI before they can interact with it. Unconditional
+                        // under gate=on so the empty-dict case is observable by the
+                        // pre-Slice-D client mirror author. The Slice D Deliver-prefix
+                        // (OrbitalLogisticsTransferRequest_DeliverPrefix) runs gate-
+                        // state-independent; this catchup only delivers the
+                        // owner-only transfer-snapshot under gate=on.
+                        AgencySystemSender.SendOrbitalCatchupTo(client, assignedState);
                     }
                 }
 

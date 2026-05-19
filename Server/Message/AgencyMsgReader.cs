@@ -92,6 +92,17 @@ namespace Server.Message
                     // via AgencySystemSender.SendPlanetaryStateToOwner.
                     AgencyPlanetaryRouter.TryRoute(client, (AgencyPlanetaryStateMsgData)data);
                     break;
+                case AgencyMessageType.OrbitalState:
+                    // [Phase 3 Slice D] MKS orbital-logistics per-agency routing.
+                    // Same trust posture + dual-mode silence as KolonyState /
+                    // PlanetaryState. Inbound from the client transfer
+                    // state-machine postfixes (DoFinalLaunchTasks / Abort /
+                    // terminal Status writes via Deliver). The cross-agency
+                    // gate consults the DESTINATION vessel's OwningAgencyId
+                    // (not Origin) per pre-spec §2.b.iii. Owner-only echo via
+                    // AgencySystemSender.SendOrbitalStateToOwner.
+                    AgencyOrbitalRouter.TryRoute(client, (AgencyOrbitalStateMsgData)data);
+                    break;
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:

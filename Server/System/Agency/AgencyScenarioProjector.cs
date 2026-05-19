@@ -85,6 +85,16 @@ namespace Server.System.Agency
             // container. Distinct partition shape from kolony (body-and-resource
             // vs vessel-and-body) but same projector contract.
             "PlanetaryLogisticsScenario",
+            // [Phase 3 Slice D] MKS orbital-logistics transfer-queue projection.
+            // Strip-then-splice — each agency's projected scenario carries ONLY
+            // their own TRANSFER records (parsed from per-entry PayloadBytes).
+            // Distinct partition shape from kolony / planetary — TransferGuid-
+            // keyed at the dict level, opaque PayloadBytes (the MKS-side
+            // ConfigNode Save() output) at the wire level. Closes the per-frame
+            // double-spend (pre-spec §1.c) from the read side; the companion
+            // client-side Deliver-prefix closes it from the write side gate-
+            // state-independent.
+            "ScenarioOrbitalLogistics",
         };
 
         // Precompiled regexes — one per key. Re-using compiled instances across every
@@ -180,6 +190,13 @@ namespace Server.System.Agency
                 // planetary balances — spec §10 Q1.
                 case "PlanetaryLogisticsScenario":
                     return SpliceAgencyPlanetaryEntries(serializedText, targetAgency);
+                // [Phase 3 Slice D] MKS orbital-logistics scenario splice. Strip
+                // all shared TRANSFER children at the root; splice in per-agency
+                // entries from AgencyState.OrbitalTransfers (parsed from each
+                // entry's opaque PayloadBytes). Each agency sees ONLY their own
+                // pending + recently-completed transfers — spec §10 Q1.
+                case "ScenarioOrbitalLogistics":
+                    return SpliceAgencyOrbitalTransfers(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
@@ -786,6 +803,138 @@ namespace Server.System.Agency
                 catch (Exception)
                 {
                     // Per-entry isolation — drop this entry, keep others.
+                }
+            }
+
+            return node.ToString();
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice D] Strip shared root-level <c>TRANSFER</c> child nodes
+        /// and splice in per-agency transfers (parsed from per-entry opaque
+        /// <see cref="AgencyOrbitalTransferEntry.PayloadBytes"/>).
+        /// ScenarioOrbitalLogistics shape (verified against MKS
+        /// <c>KolonyTools/OrbitalLogistics/ScenarioOrbitalLogistics.cs</c> at
+        /// SHA <c>ed0f6aa6</c>, OnSave lines 79-100):
+        /// <code>
+        /// ScenarioOrbitalLogistics {
+        ///     TRANSFER {
+        ///         status = Launched
+        ///         startTime = 12345.6
+        ///         duration = 6789.0
+        ///         DestinationVesselId = 123
+        ///         OriginVesselId = 456
+        ///         RESOURCE { ... }
+        ///     }
+        ///     TRANSFER { ... }
+        /// }
+        /// </code>
+        /// TRANSFER nodes are direct children of the scenario (NOT nested under
+        /// a container like KOLONIZATION or PLANETARY_LOGISTICS — different from
+        /// Slice B/C). The strip pattern is <c>GetNodes("TRANSFER")</c> at the
+        /// scenario root.
+        ///
+        /// <para><b>Opaque-payload passthrough</b> (pre-spec §3.c, contracts
+        /// router precedent at AgencyContractMsgData / ContractInfo). Each
+        /// per-agency entry's PayloadBytes is the verbatim UTF-8 ConfigNode
+        /// bytes the client emitted from MKS'
+        /// <c>OrbitalLogisticsTransferRequest.Save</c> at state-machine-postfix
+        /// time. We parse the bytes back into a <see cref="ConfigNode"/> and
+        /// add as a child of the projected scenario. KSP-side
+        /// <c>ScenarioOrbitalLogistics.OnLoad</c> reads the bytes back via
+        /// <c>OrbitalLogisticsTransferRequest.Load</c> using the symmetric
+        /// shape. LMP never inspects the inner field set — Status / StartTime /
+        /// Duration on the entry are for server-side routing decisions only.
+        /// </para>
+        ///
+        /// <para><b>Per-entry isolation</b>: a malformed PayloadBytes (parse
+        /// failure, empty bytes, missing transfer-name) is logged + skipped,
+        /// siblings continue. Whole-scenario parse failure falls back to the
+        /// input unchanged + logs at Error level (same pattern as
+        /// <see cref="SpliceAgencyKolonyEntries"/> +
+        /// <see cref="SpliceAgencyPlanetaryEntries"/>) so a hung handshake
+        /// never blocks the player.</para>
+        ///
+        /// <para><b>Strip-then-splice contract</b> matches Slice B/C: an
+        /// agency with zero per-agency transfers gets an outgoing scenario
+        /// with zero TRANSFER children (the shared scenario's pre-existing
+        /// transfers are stripped). Pre-0.31 upgrade-in-place universes with
+        /// shared <c>ScenarioOrbitalLogistics</c> transfers are flagged by
+        /// <see cref="AgencySystem.WarnAboutSharedOrbitalOnUpgrade"/> +
+        /// hazard-gate refusal so operators have opt-in time before this
+        /// strip silently fires on first per-agency connect.</para>
+        /// </summary>
+        private static string SpliceAgencyOrbitalTransfers(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "ScenarioOrbitalLogistics" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:MKS-R2] ScenarioOrbitalLogistics projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Strip ALL shared TRANSFER children at the scenario root. TRANSFER
+            // is the only KSP/MKS-emitted child node type here (verified
+            // against ScenarioOrbitalLogistics.OnSave lines 86-99 emitting
+            // node.AddNode(transferNode) where transferNode.Name = "TRANSFER"
+            // via OrbitalLogisticsTransferRequest.Save lines 660-663).
+            // .ToArray() snapshots the enumeration so RemoveNode during
+            // iteration doesn't invalidate the cursor (same pattern as
+            // KOLONY_ENTRY / LOGISTICS_ENTRY strip).
+            foreach (var existing in node.GetNodes("TRANSFER").ToArray())
+                node.RemoveNode(existing.Value);
+
+            AgencyOrbitalTransferEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+            {
+                snapshot = targetAgency.OrbitalTransfers.Values.ToArray();
+            }
+
+            foreach (var entry in snapshot)
+            {
+                if (entry == null)
+                    continue;
+                // Skip entries with no payload — operator hand-edited / Slice
+                // E migration that hasn't yet supplied PayloadBytes. The dict
+                // value is preserved (we still hold it under the lock) so a
+                // future router update will round-trip; today's projection
+                // just doesn't include it.
+                var payloadLen = Math.Max(0, Math.Min(entry.NumBytes, entry.PayloadBytes?.Length ?? 0));
+                if (payloadLen == 0)
+                    continue;
+
+                try
+                {
+                    // Parse PayloadBytes back into a ConfigNode. The bytes are
+                    // UTF-8 ConfigNode-format text produced by MKS'
+                    // OrbitalLogisticsTransferRequest.Save (which calls
+                    // ConfigNode.CreateConfigFromObject then sets node.name =
+                    // "TRANSFER" + adds RESOURCE child nodes). We reverse the
+                    // operation here: convert bytes to string, build ConfigNode,
+                    // re-set Name to "TRANSFER" (the LunaConfigNode parser
+                    // assigns the root the calling-side name).
+                    var payloadText = global::System.Text.Encoding.UTF8.GetString(entry.PayloadBytes, 0, payloadLen);
+                    if (string.IsNullOrWhiteSpace(payloadText))
+                        continue;
+                    var transferNode = new ConfigNode(payloadText) { Name = "TRANSFER" };
+                    if (transferNode.IsEmpty())
+                        continue;
+                    node.AddNode(transferNode);
+                }
+                catch (Exception e)
+                {
+                    // [General-lens SF4] Per-entry isolation — drop this
+                    // transfer, keep others. Log at Warning so operator
+                    // grep gets visibility into an opaque-payload parse
+                    // failure (slice D's payload is bytes, not typed
+                    // fields — schema drift risk is highest here of the
+                    // three Phase 3 splices). Once per call, not rate-
+                    // limited; expected in normal operation only on
+                    // operator hand-edit / MKS schema-drift cases.
+                    LunaLog.Warning($"[fix:MKS-R2] orbital splice: dropped TRANSFER entry for agency {targetAgency.AgencyId:N} transfer {entry.TransferGuid:N}: {e.GetType().Name}: {e.Message}");
                 }
             }
 

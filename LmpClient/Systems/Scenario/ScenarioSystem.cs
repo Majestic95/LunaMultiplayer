@@ -179,6 +179,17 @@ namespace LmpClient.Systems.Scenario
             // splice). Under gate=off this entry is bypassed and the legacy 30s
             // SHA pass continues unchanged (pre-Phase-3 behaviour preserved).
             "PlanetaryLogisticsScenario",
+            // [Phase 3 Slice D-1] MKS orbital-logistics transfer queue — routed
+            // per-agency under gate=on (AgencyOrbitalRouter + projector splice).
+            // Under gate=off this entry is bypassed and the legacy 30s SHA pass
+            // continues unchanged. The companion Deliver-prefix
+            // (OrbitalLogisticsTransferRequest_DeliverPrefix, Slice D-2) runs
+            // GATE-STATE-INDEPENDENT — it closes the per-frame double-spend
+            // (pre-spec §1.c) under both gates. This suppression entry only
+            // affects the broadcast direction (the 30s SHA pass) under gate=on,
+            // letting the per-agency router + projector own the read+write
+            // surface without racing the SHA broadcast.
+            "ScenarioOrbitalLogistics",
         };
 
         /// <summary>

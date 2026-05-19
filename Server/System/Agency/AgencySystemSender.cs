@@ -490,6 +490,198 @@ namespace Server.System.Agency
             MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
         }
 
+        /// <summary>
+        /// [Phase 3 Slice D] Owner-only echo of a per-agency orbital transfer
+        /// batch. Emitted by <see cref="AgencyOrbitalRouter.TryRoute"/> after
+        /// a successful upsert + persist. Peers never receive another agency's
+        /// per-agency orbital transfers (spec §10 Q1
+        /// PrivateAgencyResources=true) — projection through
+        /// <see cref="AgencyScenarioProjector"/>'s
+        /// <c>ScenarioOrbitalLogistics</c> case is the only path by which
+        /// cross-agency awareness leaks into the read-side, and projection
+        /// happens per-target-client at scene-load time.
+        ///
+        /// <para>No-op when:</para>
+        /// <list type="bullet">
+        ///   <item><see cref="AgencySystem.PerAgencyEnabled"/> is false — gate=off
+        ///        OR non-Career game mode. Dual-mode silence preserved.</item>
+        ///   <item>The owner client is null (call from a code path with no source
+        ///        client — should not happen for the router, defensive).</item>
+        ///   <item>The batch is null or empty.</item>
+        /// </list>
+        ///
+        /// <para><b>Caller contract on <paramref name="entries"/>:</b> the
+        /// sender filters out null entries so a caller building a list across
+        /// a fallible upsert loop doesn't desync the wire's
+        /// <c>EntryCount</c> vs the non-null slot count. Same protective
+        /// filter as <see cref="SendKolonyStateToOwner"/> +
+        /// <see cref="SendPlanetaryStateToOwner"/>.</para>
+        ///
+        /// <para><b>No defensive copy of PayloadBytes</b> — the router has
+        /// already <c>Buffer.BlockCopy</c>'d each entry's buffer into a stable
+        /// per-agency-state buffer before calling here (per
+        /// <see cref="AgencyOrbitalRouter.TryRoute"/>'s defensive-copy step).
+        /// The wire serializer reads from those same buffers — no aliasing
+        /// hazard between dict storage and wire emit on the same thread under
+        /// the per-agency lock that the router has already released by the
+        /// time this method is called (post-Send-and-return path).</para>
+        /// </summary>
+        public static void SendOrbitalStateToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<AgencyOrbitalTransferEntry> entries)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (owner == null || entries == null || entries.Count == 0)
+                return;
+
+            // Filter nulls so EntryCount matches the non-null slot count on the
+            // wire. Mirrors SendKolonyStateToOwner / SendPlanetaryStateToOwner.
+            var nonNull = new List<AgencyOrbitalTransferEntry>(entries.Count);
+            for (var i = 0; i < entries.Count; i++)
+            {
+                if (entries[i] != null) nonNull.Add(entries[i]);
+            }
+            if (nonNull.Count == 0) return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyOrbitalStateMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.EntryCount = nonNull.Count;
+            msgData.Entries = nonNull.ToArray();
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice D] Connect-time catch-up: ships the owner's persisted
+        /// <c>AgencyState.OrbitalTransfers</c> dictionary as a single batch
+        /// <see cref="AgencyOrbitalStateMsgData"/>. Wired into
+        /// <c>HandshakeSystem.HandleHandshakeRequest</c> immediately after the
+        /// Slice C <see cref="SendPlanetaryCatchupTo"/> call so the
+        /// pre-5.18-series client mirror lands with a complete per-agency
+        /// orbital view before any per-frame
+        /// <c>ScenarioOrbitalLogistics.Update</c> cycle.
+        ///
+        /// <para><b>Sends unconditionally under gate=on, even for empty
+        /// dictionaries.</b> Same shape as <see cref="SendKolonyCatchupTo"/> +
+        /// <see cref="SendPlanetaryCatchupTo"/> — a pre-Slice-D client mirror
+        /// author needs the empty state to distinguish "no per-agency orbital
+        /// transfers yet" from "server didn't send catch-up."</para>
+        ///
+        /// <para><b>Defensive copy of PayloadBytes per entry</b> — orbital is
+        /// the only Phase 3 entry with a mutable byte-array field. Each
+        /// snapshot entry's PayloadBytes is <c>Buffer.BlockCopy</c>'d into a
+        /// fresh buffer so a concurrent router upsert (which would replace
+        /// the dict value) can't tear the wire send. The
+        /// <see cref="AgencyState.OrbitalTransfers"/> dict value itself is
+        /// stable under the per-agency lock during the snapshot, but the
+        /// post-snapshot wire serialization happens OUTSIDE the lock — the
+        /// per-entry copy isolates the wire pass from a concurrent
+        /// dict-replace.</para>
+        /// </summary>
+        public static void SendOrbitalCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (client == null || state == null)
+                return;
+
+            AgencyOrbitalTransferEntry[] snapshot;
+            int dictCount;
+            lock (AgencySystem.GetAgencyLock(state.AgencyId))
+            {
+                dictCount = state.OrbitalTransfers.Count;
+                snapshot = new AgencyOrbitalTransferEntry[dictCount];
+                var i = 0;
+                foreach (var kvp in state.OrbitalTransfers)
+                {
+                    var src = kvp.Value;
+                    if (src == null) continue;
+
+                    // Defensive copy of PayloadBytes under the lock. Today there
+                    // is no concurrent mutator of an entry's PayloadBytes in
+                    // place — the router replaces the dict value with a fresh
+                    // entry on every Upsert (AgencyOrbitalRouter.cs:243-260), so
+                    // the prior entry's buffer is GC-pinned by our snapshot
+                    // reference and a concurrent router-thread does not tear
+                    // our wire send. The per-entry copy here is forward-
+                    // looking: a future Slice E migration that performs an
+                    // in-place PayloadBytes mutation (e.g. partial-transfer
+                    // splice during transferagency-MKS) WOULD race the catchup
+                    // wire emit; this copy defends against that shape change
+                    // before it ships. ~hundreds of bytes per transfer, negligible.
+                    var srcBytes = src.PayloadBytes ?? Array.Empty<byte>();
+                    var srcLen = Math.Max(0, Math.Min(src.NumBytes, srcBytes.Length));
+                    var copyBytes = srcLen > 0 ? new byte[srcLen] : Array.Empty<byte>();
+                    if (srcLen > 0)
+                        Buffer.BlockCopy(srcBytes, 0, copyBytes, 0, srcLen);
+
+                    snapshot[i++] = new AgencyOrbitalTransferEntry
+                    {
+                        TransferGuid = src.TransferGuid,
+                        OriginVesselId = src.OriginVesselId,
+                        DestinationVesselId = src.DestinationVesselId,
+                        Status = src.Status,
+                        StartTime = src.StartTime,
+                        Duration = src.Duration,
+                        PayloadBytes = copyBytes,
+                        NumBytes = srcLen,
+                    };
+                }
+                if (i < snapshot.Length)
+                    Array.Resize(ref snapshot, i);
+            }
+
+            // [Upgrade-lens MF3] Operability signal when a Slice E migration bug
+            // leaves null values in the dict. Today the dict should never
+            // contain nulls (router upsert path always assigns a fresh entry),
+            // but a future migration path with a botched intermediate state
+            // would silently lose entries here. Log the count discrepancy so
+            // the operator has a grep target.
+            if (snapshot.Length != dictCount)
+            {
+                LunaLog.Debug($"[fix:MKS-R2] SendOrbitalCatchupTo: dict count {dictCount} vs non-null snapshot count {snapshot.Length} for agency {state.AgencyId:N} — {dictCount - snapshot.Length} null entries skipped.");
+            }
+
+            // [Upgrade-lens MF1] Chunk batches larger than MaxEntryCount so the
+            // receiver never throws InvalidDataException at the wire boundary
+            // and disconnects the player at handshake completion. Same
+            // chunking pattern as BroadcastVisibilityChange below (lines
+            // 752-771 in this file). Lidgren's per-channel ReliableOrdered
+            // guarantee preserves apply order across the chunk batches.
+            var total = snapshot.Length;
+            if (total == 0)
+            {
+                // Empty-batch catchup is part of the gate=on contract per the
+                // AgencyOrbitalStateMsgData XML — pre-Slice-D client mirrors
+                // need to distinguish "no per-agency transfers yet" from
+                // "unsynced". Ship one zero-entry message.
+                var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyOrbitalStateMsgData>();
+                msgData.AgencyId = state.AgencyId;
+                msgData.EntryCount = 0;
+                msgData.Entries = Array.Empty<AgencyOrbitalTransferEntry>();
+                MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+                return;
+            }
+
+            const int chunkLimit = AgencyOrbitalStateMsgData.MaxEntryCount;
+            var batchCount = 0;
+            for (var start = 0; start < total; start += chunkLimit)
+            {
+                var chunkSize = Math.Min(chunkLimit, total - start);
+                var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyOrbitalStateMsgData>();
+                msgData.AgencyId = state.AgencyId;
+                msgData.EntryCount = chunkSize;
+                msgData.Entries = new AgencyOrbitalTransferEntry[chunkSize];
+                Array.Copy(snapshot, start, msgData.Entries, 0, chunkSize);
+                MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+                batchCount++;
+            }
+
+            if (batchCount > 1)
+            {
+                LunaLog.Normal($"[fix:MKS-R2] SendOrbitalCatchupTo: agency {state.AgencyId:N} has {total} transfers — split into {batchCount} chunks of up to {chunkLimit} for catchup.");
+            }
+        }
+
         public static void BroadcastVisibilityChange(IReadOnlyList<VesselOwnershipChange> changes)
         {
             if (!AgencySystem.PerAgencyEnabled)

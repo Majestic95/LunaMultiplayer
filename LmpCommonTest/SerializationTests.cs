@@ -315,6 +315,114 @@ namespace LmpCommonTest
         }
 
         [TestMethod]
+        public void TestSerializeDeserializeAgencyOrbitalStateMsg()
+        {
+            // Phase 3 Slice D-1 — full populated batch through the wire to pin the
+            // 7+1-field round-trip: TransferGuid + Origin/Destination Guids + Status
+            // (opaque int) + StartTime/Duration (doubles) + NumBytes-prefixed
+            // PayloadBytes. Multi-entry case catches off-by-one regressions in the
+            // count-driven array read.
+            var msgData = Factory.CreateNewMessageData<AgencyOrbitalStateMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.EntryCount = 2;
+            var transferGuidA = Guid.NewGuid();
+            var transferGuidB = Guid.NewGuid();
+            var payloadA = Encoding.UTF8.GetBytes("status = Launched\nMarkerA = 1");
+            var payloadB = Encoding.UTF8.GetBytes("status = Returning\nMarkerB = 2");
+            msgData.Entries = new[]
+            {
+                new AgencyOrbitalTransferEntry
+                {
+                    TransferGuid = transferGuidA,
+                    OriginVesselId = Guid.NewGuid(),
+                    DestinationVesselId = Guid.NewGuid(),
+                    Status = AgencyOrbitalTransferEntry.StatusLaunched,
+                    StartTime = 12345.678,
+                    Duration = -987.654,  // negative + decimal stress on the double serializer
+                    PayloadBytes = payloadA,
+                    NumBytes = payloadA.Length,
+                },
+                new AgencyOrbitalTransferEntry
+                {
+                    TransferGuid = transferGuidB,
+                    OriginVesselId = Guid.NewGuid(),
+                    DestinationVesselId = Guid.NewGuid(),
+                    Status = AgencyOrbitalTransferEntry.StatusReturning,
+                    StartTime = 0,
+                    Duration = 0,
+                    PayloadBytes = payloadB,
+                    NumBytes = payloadB.Length,
+                },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyOrbitalStateMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual(2, roundTripped.EntryCount);
+            Assert.AreEqual(transferGuidA, roundTripped.Entries[0].TransferGuid);
+            Assert.AreEqual(AgencyOrbitalTransferEntry.StatusLaunched, roundTripped.Entries[0].Status);
+            Assert.AreEqual(12345.678, roundTripped.Entries[0].StartTime);
+            Assert.AreEqual(-987.654, roundTripped.Entries[0].Duration);
+            Assert.AreEqual(payloadA.Length, roundTripped.Entries[0].NumBytes);
+            CollectionAssert.AreEqual(payloadA, roundTripped.Entries[0].PayloadBytes,
+                "PayloadBytes must round-trip byte-for-byte on the wire.");
+            Assert.AreEqual(transferGuidB, roundTripped.Entries[1].TransferGuid);
+            Assert.AreEqual(AgencyOrbitalTransferEntry.StatusReturning, roundTripped.Entries[1].Status);
+            CollectionAssert.AreEqual(payloadB, roundTripped.Entries[1].PayloadBytes);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyOrbitalStateMsg_EmptyBatch()
+        {
+            // Connect-time catch-up under gate=on ships an empty batch when the
+            // owner has zero pending transfers — pin that EntryCount=0 round-trips
+            // without dereferencing into the entries array. Mirrors the contract /
+            // kolony / planetary empty-batch case.
+            var msgData = Factory.CreateNewMessageData<AgencyOrbitalStateMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.EntryCount = 0;
+            msgData.Entries = new AgencyOrbitalTransferEntry[0];
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyOrbitalStateMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual(0, roundTripped.EntryCount);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyOrbitalStateMsg_CliMsgSubTypeDictionary()
+        {
+            // BUG-010 wire-symmetry coverage — verifies AgencyCliMsg.SubTypeDictionary
+            // has slot 8 (OrbitalState) so client-to-server posts (postfix emit)
+            // deserialize on the server side. Mirrors the Slice 5.15b
+            // TestSerializeDeserializeAgencyCreateRequestMsg shape — without the Cli
+            // entry the deserializer would silently drop the message.
+            var msgData = ClientFactory.CreateNewMessageData<AgencyOrbitalStateMsgData>();
+            msgData.AgencyId = Guid.Empty;  // C→S: server ignores
+            msgData.EntryCount = 1;
+            var transferGuid = Guid.NewGuid();
+            var payload = Encoding.UTF8.GetBytes("status = Delivered");
+            msgData.Entries = new[]
+            {
+                new AgencyOrbitalTransferEntry
+                {
+                    TransferGuid = transferGuid,
+                    OriginVesselId = Guid.NewGuid(),
+                    DestinationVesselId = Guid.NewGuid(),
+                    Status = AgencyOrbitalTransferEntry.StatusDelivered,
+                    PayloadBytes = payload,
+                    NumBytes = payload.Length,
+                },
+            };
+
+            var roundTripped = RoundTripClient<AgencyCliMsg, AgencyOrbitalStateMsgData>(msgData);
+
+            Assert.AreEqual(1, roundTripped.EntryCount);
+            Assert.AreEqual(transferGuid, roundTripped.Entries[0].TransferGuid);
+            Assert.AreEqual(AgencyOrbitalTransferEntry.StatusDelivered, roundTripped.Entries[0].Status);
+        }
+
+        [TestMethod]
         public void TestSerializeDeserializeAgencyStateMsg()
         {
             // Mirror Stage 5.14c AgencyState's scalar surface — all six fields must

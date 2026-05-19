@@ -200,6 +200,7 @@ namespace Server.System.Agency
                 WarnAboutSharedProgressFacilityOnUpgrade();
                 WarnAboutSharedKolonyOnUpgrade();
                 WarnAboutSharedPlanetaryOnUpgrade();
+                WarnAboutSharedOrbitalOnUpgrade();
                 RefuseStartupIfUpgradeHazardWithoutOverride();
                 return;
             }
@@ -313,6 +314,18 @@ namespace Server.System.Agency
             // planetary-warehouse correctness across multiple players need
             // per-agency mode.
             WarnAboutSharedPlanetaryOnUpgrade();
+
+            // [Phase 3 Slice D-1 / MKS-R2] Sibling diagnostic for MKS' shared
+            // ScenarioOrbitalLogistics. The Slice D projector splice strips
+            // all pre-existing TRANSFER children at the scenario root and
+            // replaces them with per-agency (empty for fresh-mint agencies)
+            // transfers — every in-flight transfer in the shared queue
+            // becomes invisible to per-agency clients on first scene-load.
+            // The shared-queue authority resolves per pre-spec §4.d to
+            // "first agency to proto-resend the destination vessel" via the
+            // §2.a vessel stamp; the warning text spells this out + offers
+            // the cancel-before-upgrade operator workflow.
+            WarnAboutSharedOrbitalOnUpgrade();
 
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
@@ -461,6 +474,26 @@ namespace Server.System.Agency
                             }
                         }
                     }
+                }
+            }
+            // [Phase 3 Slice D-1 / MKS-R2] Orbital hazard predicate. Mirrors
+            // the WarnAboutSharedOrbitalOnUpgrade helper — any shared
+            // TRANSFER child at the ScenarioOrbitalLogistics root means the
+            // projector will strip on first per-agency connect, deleting
+            // operator-visible in-flight + recently-completed transfers.
+            // Unlike planetary's "non-zero StoredQuantity" filter, ALL
+            // TRANSFER children count as hazardous: a Status=Launched
+            // transfer represents resources already deducted from Origin;
+            // a Status=Returning is cancelled and refunding mid-flight; a
+            // Status=Delivered/Partial/Failed is a recently-completed
+            // record the operator may want to inspect post-upgrade. No
+            // "skeleton zero-balance" false-fire risk — MKS only persists
+            // transfers it actually launched. Same fail-closed posture.
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioOrbitalLogistics", out var orbitalScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("ScenarioOrbitalLogistics"))
+                {
+                    if (orbitalScn.GetNodes("TRANSFER").Any()) hasHazard = true;
                 }
             }
             if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScn))
@@ -854,6 +887,131 @@ namespace Server.System.Agency
         }
 
         /// <summary>
+        /// [Phase 3 Slice D-1 / MKS-R2 upgrade-lens diagnostic] Sibling of
+        /// <see cref="WarnAboutSharedKolonyOnUpgrade"/> +
+        /// <see cref="WarnAboutSharedPlanetaryOnUpgrade"/> for the MKS
+        /// orbital-logistics scenario. Fires when (a) gate is on, (b) zero
+        /// agencies loaded (fresh-mint upcoming), (c) the universe is
+        /// non-pristine (vessels exist — signals in-place upgrade), (d) the
+        /// shared <c>ScenarioOrbitalLogistics</c> has at least one
+        /// <c>TRANSFER</c> child at the scenario root. Under those
+        /// conditions, the Slice D projector splice will STRIP those
+        /// transfers from the outgoing scenario blob and replace them with
+        /// the (empty) per-agency queue — every operator-visible pending +
+        /// recently-completed transfer disappears on first connect.
+        ///
+        /// <para>Differs from kolony / planetary in TWO important respects
+        /// per pre-spec §4.d:</para>
+        /// <list type="bullet">
+        ///   <item><b>Resource cost of inaction is asymmetric.</b> A
+        ///        Status=Launched transfer has ALREADY deducted resources
+        ///        from Origin's tanks (per MKS' <c>DoLaunchTasks</c> at
+        ///        OrbitalLogisticsTransferRequest.cs:687-691). Stripping the
+        ///        transfer mid-flight loses BOTH the in-flight payload AND
+        ///        the launch-cost fuel — the operator's vessel didn't
+        ///        receive the delivery but DID pay for it. The kolony /
+        ///        planetary strips lose accumulated state but no in-flight
+        ///        resources are mid-spend.</item>
+        ///   <item><b>Pre-Phase-3 destination-resolution outcome.</b> If
+        ///        operator declines the override and the universe upgrades,
+        ///        the §2.a vessel stamp's first-proto-wins rule attributes
+        ///        each in-flight transfer to whichever agency proto-resends
+        ///        the destination vessel FIRST. The operator's intent at
+        ///        Launch time may have been "deliver to my own base" but
+        ///        a peer who connects first could end up the agency of
+        ///        record. Spec §10 first-stamp-wins applies uniformly; the
+        ///        warning text spells out the recovery (cancel-before-
+        ///        upgrade via in-game MKS UI; or stamp destination vessel
+        ///        pre-flip via Slice E's setvesselagency).</item>
+        /// </list>
+        ///
+        /// <para>Counted via <see cref="ScenarioStoreSystem.CurrentScenarios"/>
+        /// + the per-scenario lock the projector uses to read. The
+        /// <c>ScenarioOrbitalLogistics</c> on-disk shape is
+        /// <c>ScenarioOrbitalLogistics { TRANSFER { ... } TRANSFER { ... } }</c>
+        /// per MKS' <c>ScenarioOrbitalLogistics.OnSave</c> at SHA
+        /// <c>ed0f6aa6</c> — TRANSFER nodes are direct children of the
+        /// scenario, NOT nested under a container (different from kolony's
+        /// KOLONIZATION container + planetary's PLANETARY_LOGISTICS
+        /// container).</para>
+        ///
+        /// <para><b>The Slice D Deliver-prefix is gate-state-independent.</b>
+        /// Once Slice D-2 ships the Deliver-prefix
+        /// (OrbitalLogisticsTransferRequest_DeliverPrefix), the per-frame
+        /// double-spend hazard is closed under BOTH gate=on and gate=off.
+        /// Under gate=off, in-flight shared-queue transfers continue
+        /// delivering normally — they just deliver exactly ONCE rather than
+        /// once-per-peer. Slice D-1 does NOT ship the prefix; this warning
+        /// applies regardless of when D-2 lands.</para>
+        /// </summary>
+        private static void WarnAboutSharedOrbitalOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint agency on a new universe is fine.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioOrbitalLogistics", out var scenario))
+                return;
+
+            // ScenarioOrbitalLogistics's OnLoad sorts transfers into
+            // PendingTransfers (Status==Launched|Returning) vs ExpiredTransfers
+            // (everything else — Delivered / Partial / Failed / Cancelled).
+            // We don't fully parse here; just count TRANSFER children and
+            // categorize by the `status` value-pair on each (the same
+            // ConfigNode field MKS' OrbitalLogisticsTransferRequest persists
+            // via the [Persistent] attribute on the Status enum field). The
+            // count gives the operator visibility into both "in-flight that
+            // will lose resources" and "recently-completed records they may
+            // want to inspect."
+            int pendingCount = 0;
+            int expiredCount = 0;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("ScenarioOrbitalLogistics"))
+            {
+                foreach (var entry in scenario.GetNodes("TRANSFER"))
+                {
+                    var statusStr = entry.Value.GetValue("status")?.Value ?? string.Empty;
+                    if (statusStr == "Launched" || statusStr == "Returning")
+                        pendingCount++;
+                    else
+                        expiredCount++;
+                }
+            }
+
+            if (pendingCount == 0 && expiredCount == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:MKS-R2] PerAgencyCareer=true on an upgrade universe carries " +
+                $"shared-agency orbital-logistics transfer state: {pendingCount} pending (Launched/Returning) + " +
+                $"{expiredCount} recently-completed transfer(s) in the MKS ScenarioOrbitalLogistics. The Phase " +
+                "3 projector strips ALL TRANSFER children on send so per-agency clients start with empty " +
+                "transfer queues — pending transfers vanish from the MKS UI and the in-flight resources " +
+                "previously deducted from Origin tanks at Launch time are LOST WITHOUT BEING DELIVERED. " +
+                "Recently-completed transfers (delivery records) also disappear from the UI. " +
+                "RESOURCE-COST WARNING: a Status=Launched transfer has ALREADY paid the launch-cost fuel + " +
+                "deducted the resource payload from Origin (per MKS' DoLaunchTasks at " +
+                "OrbitalLogisticsTransferRequest.cs:687-691). Stripping it post-upgrade means the player " +
+                "paid for a delivery that never arrives. " +
+                "RECOVERY OPTIONS at this moment (no agencies minted yet): " +
+                "(1) Accept the loss + set AllowEnablePerAgencyOnExistingUniverse=true in " +
+                "Settings/GameplaySettings.xml. Server boots, projector strips on first connect, " +
+                "in-flight transfer payloads are gone. (2) Pre-flip cancel workflow (recommended for " +
+                "high-value transfers): stop the server now, flip PerAgencyCareer=false, restart, cancel " +
+                "every pending transfer via the in-game MKS UI (the Abort path returns the payload to " +
+                "Origin), then stop again, archive Universe/ (spec §10 fresh-start workflow), and " +
+                "restart with PerAgencyCareer=true. (3) Pre-flip destination-stamp workflow (after " +
+                "agencies exist; requires Slice E's setvesselagency, NOT yet shipped): stamp the " +
+                "destination vessel of each pending transfer to its intended owning agency before " +
+                "first per-agency connect. The §2.a stamp-then-route flow then attributes each transfer " +
+                "to the right agency on its first projection; the persisted state migrates intact via the " +
+                "Slice E transferagency MKS extension. (4) Stay on shared-agency mode " +
+                "(PerAgencyCareer=false) — no transfer data loss. Note: even under shared mode, the Slice " +
+                "D-2 Deliver-prefix (when shipped) closes the per-frame double-spend hazard that has " +
+                "existed pre-Phase-3 on master — strict improvement regardless of gate.");
+        }
+
+        /// <summary>
         /// Stage 5.17d upgrade-lens diagnostic. Pre-existing CONTRACTS / CONTRACTS_FINISHED
         /// entries in the shared <c>ContractSystem</c> scenario under gate=on means the
         /// scenario will ship to every connecting player at handshake; without the per-
@@ -1009,34 +1167,39 @@ namespace Server.System.Agency
                 "path. To preserve full re-enable: keep Universe/Agencies/ intact, or accept the loss and use " +
                 "transferagency to re-own the affected vessels under the new agencies.");
 
-            // [Phase 3 Slice B / MKS-R2 upgrade-lens finding MF1 + Slice C
-            // extension] Per-agency MKS state (KOLONY_ENTRIES + PLANETARY_ENTRIES)
-            // is frozen on disk under gate=off — invisible to the shared-mode
-            // 30s SHA pass, stale relative to the now-diverging shared
-            // KolonizationScenario / PlanetaryLogisticsScenario. An operator
-            // who re-enables PerAgencyCareer will see the frozen entries
-            // re-materialise, producing a stale snapshot of the world the
-            // operator was actually playing in shared-mode. Cheap text scan
-            // of Universe/Agencies/*.txt; don't load the full AgencyState
-            // file. The two scans share one file-walk for efficiency.
+            // [Phase 3 Slice B / MKS-R2 upgrade-lens finding MF1 + Slice C/D
+            // extension] Per-agency MKS state (KOLONY_ENTRIES +
+            // PLANETARY_ENTRIES + ORBITAL_TRANSFERS) is frozen on disk
+            // under gate=off — invisible to the shared-mode 30s SHA pass,
+            // stale relative to the now-diverging shared
+            // KolonizationScenario / PlanetaryLogisticsScenario /
+            // ScenarioOrbitalLogistics. An operator who re-enables
+            // PerAgencyCareer will see the frozen entries re-materialise,
+            // producing a stale snapshot of the world the operator was
+            // actually playing in shared-mode. Cheap text scan of
+            // Universe/Agencies/*.txt; don't load the full AgencyState
+            // file. The three scans share one file-walk for efficiency.
             try
             {
                 if (FileHandler.FolderExists(AgencyState.AgenciesPath))
                 {
                     var frozenKolonyCount = 0;
                     var frozenPlanetaryCount = 0;
+                    var frozenOrbitalCount = 0;
                     foreach (var filePath in FileHandler.GetFilesInPath(AgencyState.AgenciesPath))
                     {
                         if (Path.GetExtension(filePath) != ".txt") continue;
                         try
                         {
                             // Substring match is sufficient — KOLONY_ENTRIES /
-                            // PLANETARY_ENTRIES are the only top-level child
-                            // nodes containing those tokens and a legitimate
-                            // agency file is operator-friendly text.
+                            // PLANETARY_ENTRIES / ORBITAL_TRANSFERS are the
+                            // only top-level child nodes containing those
+                            // tokens and a legitimate agency file is
+                            // operator-friendly text.
                             var text = File.ReadAllText(filePath);
                             if (text.Contains("KOLONY_ENTRIES")) frozenKolonyCount++;
                             if (text.Contains("PLANETARY_ENTRIES")) frozenPlanetaryCount++;
+                            if (text.Contains("ORBITAL_TRANSFERS")) frozenOrbitalCount++;
                         }
                         catch (Exception) { /* per-file isolation — skip and keep scanning */ }
                     }
@@ -1063,6 +1226,37 @@ namespace Server.System.Agency
                             "PerAgencyCareer would project a pre-flip snapshot, NOT the current shared-mode " +
                             "state. Consider clearing PLANETARY_ENTRIES child blocks from " +
                             "Universe/Agencies/*.txt before re-enabling, or accepting the stale projection.");
+                    }
+
+                    if (frozenOrbitalCount > 0)
+                    {
+                        // Orbital staleness is the MOST hazardous of the three —
+                        // a frozen ORBITAL_TRANSFERS dict carries Status=Launched
+                        // transfers from a prior session whose Origin/Destination
+                        // vessels may have been recovered / unloaded / changed
+                        // owning-agency under shared-mode play. Re-enabling
+                        // gate=on would project these stale transfers back into
+                        // the per-agency client view; if the destination vessel
+                        // still exists, the client's MKS UI surfaces a "pending
+                        // arrival" with a UT in the past, and the Slice D-2
+                        // Deliver-prefix's destination-resolution would attempt
+                        // resource exchange against the stale state. Operator
+                        // advice: prefer clearing ORBITAL_TRANSFERS over the
+                        // other two when re-enabling.
+                        LunaLog.Warning(
+                            $"[fix:MKS-R2] Additionally, {frozenOrbitalCount} agency file(s) under " +
+                            $"{AgencyState.AgenciesPath} carry frozen per-agency ORBITAL_TRANSFERS from a prior " +
+                            "gate=on session. MOST HAZARDOUS of the three frozen MKS surfaces — frozen " +
+                            "transfers carry Status values + StartTime/Duration from the pre-flip world; " +
+                            "the Origin/Destination vessels may have been recovered / unloaded / re-stamped " +
+                            "during the gate=off session, leaving the transfer pointing at stale vessel ids. " +
+                            "Re-enabling PerAgencyCareer would surface these stale entries in MKS UIs with " +
+                            "GetArrivalTime() values in the past, and the Slice D-2 Deliver-prefix " +
+                            "(when shipped) would attempt resource exchange against missing vessels. " +
+                            "STRONGLY recommended to " +
+                            "clear ORBITAL_TRANSFERS child blocks from Universe/Agencies/*.txt before " +
+                            "re-enabling, or accept the stale projection + manually cancel each surfaced " +
+                            "transfer via the in-game MKS UI on first per-agency reconnect.");
                     }
                 }
             }

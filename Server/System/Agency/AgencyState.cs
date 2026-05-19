@@ -904,6 +904,23 @@ namespace Server.System.Agency
                         {
                             entry.PayloadBytes = Convert.FromBase64String(base64);
                             entry.NumBytes = entry.PayloadBytes.Length;
+                            // [Upgrade-lens MF2 / MKS-R2] Operator hand-edit /
+                            // future MKS-version-with-larger-blobs safety: clamp
+                            // PayloadBytes to the wire MaxPayloadBytes so the
+                            // SendOrbitalCatchupTo path can never produce a wire
+                            // payload larger than the receiver will accept. The
+                            // wire deserialize throws InvalidDataException above
+                            // MaxPayloadBytes, which would disconnect a player at
+                            // handshake completion (silent kick-loop). Truncate
+                            // here with a Warning + keep the entry observable so
+                            // the operator can investigate the oversized blob
+                            // before deciding whether to manually drain or
+                            // archive.
+                            if (entry.NumBytes > AgencyOrbitalTransferEntry.MaxPayloadBytes)
+                            {
+                                LunaLog.Warning($"[fix:MKS-R2] TRANSFER entry PayloadBytes truncated from {entry.NumBytes} to MaxPayloadBytes={AgencyOrbitalTransferEntry.MaxPayloadBytes} bytes (TransferGuid={transferGuid:N}). Hand-edit or future MKS-version with larger TRANSFER blobs — re-verify wire compat or drain the affected transfer.");
+                                entry.NumBytes = AgencyOrbitalTransferEntry.MaxPayloadBytes;
+                            }
                         }
                         catch (FormatException)
                         {
