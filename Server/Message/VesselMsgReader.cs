@@ -151,6 +151,22 @@ namespace Server.Message
         /// by cross-agency Bob); Couple rewrites the dominant's AuthoritativeSubspaceId
         /// and removes the weak vessel without any cross-agency check.
         ///
+        /// [v4-proto-write-guard, session 39] ALSO called from <see cref="HandleVesselProto"/>.
+        /// The session-19 ship of this helper covered the 11 relayed types + Remove + Couple
+        /// but omitted the proto handler — the omission was rationalised by the "relayed proto
+        /// bytes are advisory" framing in the [[5.18b relay-vs-store note]], but that framing
+        /// concerned peer-client interpretation of the relay surface only. The server's
+        /// authoritative store DID get overwritten by the proto bytes via
+        /// <see cref="Server.System.Vessel.VesselDataUpdater.RawConfigNodeInsertOrUpdate"/>;
+        /// the 5.16b stamp-preservation logic preserves only <see cref="Server.System.Vessel.Classes.Vessel.OwningAgencyId"/>,
+        /// not crew list / parts / resources / position. The proto-path call closes that
+        /// broad exploit class. Same bypass-cases apply; vessel-not-in-store is the CORRECT
+        /// default for the proto path because proto is the legitimate entry point for new
+        /// vessels and the 5.16b stamp logic at <c>VesselDataUpdater.cs:152-154</c> auto-
+        /// routes them to the sender's own agency. See
+        /// <c>docs/research/v4-vessel-proto-cross-agency-write-guard.md</c> for the full
+        /// threat model + the documented race-craft-pre-create limitation (§3.a).
+        ///
         /// Bypass-only cases (mirror <see cref="LockSystem.AcquireLock"/> Stage 5.17a):
         ///   - Gate off: dual-mode silence (spec §11).
         ///   - Vessel not in store: first-time-seen ids fall through. Unlike 5.17a's
@@ -281,6 +297,25 @@ namespace Server.Message
                               $"(client subspace {client.Subspace} is past vessel authority subspace {existing.AuthoritativeSubspaceId})");
                 return;
             }
+
+            //[v4-proto-write-guard] Cross-agency proto-write rejection. The 5.17a write-path
+            //counterpart at RejectIfCrossAgencyWrite gates 11 relayed message types + Remove +
+            //Couple but was NOT extended to HandleVesselProto when shipped in session 19. The
+            //omission was rationalised by the [[5.18b relay-vs-store note]]'s "relayed proto
+            //bytes are advisory" framing — but that framing concerns peer-client interpretation
+            //of the relay, NOT the server's authoritative store, which DOES get overwritten by
+            //the proto bytes. Without this guard, a modified client can craft a proto for
+            //another agency's vessel-id (crew list / parts / resources / position / etc.) and
+            //the server persists those bytes via RawConfigNodeInsertOrUpdate; the 5.16b stamp-
+            //preservation only preserves OwningAgencyId, NOT the rest of the proto payload.
+            //
+            //Bypass cases mirror the existing helper (gate off / vessel not in store / Empty-
+            //sentinel / requester has no agency). Vessel-not-in-store bypass is the correct
+            //default for the proto path — proto is the legitimate entry point for new vessels,
+            //and the per-agency stamp logic in RawConfigNodeInsertOrUpdate already routes new
+            //vessels to the sender's own agency. See docs/research/v4-vessel-proto-cross-agency-
+            //write-guard.md §3.a for the documented race-craft-pre-create limitation.
+            if (RejectIfCrossAgencyWrite(client.PlayerName, msgData)) return;
 
             if (!VesselStoreSystem.VesselExists(msgData.VesselId))
             {

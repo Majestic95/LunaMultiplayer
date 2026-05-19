@@ -161,11 +161,20 @@ namespace ServerTest
         }
 
         [TestMethod]
-        public void Reject_AllRelayedVesselMessageTypes_AreGated()
+        public void Reject_AllGatedVesselMessageTypes_AreGated()
         {
-            // The helper is type-agnostic — every vessel-relay message type listed in
-            // VesselMsgReader.HandleMessage's per-type cases must be rejected when the
-            // sender's agency doesn't match the vessel's. Pin each of the 11.
+            // The helper is type-agnostic — every vessel-message type that goes through
+            // the cross-agency gate (the 11 relayed types + Proto via the v4-proto-write-
+            // guard, plus Remove + Couple via their dedicated handlers) must be rejected
+            // when the sender's agency doesn't match the vessel's. Pin each of the 13.
+            // (Remove + Couple are tested separately in MockClientTest because their
+            // dispatch path mutates state beyond just relay-or-not.)
+            //
+            // v4 addition: VesselProtoMsgData. The proto path was gapped pre-v4 — see
+            // VesselMsgReaderProtoCrossAgencyTest for the dedicated proto-path test
+            // shape + docs/research/v4-vessel-proto-cross-agency-write-guard.md for the
+            // full threat model. Including proto in this parametric list ensures the
+            // helper's contract stays uniform across all gated message types.
             SeedVessel(_vesselId, _agencyAlice);
             AgencySystem.AgencyByPlayerName["bob"] = _agencyBob;
 
@@ -182,6 +191,7 @@ namespace ServerTest
                 MakeMessage<VesselFairingMsgData>(_vesselId),
                 MakeMessage<VesselDecoupleMsgData>(_vesselId),
                 MakeMessage<VesselUndockMsgData>(_vesselId),
+                MakeMessage<VesselProtoMsgData>(_vesselId),    // [v4-proto-write-guard] session 39
             };
 
             foreach (var msg in messages)
