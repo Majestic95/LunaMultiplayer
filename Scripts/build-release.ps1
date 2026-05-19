@@ -57,7 +57,20 @@ param(
 
     [string]$DotNet = "$env:USERPROFILE\.dotnet\dotnet.exe",
 
-    [switch]$SkipBuildLmpClient
+    [switch]$SkipBuildLmpClient,
+
+    # Path to the Majestic95/LunaCompat fork working copy. LunaCompat ships
+    # the per-agency Mod-compat S5 ([x] Science filter) and other client-side
+    # mod integrations the Luna Multiplayer fork depends on for the per-
+    # agency career experience. Defaults to a sibling directory; pass
+    # explicitly when the fork is checked out elsewhere. Pass an empty
+    # string or use -SkipBuildLunaCompat to skip LunaCompat bundling
+    # entirely (the resulting Client zip will lack the LunaCompat.dll +
+    # XML_COMPAT folder - usable but per-agency mod integrations are
+    # absent).
+    [string]$LunaCompatRepoPath = "$PSScriptRoot\..\..\luna-compat-perAgency",
+
+    [switch]$SkipBuildLunaCompat
 )
 
 $ErrorActionPreference = 'Stop'
@@ -158,6 +171,127 @@ Copy-Item -Force -Path (Join-Path $RepoRoot 'LunaMultiplayer.version') -Destinat
 # Readme alongside the GameData folder.
 $readmeSrc = Join-Path $RepoRoot 'LMP Readme.txt'
 Copy-Item -Force -Path $readmeSrc -Destination (Join-Path $FinalFiles 'LMP Readme.txt')
+
+# ---------- Build + bundle LunaCompat sidecar ----------
+# The Majestic95/LunaCompat fork hosts Mod-compat S5 ([x] Science!
+# per-agency filter) and other client-side per-agency integrations that
+# the main fork's LmpClient.dll exposes API surfaces for (AgencySystem +
+# SettingsServerStructure.PerAgencyCareerEnabled). LunaCompat is a
+# separate codebase but ships in the same Client zip so operators get a
+# single-zip install. See [[project-lunacompat-s5-s6-pickup]] for the
+# rationale.
+#
+# Build mechanics:
+#   1. LunaCompat's csproj references $(KSPRoot)/GameData/{LunaMultiplayer
+#      /Plugins/{LmpClient,LmpCommon}.dll, 000_Harmony/0Harmony.dll,
+#      ModuleManager.4.2.3.dll}. The csproj also embeds KSPBuildTools
+#      which resolves Assembly-CSharp / UnityEngine / mscorlib from
+#      $(KSPRoot)/KSP_x64_Data/Managed/. Constructing a synthetic
+#      build-only KSPRoot would require copying or junctioning the
+#      entire KSP_x64_Data folder (~200MB), heavier than reusing
+#      $env:KSPRoot directly.
+#   2. We DEPLOY the freshly-built LmpClient.dll + LmpCommon.dll to
+#      $env:KSPRoot/GameData/LunaMultiplayer/Plugins/ before invoking
+#      the LunaCompat build. This guarantees LunaCompat picks up THIS
+#      build's per-agency API surfaces (AgencySystem +
+#      SettingsServerStructure.PerAgencyCareerEnabled) regardless of
+#      what was previously deployed. Idempotent: same bytes deployed
+#      twice = no-op; the operator's install ends up matching what's
+#      about to ship.
+#   3. ModuleManager.4.2.3.dll comes from the operator's $env:KSPRoot
+#      install (operators install MM via CKAN). Fail-fast if missing.
+#   4. After build, copy LunaCompat's Build/GameData/LunaCompat output
+#      AND its XML_COMPAT splice (Build/GameData/LunaMultiplayer/
+#      PartSync/LunaCompat) into the Client stage's GameData.
+if ($SkipBuildLunaCompat) {
+    Write-Host "Skipping LunaCompat build (-SkipBuildLunaCompat). The Client zip will NOT include LunaCompat - per-agency mod integrations (X-Science filter etc.) will be absent." -ForegroundColor Yellow
+} elseif (-not $LunaCompatRepoPath -or -not (Test-Path $LunaCompatRepoPath)) {
+    Write-Host "LunaCompat repo path '$LunaCompatRepoPath' not found. Skipping LunaCompat bundling. Either clone Majestic95/LunaCompat at that path, pass -LunaCompatRepoPath PATH, or pass -SkipBuildLunaCompat to suppress this warning." -ForegroundColor Yellow
+} else {
+    Write-Host "Building LunaCompat sidecar from $LunaCompatRepoPath..." -ForegroundColor Cyan
+
+    $operatorKspRoot = $env:KSPRoot
+    if (-not $operatorKspRoot) {
+        throw "LunaCompat build requires `$env:KSPRoot to be set to a KSP install with ModuleManager.4.2.3.dll under GameData/ and KSP_x64_Data/ alongside. Either set the env var, or pass -SkipBuildLunaCompat."
+    }
+    $mmSrc = Join-Path $operatorKspRoot 'GameData\ModuleManager.4.2.3.dll'
+    if (-not (Test-Path $mmSrc)) {
+        throw "ModuleManager.4.2.3.dll not found at $mmSrc. Install ModuleManager 4.2.3 in the `$env:KSPRoot install, or pass -SkipBuildLunaCompat."
+    }
+    $kspManaged = Join-Path $operatorKspRoot 'KSP_x64_Data\Managed'
+    if (-not (Test-Path $kspManaged)) {
+        throw "Expected $kspManaged not found - the KSPRoot env var must point at the KSP install root (containing both GameData/ and KSP_x64_Data/), not at the GameData folder."
+    }
+
+    # Deploy freshly-built LMP client DLLs to the operator's KSP install
+    # so LunaCompat compiles against THIS build. The operator's install
+    # is intentionally treated as a build-time staging surface; this is
+    # the same flow operators already use when iterating on LmpClient
+    # changes manually (Scripts/CopyToKSPDirectory.bat).
+    Write-Host "  Deploying freshly-built LmpClient/LmpCommon to $operatorKspRoot\GameData\LunaMultiplayer\Plugins\..." -ForegroundColor Cyan
+    $lmpPluginsDeploy = Join-Path $operatorKspRoot 'GameData\LunaMultiplayer\Plugins'
+    if (-not (Test-Path $lmpPluginsDeploy)) {
+        throw "Expected $lmpPluginsDeploy not found. Install Luna Multiplayer in this KSP root first (any version - we'll overwrite the LMP DLLs); see CLAUDE.md 'Build & Run - LmpClient'."
+    }
+    foreach ($dllName in @('LmpClient.dll', 'LmpCommon.dll')) {
+        $src = Join-Path $lmpClientBin $dllName
+        if (Test-Path $src) {
+            Copy-Item -Force -Path $src -Destination (Join-Path $lmpPluginsDeploy $dllName)
+        }
+    }
+
+    $lcSolution = Join-Path $LunaCompatRepoPath 'LunaCompat.sln'
+    if (-not (Test-Path $lcSolution)) {
+        throw "LunaCompat.sln not found at $lcSolution. Either the LunaCompat repo path is wrong, or the fork structure has drifted."
+    }
+
+    & $DotNet build $lcSolution -c $Configuration -p:UseMultiDllLmp=true -nologo
+    if ($LASTEXITCODE -ne 0) { throw "LunaCompat build failed (exit $LASTEXITCODE). Check the build log for unresolved references - typically a stale LmpClient.dll lacking the per-agency API surfaces." }
+
+    # Stage LunaCompat output into the Client GameData. The csproj writes
+    # to (LunaCompatRepoPath)/Build/GameData/LunaCompat AND
+    # (LunaCompatRepoPath)/Build/GameData/LunaMultiplayer/PartSync/LunaCompat
+    # (the XML_COMPAT splice). Both need to land in the Client stage.
+    $lcBuildOutput = Join-Path $LunaCompatRepoPath 'Build\GameData'
+    if (-not (Test-Path $lcBuildOutput)) {
+        throw "LunaCompat build output not found at $lcBuildOutput. The csproj wires its output via the BinariesOutputRelativePath / XmlDestinationDir properties - if either was changed, this script needs updating."
+    }
+
+    $lcStagedFolder = Join-Path $lcBuildOutput 'LunaCompat'
+    if (Test-Path $lcStagedFolder) {
+        Write-Host "  Staging GameData/LunaCompat/ to Client zip..." -ForegroundColor Cyan
+        Copy-Item -Recurse -Force -Path $lcStagedFolder -Destination $gameDataRoot
+
+        # KSPBuildTools side-effect: LunaCompat's build emits a copy of
+        # mscorlib.dll (~4MB) and System*.dll alongside the LunaCompat.dll
+        # under Build/GameData/LunaCompat/. KSP's Mono runtime ignores these
+        # at load time (it uses its own mscorlib from KSP_x64_Data/Managed/)
+        # but their presence bloats the Client zip. Strip them post-copy.
+        $strayBuildArtifacts = @(
+            'mscorlib.dll', 'System.dll', 'System.Core.dll', 'System.Xml.dll',
+            'Assembly-CSharp.dll', 'Assembly-CSharp-firstpass.dll',
+            'UnityEngine.dll', 'UnityEngine.CoreModule.dll',
+            'UnityEngine.PhysicsModule.dll', 'UnityEngine.IMGUIModule.dll'
+        )
+        $stagedLcFolder = Join-Path $gameDataRoot 'LunaCompat'
+        foreach ($stray in $strayBuildArtifacts) {
+            $strayPath = Join-Path $stagedLcFolder $stray
+            if (Test-Path $strayPath) { Remove-Item -Force $strayPath }
+        }
+    } else {
+        Write-Host "  Warning: $lcStagedFolder missing - LunaCompat DLL won't be in the Client zip." -ForegroundColor Yellow
+    }
+
+    $lcXmlSplice = Join-Path $lcBuildOutput 'LunaMultiplayer\PartSync\LunaCompat'
+    if (Test-Path $lcXmlSplice) {
+        Write-Host "  Staging GameData/LunaMultiplayer/PartSync/LunaCompat/ to Client zip..." -ForegroundColor Cyan
+        $partSyncDest = Join-Path $lmpFolder 'PartSync\LunaCompat'
+        New-Item -ItemType Directory -Force -Path $partSyncDest | Out-Null
+        Copy-Item -Recurse -Force -Path (Join-Path $lcXmlSplice '*') -Destination $partSyncDest
+    }
+
+    Write-Host "  LunaCompat bundled." -ForegroundColor Green
+}
 
 # ---------- Build the Server publish outputs (one per RID) ----------
 $serverProject = Join-Path $RepoRoot 'Server\Server.csproj'
