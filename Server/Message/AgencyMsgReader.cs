@@ -83,6 +83,15 @@ namespace Server.Message
                     // subtypes the same way).
                     AgencyKolonyRouter.TryRoute(client, (AgencyKolonyStateMsgData)data);
                     break;
+                case AgencyMessageType.PlanetaryState:
+                    // [Phase 3 Slice C] MKS planetary-logistics per-agency routing.
+                    // Same trust posture + dual-mode silence as KolonyState — the
+                    // router IGNORES the wire-supplied AgencyId and derives the
+                    // authoritative sender from AgencyByPlayerName. Dispatched here
+                    // for inbound C→S; the matching owner-only echo goes back out
+                    // via AgencySystemSender.SendPlanetaryStateToOwner.
+                    AgencyPlanetaryRouter.TryRoute(client, (AgencyPlanetaryStateMsgData)data);
+                    break;
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:

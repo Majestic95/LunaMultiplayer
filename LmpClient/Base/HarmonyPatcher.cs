@@ -22,6 +22,7 @@ namespace LmpClient.Base
             PatchContractPreLoader();
             PatchModuleLogisticsConsumer();
             PatchKolonizationManager();
+            PatchModulePlanetaryLogistics();
         }
 
         /// <summary>
@@ -165,6 +166,65 @@ namespace LmpClient.Base
             catch (Exception e)
             {
                 LunaLog.LogWarning($"[LMP]: [fix:MKS-R2] Could not patch KolonyTools.KolonizationManager.TrackLogEntry: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice C] MKS-R2 — Patches
+        /// <c>KolonyTools.PlanetaryLogistics.ModulePlanetaryLogistics.LevelResources(Part, string, bool)</c>
+        /// with a postfix that mirrors every per-vessel planetary-logistics
+        /// warehouse mutation into the per-agency wire when
+        /// <c>SettingsSystem.ServerSettings.PerAgencyCareerEnabled</c> is true.
+        /// See <see cref="LmpClient.Harmony.ModulePlanetaryLogistics_LevelResourcesPostfix"/>
+        /// for the full mechanism + Q1/Q2 resolution.
+        ///
+        /// <para><b>PRIVATE method anchor.</b>
+        /// <c>private void LevelResources(Part rPart, string resource, bool hasSkill)</c>
+        /// at <c>ModulePlanetaryLogistics.cs:78</c>. Harmony patches private
+        /// methods fine but they are more brittle to MKS-side signature change
+        /// than public surfaces. <see cref="HarmonyLib.AccessTools.Method"/>
+        /// with <c>BindingFlags.Instance | BindingFlags.NonPublic</c> resolves
+        /// the private method at boot; if MKS renames or changes signature, a
+        /// single <c>[fix:MKS-R2]</c> warning fires and the patch is a no-op
+        /// for the session.</para>
+        ///
+        /// Imperative registration (rather than <c>[HarmonyPatch]</c>
+        /// attributes) because <c>KolonyTools</c> is not a compile-time
+        /// dependency. Graceful no-op + <c>[fix:MKS-R2]</c> log line when MKS
+        /// isn't installed.
+        /// </summary>
+        internal static void PatchModulePlanetaryLogistics()
+        {
+            try
+            {
+                var mplType = HarmonyLib.AccessTools.TypeByName("PlanetaryLogistics.ModulePlanetaryLogistics");
+                if (mplType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:MKS-R2] PlanetaryLogistics.ModulePlanetaryLogistics type not found — MKS not installed, skipping per-agency planetary postfix.");
+                    return;
+                }
+
+                // LevelResources is PRIVATE — use AccessTools.Method with
+                // explicit BindingFlags to resolve. AccessTools.Method's default
+                // flags include NonPublic but we pin them explicitly here for
+                // clarity (the brittleness annotation in the postfix XML
+                // references this exact resolution).
+                var levelMethod = HarmonyLib.AccessTools.Method(mplType, "LevelResources");
+                if (levelMethod == null)
+                {
+                    LunaLog.LogWarning("[LMP]: [fix:MKS-R2] PlanetaryLogistics.ModulePlanetaryLogistics.LevelResources not found — MKS version mismatch? Per-agency planetary routing NOT active; shared-mode planetary broadcast continues but per-agency partition will not see runtime mutations.");
+                    return;
+                }
+
+                var postfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ModulePlanetaryLogistics_LevelResourcesPostfix),
+                    nameof(LmpClient.Harmony.ModulePlanetaryLogistics_LevelResourcesPostfix.Postfix));
+                HarmonyInstance.Patch(levelMethod, postfix: postfix);
+                LunaLog.Log("[LMP]: [fix:MKS-R2] Patched PlanetaryLogistics.ModulePlanetaryLogistics.LevelResources — per-agency planetary routing active under PerAgencyCareerEnabled.");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:MKS-R2] Could not patch PlanetaryLogistics.ModulePlanetaryLogistics.LevelResources: {e.Message}");
             }
         }
 

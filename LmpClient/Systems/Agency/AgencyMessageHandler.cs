@@ -76,7 +76,32 @@ namespace LmpClient.Systems.Agency
                     // the message is a server-known-correct push; a future Slice B+
                     // client mirror author moves real apply logic into this branch
                     // following the AgencyContractMsgData/HandleContract precedent.
+                    // [Phase 3 Slice C / consumer-lens MUST FIX #4 — partial
+                    // apply.] The reviewer flagged log noise on every connect
+                    // (kolony + planetary stubs both fire under gate=on
+                    // unconditional catchup). The right downgrade target
+                    // would be LogDebug — but client-side LunaLog has no
+                    // LogDebug method (only Log / LogWarning / LogError;
+                    // verified at LmpClient/LunaLog.cs:43-67). Defer the
+                    // proper downgrade to a follow-up that adds
+                    // LunaLog.LogDebug as a sibling. Until then accept the
+                    // 2-lines-per-connect log presence: it surfaces the
+                    // "client mirror is deferred" status to 5.18-series
+                    // testers and operators investigating per-agency MKS
+                    // sync gaps, which is operationally useful information.
                     LunaLog.Log("[Agency]: KolonyState received — client mirror not yet wired (Phase 3 Slice B, 5.18-series follow-up).");
+                    break;
+                case AgencyMessageType.PlanetaryState:
+                    // [Phase 3 Slice C] Same forward-compat stub as KolonyState.
+                    // HandshakeSystem ships AgencyPlanetaryStateMsgData
+                    // unconditionally under gate=on (even an empty dict) — without
+                    // this case existing 0.31-per-agency clients would log
+                    // "Unknown AgencyMessageType PlanetaryState" every connect.
+                    // A future Slice C+ client mirror author moves real apply
+                    // logic into this branch.
+                    // Same LogDebug-deferral rationale as the kolony stub
+                    // above (consumer-lens MUST FIX #4).
+                    LunaLog.Log("[Agency]: PlanetaryState received — client mirror not yet wired (Phase 3 Slice C, 5.18-series follow-up).");
                     break;
                 default:
                     LunaLog.LogWarning($"[Agency]: Unknown AgencyMessageType {msgData.AgencyMessageType} — dropping.");

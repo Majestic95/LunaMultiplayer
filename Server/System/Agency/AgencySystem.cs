@@ -176,13 +176,31 @@ namespace Server.System.Agency
             var folder = AgencyState.AgenciesPath;
             if (!FileHandler.FolderExists(folder))
             {
-                // Empty/missing folder → still run the upgrade diagnostics. The savings-loss
-                // and shared-contracts checks fire when vessels+scenarios accumulated but no
-                // agencies have been minted — that's exactly the in-place upgrade case where
-                // the operator most needs to know what'll happen at next first-connect.
+                // Empty/missing folder → still run the upgrade diagnostics + the
+                // boot-refusal hazard gate. This is the canonical first-flip
+                // operator trajectory: an operator who enables PerAgencyCareer
+                // for the first time on a pre-0.31 universe has never minted
+                // an agency, so Universe/Agencies/ has never been created. The
+                // savings-loss / shared-contracts / shared-tech / shared-
+                // research / shared-progress-facility / shared-kolony / shared-
+                // planetary checks all fire on the (Agencies.Count==0 + vessels
+                // exist + non-zero shared state) predicate which is EXACTLY
+                // this case. Without the full warning + refusal sequence here,
+                // first per-agency connect silently strips all accumulated
+                // career/research/progress/MKS state with no operator
+                // opportunity to intervene. [Phase 3 Slice C / upgrade-lens
+                // MUST FIX MF1 — Slice B inherited the same gap; fixed
+                // uniformly here for kolony + planetary + the existing 5.17
+                // hazards.]
                 WarnAboutOrphanedVessels();
                 WarnAboutSavingsLossOnUpgrade();
                 WarnAboutSharedContractsOnUpgrade();
+                WarnAboutSharedTechOnUpgrade();
+                WarnAboutSharedResearchOnUpgrade();
+                WarnAboutSharedProgressFacilityOnUpgrade();
+                WarnAboutSharedKolonyOnUpgrade();
+                WarnAboutSharedPlanetaryOnUpgrade();
+                RefuseStartupIfUpgradeHazardWithoutOverride();
                 return;
             }
 
@@ -283,6 +301,18 @@ namespace Server.System.Agency
             // agency client's view on first scene-load. Same fresh-start-only
             // operator workflow as the existing 5.17e diagnostics.
             WarnAboutSharedKolonyOnUpgrade();
+
+            // [Phase 3 Slice C / MKS-R2] Sibling diagnostic for MKS' shared
+            // PlanetaryLogisticsScenario. Same shape as the kolony warning —
+            // the projector strips all shared LOGISTICS_ENTRY children on send
+            // so accumulated cross-vessel planetary balances vanish from every
+            // per-agency client's view on first scene-load. Note that per
+            // pre-spec §4.b, gate=off retains the pre-existing MKS-multiplayer
+            // (BodyIndex, ResourceName) same-key collision hazard — that is a
+            // KNOWN LIMITATION not fixed by Phase 3; operators wanting strict
+            // planetary-warehouse correctness across multiple players need
+            // per-agency mode.
+            WarnAboutSharedPlanetaryOnUpgrade();
 
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
@@ -399,6 +429,38 @@ namespace Server.System.Agency
                 {
                     var kolonyContainer = kolonyScn.GetNode("KOLONIZATION")?.Value;
                     if (kolonyContainer != null && kolonyContainer.GetNodes("KOLONY_ENTRY").Any()) hasHazard = true;
+                }
+            }
+            // [Phase 3 Slice C / MKS-R2] Planetary hazard predicate. Mirrors
+            // the WarnAboutSharedPlanetaryOnUpgrade helper — any shared
+            // LOGISTICS_ENTRY child under PLANETARY_LOGISTICS with non-zero
+            // StoredQuantity means the projector will strip on first per-agency
+            // connect, deleting operator-visible planetary balances. Same
+            // fail-closed posture. Note: the Warn helper specifies "non-zero
+            // StoredQuantity" because MKS' Persistance.Save persists empty
+            // (StoredQuantity=0) entries too; flagging those would false-fire
+            // on an upgrade-in-place universe where MKS' first-load created
+            // skeleton entries via FetchLogEntry's "create if not exists" path
+            // (PlanetaryLogisticsManager.cs:61-75).
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("PlanetaryLogisticsScenario", out var planetaryScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("PlanetaryLogisticsScenario"))
+                {
+                    var planetaryContainer = planetaryScn.GetNode("PLANETARY_LOGISTICS")?.Value;
+                    if (planetaryContainer != null)
+                    {
+                        foreach (var entry in planetaryContainer.GetNodes("LOGISTICS_ENTRY"))
+                        {
+                            var qty = entry.Value.GetValue("StoredQuantity")?.Value;
+                            if (string.IsNullOrEmpty(qty)) continue;
+                            if (double.TryParse(qty, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                                && parsed != 0d)
+                            {
+                                hasHazard = true;
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScn))
@@ -679,6 +741,119 @@ namespace Server.System.Agency
         }
 
         /// <summary>
+        /// [Phase 3 Slice C / MKS-R2 upgrade-lens diagnostic] Sibling of
+        /// <see cref="WarnAboutSharedKolonyOnUpgrade"/> for the MKS planetary-
+        /// logistics scenario. Fires when (a) gate is on, (b) zero agencies
+        /// loaded (fresh-mint upcoming), (c) the universe is non-pristine
+        /// (vessels exist — signals in-place upgrade), (d) the shared
+        /// <c>PlanetaryLogisticsScenario</c> has at least one
+        /// <c>LOGISTICS_ENTRY</c> child node with non-zero
+        /// <c>StoredQuantity</c>. Under those conditions, the Slice C
+        /// projector will STRIP those entries from the outgoing scenario blob
+        /// and replace them with the (empty) per-agency pool — operator's
+        /// accumulated planetary balances are invisible on first connect.
+        ///
+        /// <para>Differs from kolony in TWO important respects per pre-spec
+        /// §4.b / §4.e:</para>
+        /// <list type="bullet">
+        ///   <item><b>Pre-existing MKS-multiplayer hazard.</b> The gate=off
+        ///        baseline already has a known hazard: two players pumping the
+        ///        same resource on the same body collide on the
+        ///        <c>(BodyIndex, ResourceName)</c> key under MKS'
+        ///        <c>PlanetaryLogisticsPersistance.SaveLogEntryNode</c>
+        ///        (last-write-wins). Phase 3 does NOT pretend to fix this
+        ///        under shared mode — it's an MKS-design hazard that exists
+        ///        pre-Phase-3 on master and would require a wider scope to
+        ///        address. Operators wanting strict planetary correctness
+        ///        across multiple players need per-agency mode (gate=on).</item>
+        ///   <item><b>NO transferagency migration.</b> Per pre-spec §4.e:
+        ///        planetary entries do NOT migrate when a vessel changes
+        ///        agency via <c>transferagency</c> — the entry represents a
+        ///        body's logistics pool, not a vessel's contribution. So the
+        ///        kolony warning's "option 2: stamp the vessel" recovery
+        ///        does NOT apply for planetary. The only recoveries are
+        ///        accept-the-strip (set the override flag) or stay-on-
+        ///        shared-mode.</item>
+        /// </list>
+        ///
+        /// <para>Counted via <see cref="ScenarioStoreSystem.CurrentScenarios"/>
+        /// + the per-scenario lock the projector uses to read. The
+        /// <c>PlanetaryLogisticsScenario</c>'s on-disk shape is
+        /// <c>PLANETARY_LOGISTICS { LOGISTICS_ENTRY { BodyIndex= ResourceName=
+        /// StoredQuantity= } ... }</c> per MKS'
+        /// <c>PlanetaryLogisticsPersistance.Save</c> at SHA <c>ed0f6aa6</c>.
+        /// Non-zero <c>StoredQuantity</c> guards against false-firing on the
+        /// skeleton-entries-with-zero-balance case (MKS' FetchLogEntry
+        /// "create if not exists" path persists empty entries too — those
+        /// represent no operator-visible data loss).</para>
+        /// </summary>
+        private static void WarnAboutSharedPlanetaryOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint agency on a new universe is fine.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("PlanetaryLogisticsScenario", out var scenario))
+                return;
+
+            int nonZeroCount;
+            double totalQuantity;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("PlanetaryLogisticsScenario"))
+            {
+                var container = scenario.GetNode("PLANETARY_LOGISTICS")?.Value;
+                nonZeroCount = 0;
+                totalQuantity = 0d;
+                if (container != null)
+                {
+                    foreach (var entry in container.GetNodes("LOGISTICS_ENTRY"))
+                    {
+                        var qty = entry.Value.GetValue("StoredQuantity")?.Value;
+                        if (string.IsNullOrEmpty(qty)) continue;
+                        if (double.TryParse(qty, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                            && parsed != 0d)
+                        {
+                            nonZeroCount++;
+                            totalQuantity += parsed;
+                        }
+                    }
+                }
+            }
+
+            if (nonZeroCount == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:MKS-R2] PerAgencyCareer=true on an upgrade universe carries " +
+                $"{nonZeroCount} non-zero shared-agency LOGISTICS_ENTRY record(s) in the MKS " +
+                $"PlanetaryLogisticsScenario (total quantity across body/resource pools: " +
+                $"{totalQuantity.ToString(CultureInfo.InvariantCulture)}). The Phase 3 projector " +
+                "strips these on send so per-agency clients start with empty planetary-logistics pools — " +
+                "the accumulated shared balances are NOT migrated. " +
+                "IMPORTANT — DIFFERS FROM KOLONY: per pre-spec §4.e, planetary entries do NOT migrate " +
+                "on transferagency (the entry represents a body's pool, not a vessel's contribution), " +
+                "so the kolony recovery option of 'stamp the vessel via setvesselagency' is NOT " +
+                "actionable here — even post-mint, planetary balances stay where they were when last " +
+                "written. The pre-mint recovery shape is therefore the only option once gate=on. " +
+                "RECOVERY OPTIONS at this moment (no agencies minted yet): " +
+                "(1) Accept the loss + set AllowEnablePerAgencyOnExistingUniverse=true in " +
+                "Settings/GameplaySettings.xml. Server boots, projector strips on first connect, " +
+                "players start planetary pools from zero. (2) Pre-flip drain workflow: stop the " +
+                "server now, flip PerAgencyCareer=false, restart, drain the warehouses to a single " +
+                "vessel via in-game MKS UI, stop the server again, archive Universe/ (spec §10 fresh-" +
+                "start workflow), then restart with PerAgencyCareer=true. The drained quantities are " +
+                "lost but the warehouses + vessels survive. (3) Stay on shared-agency mode " +
+                "(PerAgencyCareer=false) — no planetary data loss. " +
+                "KNOWN LIMITATION under gate=off (pre-spec §4.b): the pre-existing MKS-multiplayer " +
+                "(BodyIndex, ResourceName) same-key collision hazard remains in shared mode — two " +
+                "players pumping the same resource on the same body collide last-write-wins on MKS' " +
+                "own PlanetaryLogisticsPersistance.SaveLogEntryNode. This hazard exists on master " +
+                "pre-Phase-3 and is NOT fixed by Phase 3 under shared mode; only the gate=on " +
+                "projection + router fix it. Operators wanting strict planetary correctness across " +
+                "multiple players need per-agency mode.");
+        }
+
+        /// <summary>
         /// Stage 5.17d upgrade-lens diagnostic. Pre-existing CONTRACTS / CONTRACTS_FINISHED
         /// entries in the shared <c>ContractSystem</c> scenario under gate=on means the
         /// scenario will ship to every connecting player at handshake; without the per-
@@ -834,36 +1009,42 @@ namespace Server.System.Agency
                 "path. To preserve full re-enable: keep Universe/Agencies/ intact, or accept the loss and use " +
                 "transferagency to re-own the affected vessels under the new agencies.");
 
-            // [Phase 3 Slice B / MKS-R2 upgrade-lens finding MF1] Per-agency MKS state
-            // (KOLONY_ENTRIES) is frozen on disk under gate=off — invisible to the
-            // shared-mode 30s SHA pass, stale relative to the now-diverging shared
-            // KolonizationScenario. An operator who re-enables PerAgencyCareer will
-            // see the frozen entries re-materialise, producing a stale snapshot of
-            // the world the operator was actually playing in shared-mode. Cheap text
-            // scan of Universe/Agencies/*.txt; don't load the full AgencyState file.
+            // [Phase 3 Slice B / MKS-R2 upgrade-lens finding MF1 + Slice C
+            // extension] Per-agency MKS state (KOLONY_ENTRIES + PLANETARY_ENTRIES)
+            // is frozen on disk under gate=off — invisible to the shared-mode
+            // 30s SHA pass, stale relative to the now-diverging shared
+            // KolonizationScenario / PlanetaryLogisticsScenario. An operator
+            // who re-enables PerAgencyCareer will see the frozen entries
+            // re-materialise, producing a stale snapshot of the world the
+            // operator was actually playing in shared-mode. Cheap text scan
+            // of Universe/Agencies/*.txt; don't load the full AgencyState
+            // file. The two scans share one file-walk for efficiency.
             try
             {
                 if (FileHandler.FolderExists(AgencyState.AgenciesPath))
                 {
-                    var frozenAgencyCount = 0;
+                    var frozenKolonyCount = 0;
+                    var frozenPlanetaryCount = 0;
                     foreach (var filePath in FileHandler.GetFilesInPath(AgencyState.AgenciesPath))
                     {
                         if (Path.GetExtension(filePath) != ".txt") continue;
                         try
                         {
-                            // Substring match is sufficient — KOLONY_ENTRIES is the
-                            // only top-level child node containing that token and a
-                            // legitimate agency file is operator-friendly text.
+                            // Substring match is sufficient — KOLONY_ENTRIES /
+                            // PLANETARY_ENTRIES are the only top-level child
+                            // nodes containing those tokens and a legitimate
+                            // agency file is operator-friendly text.
                             var text = File.ReadAllText(filePath);
-                            if (text.Contains("KOLONY_ENTRIES")) frozenAgencyCount++;
+                            if (text.Contains("KOLONY_ENTRIES")) frozenKolonyCount++;
+                            if (text.Contains("PLANETARY_ENTRIES")) frozenPlanetaryCount++;
                         }
                         catch (Exception) { /* per-file isolation — skip and keep scanning */ }
                     }
 
-                    if (frozenAgencyCount > 0)
+                    if (frozenKolonyCount > 0)
                     {
                         LunaLog.Warning(
-                            $"[fix:MKS-R2] Additionally, {frozenAgencyCount} agency file(s) under " +
+                            $"[fix:MKS-R2] Additionally, {frozenKolonyCount} agency file(s) under " +
                             $"{AgencyState.AgenciesPath} carry frozen per-agency KOLONY_ENTRIES from a prior " +
                             "gate=on session. Shared-mode kolony play continues from the shared scenario only; " +
                             "the per-agency entries on disk are NOT updated by the legacy 30s SHA pass and will " +
@@ -872,13 +1053,24 @@ namespace Server.System.Agency
                             "child blocks from Universe/Agencies/*.txt before re-enabling, or accepting the " +
                             "stale projection.");
                     }
+
+                    if (frozenPlanetaryCount > 0)
+                    {
+                        LunaLog.Warning(
+                            $"[fix:MKS-R2] Additionally, {frozenPlanetaryCount} agency file(s) under " +
+                            $"{AgencyState.AgenciesPath} carry frozen per-agency PLANETARY_ENTRIES from a prior " +
+                            "gate=on session. Same staleness profile as KOLONY_ENTRIES — re-enabling " +
+                            "PerAgencyCareer would project a pre-flip snapshot, NOT the current shared-mode " +
+                            "state. Consider clearing PLANETARY_ENTRIES child blocks from " +
+                            "Universe/Agencies/*.txt before re-enabling, or accepting the stale projection.");
+                    }
                 }
             }
             catch (Exception e)
             {
                 // Diagnostic failure must not block boot — log and continue. Same
                 // posture as the per-file isolation inside the loop.
-                LunaLog.Warning($"[fix:MKS-R2] Frozen-kolony-state scan failed: {e.GetType().Name}: {e.Message}");
+                LunaLog.Warning($"[fix:MKS-R2] Frozen-per-agency-state scan failed: {e.GetType().Name}: {e.Message}");
             }
         }
 
@@ -1167,6 +1359,41 @@ namespace Server.System.Agency
             out List<Guid> demotedVesselIds,
             out string failureReason)
         {
+            // [Phase 3 Slice C / consumer-lens MUST FIX #2 — Slice E migration
+            // policy anchor.] When Slice E (Phase 3 MKS-aware extension to
+            // transferagency + deleteagency) lands, the per-router migration
+            // policy on the THREE per-agency MKS dicts is:
+            //   - Kolony (AgencyState.KolonyEntries, vessel-and-body keyed):
+            //         on deleteagency, the agency file is removed wholesale
+            //         (per AgencyState.AgenciesPath unlink below) — kolony
+            //         entries vanish with the agency. No separate echo needed
+            //         (client mirror forgets the agency id and its state).
+            //         On transferagency, kolony entries migrate A→B keyed by
+            //         vessel-prefix scan (entries whose key starts with
+            //         {movedVesselId:N}|...).
+            //   - Planetary (AgencyState.PlanetaryEntries, body-and-resource
+            //         keyed): on deleteagency, entries vanish with the agency
+            //         (same wholesale-file-removal mechanism). On
+            //         transferagency, planetary entries DO NOT MIGRATE
+            //         — the entry represents a body's logistics pool, not a
+            //         vessel's contribution (pre-spec §4.e). Slice E's
+            //         transferagency MKS extension must explicitly SKIP this
+            //         dict; the documented operator recovery for "I want my
+            //         planetary balances to move with the vessel" is to
+            //         hand-edit Universe/Agencies/{guid}.txt.
+            //   - Orbital (AgencyState.OrbitalTransfers, transfer-Guid keyed):
+            //         on deleteagency, entries vanish wholesale. On
+            //         transferagency, value-field-scan against
+            //         OriginVesselId + DestinationVesselId; the entries where
+            //         Destination is the moved vessel migrate (delivery
+            //         authority follows the destination's owner); entries
+            //         where Origin is the moved vessel STAY in the source
+            //         agency by default (the launch obligation was incurred
+            //         in source's frame; product decision).
+            // Slice E author: see the three router class XMLs +
+            // AgencyKolonyRouter.Upsert + AgencyPlanetaryRouter.Upsert +
+            // AgencyOrbitalRouter.Upsert "Migration scan strategy" paragraphs
+            // for the per-router scan implementation guidance.
             demotedVesselIds = new List<Guid>();
             failureReason = string.Empty;
 
@@ -1309,6 +1536,16 @@ namespace Server.System.Agency
         /// </summary>
         public static bool TryRenameAgencyOwner(AgencyState source, string newOwnerName, out string failureReason)
         {
+            // [Phase 3 Slice C / consumer-lens MUST FIX #2 — Slice E author
+            // note.] This method renames the OWNER of an existing agency;
+            // the agency's Guid identity is preserved. Vessels keep their
+            // OwningAgencyId stamp unchanged. NO per-router MKS migration is
+            // needed here for kolony / planetary / orbital state — the
+            // entries stay under the same agency id (just with a different
+            // player handle attached). The per-router migration policy
+            // documented at TryDeleteAgency applies to a FUTURE Slice E
+            // setvesselagency command (which mutates vessel.OwningAgencyId
+            // directly), NOT this method.
             failureReason = string.Empty;
             if (!PerAgencyEnabled)
             {

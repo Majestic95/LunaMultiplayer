@@ -20,5 +20,10 @@ namespace LmpCommon.Message.Types
         // KolonizationManager.TrackLogEntry postfix. Server ignores wire-supplied
         // AgencyId on inbound; derives from authenticated sender.
         KolonyState = 6,
+        // [Phase 3 Slice C] MKS planetary-logistics per-agency state. Same trust
+        // posture + dual-direction usage as KolonyState; the partition is
+        // body-and-resource keyed (NOT vessel-keyed). C→S emit fires from the
+        // ModulePlanetaryLogistics.LevelResources postfix at warehouse-tick cadence.
+        PlanetaryState = 7,
     }
 }

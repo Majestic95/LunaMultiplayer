@@ -78,6 +78,13 @@ namespace Server.System
                         // dict — see SendKolonyCatchupTo XML on "empty distinguishes from
                         // unsynced").
                         AgencySystemSender.SendKolonyCatchupTo(client, assignedState);
+                        // [Phase 3 Slice C] MKS planetary catch-up: same structure as
+                        // kolony — persisted per-agency PlanetaryEntries (populated by
+                        // AgencyPlanetaryRouter on prior sessions) ship to the reconnecting
+                        // owner BEFORE any mid-session mutation. Unconditional under
+                        // gate=on so the empty-dict case is observable by the pre-Slice-C
+                        // client mirror author.
+                        AgencySystemSender.SendPlanetaryCatchupTo(client, assignedState);
                     }
                 }
 

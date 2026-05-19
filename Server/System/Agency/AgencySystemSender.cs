@@ -391,6 +391,105 @@ namespace Server.System.Agency
             MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
         }
 
+        /// <summary>
+        /// [Phase 3 Slice C] Owner-only echo of a per-agency planetary entry
+        /// batch. Emitted by <see cref="AgencyPlanetaryRouter.TryRoute"/> after
+        /// a successful upsert + persist. Peers never receive another agency's
+        /// per-agency planetary entries (spec §10 Q1 PrivateAgencyResources=true)
+        /// — projection through <see cref="AgencyScenarioProjector"/>'s
+        /// <c>PlanetaryLogisticsScenario</c> case is the only path by which
+        /// cross-agency awareness leaks into the read-side, and projection
+        /// happens per-target-client at scene-load time.
+        ///
+        /// <para>No-op when:</para>
+        /// <list type="bullet">
+        ///   <item><see cref="AgencySystem.PerAgencyEnabled"/> is false — gate=off
+        ///        OR non-Career game mode. Dual-mode silence preserved.</item>
+        ///   <item>The owner client is null (call from a code path with no source
+        ///        client — should not happen for the router, defensive).</item>
+        ///   <item>The batch is null or empty.</item>
+        /// </list>
+        ///
+        /// <para><b>Caller contract on <paramref name="entries"/>:</b> the sender
+        /// filters out null entries so a caller building a list across a
+        /// fallible upsert loop doesn't desync the wire's <c>EntryCount</c> vs
+        /// the non-null slot count. Same protective filter as
+        /// <see cref="SendKolonyStateToOwner"/>.</para>
+        /// </summary>
+        public static void SendPlanetaryStateToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<AgencyPlanetaryEntry> entries)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (owner == null || entries == null || entries.Count == 0)
+                return;
+
+            // Filter nulls so EntryCount matches the non-null slot count on the
+            // wire. Mirrors SendKolonyStateToOwner's protective filter.
+            var nonNull = new List<AgencyPlanetaryEntry>(entries.Count);
+            for (var i = 0; i < entries.Count; i++)
+            {
+                if (entries[i] != null) nonNull.Add(entries[i]);
+            }
+            if (nonNull.Count == 0) return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyPlanetaryStateMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.EntryCount = nonNull.Count;
+            msgData.Entries = nonNull.ToArray();
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice C] Connect-time catch-up: ships the owner's persisted
+        /// <c>AgencyState.PlanetaryEntries</c> dictionary as a single batch
+        /// <see cref="AgencyPlanetaryStateMsgData"/>. Wired into
+        /// <c>HandshakeSystem.HandleHandshakeRequest</c> immediately after the
+        /// Slice B <see cref="SendKolonyCatchupTo"/> call so the pre-5.18-series
+        /// client mirror lands with a complete per-agency planetary view before
+        /// any mid-session mutation arrives.
+        ///
+        /// <para><b>Sends unconditionally under gate=on, even for empty
+        /// dictionaries.</b> Same shape as
+        /// <see cref="SendKolonyCatchupTo"/> — a pre-Slice-C client mirror
+        /// author needs the empty state to distinguish "no per-agency
+        /// planetary balances yet" from "server didn't send catch-up."</para>
+        ///
+        /// <para><b>No defensive copy needed</b> — planetary entries have no
+        /// mutable byte-array fields (4 small fields: 1 Guid + 1 int + 1
+        /// string + 1 double). We snapshot the dict's <c>.Values</c> array
+        /// under the per-agency lock so a concurrent router upsert can't tear
+        /// our iteration, then ship the snapshot.</para>
+        /// </summary>
+        public static void SendPlanetaryCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (client == null || state == null)
+                return;
+
+            AgencyPlanetaryEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(state.AgencyId))
+            {
+                snapshot = new AgencyPlanetaryEntry[state.PlanetaryEntries.Count];
+                var i = 0;
+                foreach (var kvp in state.PlanetaryEntries)
+                {
+                    if (kvp.Value == null) continue;
+                    snapshot[i++] = kvp.Value;
+                }
+                if (i < snapshot.Length)
+                    Array.Resize(ref snapshot, i);
+            }
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyPlanetaryStateMsgData>();
+            msgData.AgencyId = state.AgencyId;
+            msgData.EntryCount = snapshot.Length;
+            msgData.Entries = snapshot;
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+        }
+
         public static void BroadcastVisibilityChange(IReadOnlyList<VesselOwnershipChange> changes)
         {
             if (!AgencySystem.PerAgencyEnabled)

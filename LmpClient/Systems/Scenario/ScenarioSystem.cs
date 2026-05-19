@@ -174,6 +174,11 @@ namespace LmpClient.Systems.Scenario
         private static readonly HashSet<string> PerAgencyOnlyIgnoreSend = new HashSet<string>(StringComparer.Ordinal)
         {
             "KolonizationScenario",
+            // [Phase 3 Slice C] MKS planetary-logistics warehouse balances —
+            // routed per-agency under gate=on (AgencyPlanetaryRouter + projector
+            // splice). Under gate=off this entry is bypassed and the legacy 30s
+            // SHA pass continues unchanged (pre-Phase-3 behaviour preserved).
+            "PlanetaryLogisticsScenario",
         };
 
         /// <summary>

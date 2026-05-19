@@ -79,6 +79,12 @@ namespace Server.System.Agency
             // pattern same as STRATEGIES — each agency's projected scenario carries ONLY
             // their own KOLONY_ENTRY records under the KOLONIZATION container.
             "KolonizationScenario",
+            // [Phase 3 Slice C] MKS planetary-logistics warehouse projection.
+            // Same strip-then-splice — each agency's projected scenario carries
+            // ONLY their own LOGISTICS_ENTRY records under the PLANETARY_LOGISTICS
+            // container. Distinct partition shape from kolony (body-and-resource
+            // vs vessel-and-body) but same projector contract.
+            "PlanetaryLogisticsScenario",
         };
 
         // Precompiled regexes — one per key. Re-using compiled instances across every
@@ -167,6 +173,13 @@ namespace Server.System.Agency
                 // sees ONLY their own kolony research — spec §10 Q1.
                 case "KolonizationScenario":
                     return SpliceAgencyKolonyEntries(serializedText, targetAgency);
+                // [Phase 3 Slice C] MKS planetary-logistics scenario splice.
+                // Strip all shared LOGISTICS_ENTRY children under
+                // PLANETARY_LOGISTICS; splice in per-agency entries from
+                // AgencyState.PlanetaryEntries. Each agency sees ONLY their own
+                // planetary balances — spec §10 Q1.
+                case "PlanetaryLogisticsScenario":
+                    return SpliceAgencyPlanetaryEntries(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
@@ -655,6 +668,120 @@ namespace Server.System.Agency
                     kNode.CreateValue(new CfgNodeValue<string, string>("Rep", entry.Reputation.ToString("R", CultureInfo.InvariantCulture)));
                     kNode.CreateValue(new CfgNodeValue<string, string>("Funds", entry.Funds.ToString("R", CultureInfo.InvariantCulture)));
                     kolonyContainer.AddNode(kNode);
+                }
+                catch (Exception)
+                {
+                    // Per-entry isolation — drop this entry, keep others.
+                }
+            }
+
+            return node.ToString();
+        }
+
+        /// <summary>
+        /// [Phase 3 Slice C] Strip shared <c>PLANETARY_LOGISTICS → LOGISTICS_ENTRY</c>
+        /// child nodes and splice in per-agency entries. PlanetaryLogisticsScenario
+        /// shape (verified against MKS
+        /// <c>KolonyTools/PlanetaryLogistics/PlanetaryLogisticsPersistance.cs</c>
+        /// at SHA <c>ed0f6aa6</c>, Load lines 18-31 + Save lines 49-71):
+        /// <code>
+        /// PlanetaryLogisticsScenario {
+        ///     PLANETARY_LOGISTICS {
+        ///         LOGISTICS_ENTRY { BodyIndex=... ResourceName=... StoredQuantity=... }
+        ///         LOGISTICS_ENTRY { ... }
+        ///     }
+        /// }
+        /// </code>
+        ///
+        /// <para><b>Strip-then-splice</b> matches the
+        /// <see cref="SpliceAgencyKolonyEntries"/> pattern. Each agency's
+        /// projected scenario contains ONLY their own <c>LOGISTICS_ENTRY</c>
+        /// records — the shared scenario's pre-existing entries are stripped
+        /// out so an upgrade-in-place universe doesn't bleed its accumulated
+        /// shared planetary balances into every fresh per-agency client. The
+        /// boot-time
+        /// <see cref="AgencySystem.WarnAboutSharedPlanetaryOnUpgrade"/> + the
+        /// <see cref="AgencySystem.RefuseStartupIfUpgradeHazardWithoutOverride"/>
+        /// hazard-gate (Phase 3 Slice C) protect operators from silent data
+        /// loss; the override flag is the documented opt-in.</para>
+        ///
+        /// <para><b>Field-name mapping.</b> Unlike Slice B kolony (where the LMP
+        /// field <c>Reputation</c> maps to MKS' on-disk <c>Rep</c>), all four
+        /// planetary fields map 1:1 to MKS' field names: <c>OwningVesselId</c>
+        /// is fork-only (LMP-side addition not present in MKS' on-disk shape —
+        /// emit excluded from the projected scenario since KSP-side
+        /// <c>PlanetaryLogisticsEntry</c> has no such field;
+        /// <see cref="ResourceUtilities.LoadNodeProperties&lt;PlanetaryLogisticsEntry&gt;"/>
+        /// would silently ignore the extra key but emitting it is wire bloat
+        /// for no reader). <c>BodyIndex</c> / <c>ResourceName</c> /
+        /// <c>StoredQuantity</c> match MKS names exactly per
+        /// <c>PlanetaryLogisticsPersistance.Save</c> lines 63-65.</para>
+        ///
+        /// <para><b>Locale</b>: <c>StoredQuantity</c> emits via
+        /// <c>CultureInfo.InvariantCulture</c> + <c>"R"</c> round-trip
+        /// specifier so a comma-decimal server locale doesn't corrupt the
+        /// on-wire format. Mirrors the per-agency <see cref="AgencyState"/>
+        /// persistence convention.</para>
+        ///
+        /// <para><b>Per-entry isolation</b>: a malformed entry's failure is
+        /// logged + skipped, siblings continue. Whole-scenario parse failure
+        /// falls back to the input unchanged + logs at Error level (same
+        /// pattern as <see cref="SpliceAgencyKolonyEntries"/>) so a hung
+        /// handshake never blocks the player.</para>
+        /// </summary>
+        private static string SpliceAgencyPlanetaryEntries(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "PlanetaryLogisticsScenario" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:MKS-R2] PlanetaryLogisticsScenario projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Find or create PLANETARY_LOGISTICS container, strip its
+            // LOGISTICS_ENTRY children, splice in per-agency entries. Same
+            // shape as KOLONIZATION strip-and-splice.
+            var planetaryContainer = node.GetNode("PLANETARY_LOGISTICS")?.Value;
+            if (planetaryContainer == null)
+            {
+                planetaryContainer = new ConfigNode("") { Name = "PLANETARY_LOGISTICS" };
+                node.AddNode(planetaryContainer);
+            }
+            else
+            {
+                // .ToArray() snapshots the enumeration so RemoveNode during
+                // iteration doesn't invalidate the cursor (same pattern as
+                // KOLONY_ENTRY strip).
+                foreach (var existing in planetaryContainer.GetNodes("LOGISTICS_ENTRY").ToArray())
+                    planetaryContainer.RemoveNode(existing.Value);
+            }
+
+            AgencyPlanetaryEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+            {
+                snapshot = targetAgency.PlanetaryEntries.Values.ToArray();
+            }
+
+            foreach (var entry in snapshot)
+            {
+                if (entry == null)
+                    continue;
+                if (string.IsNullOrEmpty(entry.ResourceName))
+                    continue; // Empty-resource defensive — router gate should have caught this.
+                try
+                {
+                    var pNode = new ConfigNode("") { Name = "LOGISTICS_ENTRY" };
+                    // Field order matches MKS' PlanetaryLogisticsPersistance.Save (lines 63-65).
+                    // OwningVesselId is the LMP-side fork addition (not in MKS'
+                    // on-disk shape) — deliberately NOT emitted to the projected
+                    // scenario per the field-name mapping note in the XML above.
+                    pNode.CreateValue(new CfgNodeValue<string, string>("BodyIndex", entry.BodyIndex.ToString(CultureInfo.InvariantCulture)));
+                    pNode.CreateValue(new CfgNodeValue<string, string>("ResourceName", entry.ResourceName));
+                    pNode.CreateValue(new CfgNodeValue<string, string>("StoredQuantity", entry.StoredQuantity.ToString("R", CultureInfo.InvariantCulture)));
+                    planetaryContainer.AddNode(pNode);
                 }
                 catch (Exception)
                 {
