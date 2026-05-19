@@ -24,6 +24,7 @@ namespace LmpClient.Base
             PatchKolonizationManager();
             PatchModulePlanetaryLogistics();
             PatchOrbitalLogisticsTransferRequest();
+            PatchWolfDepot();
         }
 
         /// <summary>
@@ -329,6 +330,98 @@ namespace LmpClient.Base
             catch (Exception e)
             {
                 LunaLog.LogWarning($"[LMP]: [fix:MKS-R2] Could not patch KolonyTools.OrbitalLogisticsTransferRequest: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice B-2] WOLF-R4 — Patches three WOLF entry points with
+        /// per-agency depot mutation postfixes:
+        /// <list type="bullet">
+        ///   <item><c>WOLF.ScenarioPersister.CreateDepot(string body, string biome)</c>
+        ///        — emits the new (or existing-idempotent) depot's snapshot.</item>
+        ///   <item><c>WOLF.Depot.Establish()</c> — emits the depot post-flip
+        ///        to <c>IsEstablished = true</c>.</item>
+        ///   <item><c>WOLF.Depot.Survey()</c> — emits the depot post-flip
+        ///        to <c>IsSurveyed = true</c>.</item>
+        /// </list>
+        ///
+        /// <para><b>Negotiate postfixes deferred to Slice B-3</b> per pre-spec
+        /// §3.e — <c>Depot.NegotiateProvider</c> + <c>NegotiateConsumer</c>
+        /// fire at MKS resource-conversion cadence (every <c>FixedUpdate</c>
+        /// on a busy depot) and need a debounce layer (collect on tick,
+        /// batch-emit on 1s timer). Slice B-3 will add the debounce + the
+        /// two postfixes. Until then, ResourceStreams sync lags behind WOLF
+        /// UI by the 30s SHA cadence under gate=on — functionally correct on
+        /// the per-agency router's read side (ResourceStreams round-trip
+        /// through AgencyState persistence + projector emit) but visibly
+        /// stale in operator gameplay.</para>
+        ///
+        /// <para><b>Brittleness mitigation</b> (pre-spec §6 + the per-postfix
+        /// XML notes): WOLF type resolution via
+        /// <see cref="HarmonyLib.AccessTools.TypeByName"/> at boot. A single
+        /// <c>[fix:WOLF-R4]</c> warning fires on missing-type or signature-
+        /// rename and all three patches become no-ops for the session.
+        /// Graceful no-op when WOLF isn't installed — matches the MKS-R0 /
+        /// R1 / R2 self-disable pattern + single grep namespace.</para>
+        ///
+        /// <para><b>All-or-nothing on the three method resolves.</b> If
+        /// <c>CreateDepot</c> resolves but <c>Establish</c> doesn't, the
+        /// state-flip events would silently disappear and operators would
+        /// see depots register on creation but never advance to
+        /// Established/Surveyed under gate=on. Fail the entire patch group
+        /// in that case so the operator's signal is a single Warning
+        /// instead of "depots are slow to update, why?"</para>
+        /// </summary>
+        internal static void PatchWolfDepot()
+        {
+            try
+            {
+                var depotType = HarmonyLib.AccessTools.TypeByName("WOLF.Depot");
+                var persisterType = HarmonyLib.AccessTools.TypeByName("WOLF.ScenarioPersister");
+                if (depotType == null || persisterType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:WOLF-R4] WOLF.Depot / ScenarioPersister types not found — WOLF (MKS WOLF) not installed, skipping per-agency depot postfixes.");
+                    return;
+                }
+
+                var createMethod = HarmonyLib.AccessTools.Method(persisterType, "CreateDepot", new[] { typeof(string), typeof(string) });
+                var establishMethod = HarmonyLib.AccessTools.Method(depotType, "Establish", Type.EmptyTypes);
+                var surveyMethod = HarmonyLib.AccessTools.Method(depotType, "Survey", Type.EmptyTypes);
+
+                if (createMethod == null || establishMethod == null || surveyMethod == null)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: [fix:WOLF-R4] WOLF method resolve failed " +
+                        $"(CreateDepot={(createMethod != null ? "OK" : "MISSING")}, " +
+                        $"Establish={(establishMethod != null ? "OK" : "MISSING")}, " +
+                        $"Survey={(surveyMethod != null ? "OK" : "MISSING")}) — " +
+                        "WOLF version mismatch? Per-agency WOLF depot routing NOT active; " +
+                        "shared-mode WOLF broadcast continues but per-agency partition will not see runtime mutations.");
+                    return;
+                }
+
+                var createPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ScenarioPersister_CreateDepotPostfix),
+                    nameof(LmpClient.Harmony.ScenarioPersister_CreateDepotPostfix.Postfix));
+                var establishPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.Depot_EstablishPostfix),
+                    nameof(LmpClient.Harmony.Depot_EstablishPostfix.Postfix));
+                var surveyPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.Depot_SurveyPostfix),
+                    nameof(LmpClient.Harmony.Depot_SurveyPostfix.Postfix));
+
+                HarmonyInstance.Patch(createMethod, postfix: createPostfix);
+                HarmonyInstance.Patch(establishMethod, postfix: establishPostfix);
+                HarmonyInstance.Patch(surveyMethod, postfix: surveyPostfix);
+
+                LunaLog.Log(
+                    "[LMP]: [fix:WOLF-R4] Patched WOLF.ScenarioPersister.CreateDepot + " +
+                    "WOLF.Depot.Establish + WOLF.Depot.Survey — per-agency depot routing " +
+                    "active under PerAgencyCareerEnabled. (Negotiate postfixes deferred to Slice B-3.)");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF depot methods: {e.Message}");
             }
         }
 

@@ -122,6 +122,22 @@ namespace LmpClient.Systems.Agency
                     // stubs above.
                     LunaLog.Log("[Agency]: OrbitalState received — client mirror not yet wired (Phase 3 Slice D, 5.18-series follow-up).");
                     break;
+                case AgencyMessageType.WolfDepotState:
+                    // [Phase 4 Slice B-2] Same forward-compat stub as KolonyState /
+                    // PlanetaryState / OrbitalState. HandshakeSystem ships
+                    // AgencyWolfDepotStateMsgData unconditionally under gate=on
+                    // (even an empty dict) AND every per-mutation echo arrives
+                    // here from the AgencyWolfDepotRouter — without this case
+                    // existing 0.31-per-agency clients would log "Unknown
+                    // AgencyMessageType WolfDepotState" on every connect AND
+                    // every CreateDepot / Establish / Survey postfix-driven
+                    // server echo. A future Slice (B-3+) client mirror author
+                    // moves real apply logic into this branch (idempotent
+                    // upsert-by-"Body|Biome" + REPLACE semantics for the
+                    // catchup direction per the AgencyWolfDepotStateMsgData
+                    // XML).
+                    LunaLog.Log("[Agency]: WolfDepotState received — client mirror not yet wired (Phase 4 Slice B-2, future-slice follow-up).");
+                    break;
                 default:
                     LunaLog.LogWarning($"[Agency]: Unknown AgencyMessageType {msgData.AgencyMessageType} — dropping.");
                     break;

@@ -120,6 +120,19 @@ namespace Server.System.Agency
             // on asteroid; Body on wrapper; Name/Lat/Lon/Alt on anomaly per
             // DMScienceScenario.OnLoad parse contract).
             "DMScienceScenario",
+            // [Phase 4 Slice B-2] WOLF per-agency depot projection. Strip-then-
+            // splice for DEPOTS child of WOLF_ScenarioModule. Slices C-E add
+            // ROUTES / HOPPERS / TERMINALS / CREWROUTES emit alongside. The
+            // emit ORDER is DEPOTS FIRST (pre-spec §2.c) because WOLF's
+            // ScenarioPersister.OnLoad at line 288 has the comment
+            // "Depots need to be loaded first!" and Routes/CrewRoutes call
+            // _registry.GetDepot during OnLoad — if the projector emitted a
+            // Route or CrewRoute referencing a depot not in the agency's
+            // pool, WOLF would throw DepotDoesNotExistException + the scene
+            // load would hang. In Slice B-2 only DEPOTS are emitted; Slices
+            // C-E add the foreign-key integrity sweep when they bring the
+            // Route/Hopper/CrewRoute splices online.
+            "WOLF_ScenarioModule",
         };
 
         /// <summary>
@@ -260,6 +273,16 @@ namespace Server.System.Agency
                 // by BodyIndex into per-body DM_Anomaly_List wrappers.
                 case "DMScienceScenario":
                     return SpliceDMagicScienceIntoScenario(serializedText, targetAgency);
+                // [Phase 4 Slice B-2] WOLF scenario splice. Strip shared
+                // DEPOTS / ROUTES / HOPPERS / TERMINALS / CREWROUTES and
+                // splice in per-agency entries from AgencyState.WolfDepots
+                // (Slice B-2 emits DEPOTS only; Slices C-E extend
+                // SpliceAgencyWolfState to also handle ROUTES / HOPPERS /
+                // TERMINALS / CREWROUTES, each with its own foreign-key
+                // integrity sweep against the per-agency depot pool per
+                // pre-spec §2.c).
+                case "WOLF_ScenarioModule":
+                    return SpliceAgencyWolfState(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
@@ -1623,15 +1646,6 @@ namespace Server.System.Agency
             return pattern.Replace(serializedText, replacement, count: 1);
         }
 
-        // [Phase 4 Slice B-2] SpliceAgencyWolfState lands alongside the
-        // client-side Harmony postfixes on ScenarioPersister.CreateDepot /
-        // Depot.Establish / Survey / Negotiate* and the IgnoredScenarios
-        // filter for WOLF_ScenarioModule. Shipping the projector splice
-        // without the postfixes + filter would leave gate=on operators with
-        // empty per-agency WOLF UI (the splice strips shared state but no
-        // client-side path populates the per-agency dict). Atomic ship
-        // required per the §2.c contract.
-#if false
         /// <summary>
         /// [Phase 4 Slice B-2 — WOLF] Strip shared <c>WOLF_ScenarioModule</c>
         /// child node families and splice in per-agency entries. WOLF's
@@ -1773,6 +1787,5 @@ namespace Server.System.Agency
 
             return node.ToString();
         }
-#endif
     }
 }

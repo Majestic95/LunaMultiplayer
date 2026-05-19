@@ -190,6 +190,21 @@ namespace LmpClient.Systems.Scenario
             // letting the per-agency router + projector own the read+write
             // surface without racing the SHA broadcast.
             "ScenarioOrbitalLogistics",
+            // [Phase 4 Slice B-2] MKS WOLF logistics graph — routed per-agency
+            // under gate=on (AgencyWolfDepotRouter + projector splice for
+            // DEPOTS; Slices C-E add ROUTES / HOPPERS / TERMINALS /
+            // CREWROUTES emit to the same projector). Under gate=off this
+            // entry is bypassed and the legacy 30s SHA pass continues
+            // unchanged (pre-Phase-4 behaviour preserved). The companion
+            // client-side Harmony postfixes on ScenarioPersister.CreateDepot
+            // / Depot.Establish / Survey emit per-mutation per-agency wire
+            // in Slice B-2. The Depot.Negotiate* postfixes (debounced
+            // hot-path per pre-spec §3.e) are deferred to Slice B-3 — until
+            // then, ResourceStreams sync lags behind WOLF UI by the 30s
+            // SHA cadence under gate=on, but Depot.IsEstablished /
+            // IsSurveyed + depot creation events propagate immediately
+            // via the 3 postfixes that DID ship.
+            "WOLF_ScenarioModule",
         };
 
         /// <summary>

@@ -171,9 +171,13 @@
     <Compile Include="Harmony\ModuleDockingNode_DockToVessel.cs" />
     <Compile Include="Harmony\ModuleDockingNode_Undock.cs" />
     <Compile Include="Harmony\ModuleDockingNode_UndockSameVessel.cs" />
+    <Compile Include="Harmony\Depot_EstablishPostfix.cs" />
+    <Compile Include="Harmony\Depot_SurveyPostfix.cs" />
     <Compile Include="Harmony\KolonizationManager_TrackLogEntryPostfix.cs" />
     <Compile Include="Harmony\ModulePlanetaryLogistics_LevelResourcesPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsReflection.cs" />
+    <Compile Include="Harmony\ScenarioPersister_CreateDepotPostfix.cs" />
+    <Compile Include="Harmony\WolfDepotReflection.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_AbortPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPrefix.cs" />
@@ -293,6 +297,7 @@
     <Compile Include="Systems\Admin\AdminSystem.cs" />
     <Compile Include="Systems\Agency\AgencyLabelFormatter.cs" />
     <Compile Include="Systems\Agency\AgencyKolonySender.cs" />
+    <Compile Include="Systems\Agency\AgencyWolfDepotSender.cs" />
     <Compile Include="Systems\Agency\AgencyOrbitalSender.cs" />
     <Compile Include="Systems\Agency\AgencyPlanetarySender.cs" />
     <Compile Include="Systems\Agency\AgencyMembership.cs" />

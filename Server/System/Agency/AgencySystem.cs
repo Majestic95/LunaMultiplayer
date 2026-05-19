@@ -203,13 +203,7 @@ namespace Server.System.Agency
                 WarnAboutSharedOrbitalOnUpgrade();
                 WarnAboutSharedSCANsatOnUpgrade();
                 WarnAboutSharedDMagicOnUpgrade();
-                // [Phase 4 Slice B-2] WarnAboutSharedWolfOnUpgrade ships
-                // alongside the projector splice + Harmony postfixes — see
-                // the deferral note on the helper definition. Firing this
-                // warning + the matching hazard predicate before the
-                // projector strip path is wired would refuse boot for
-                // operators whose WOLF state would actually keep working
-                // (legacy SHA pass continues under partial Slice B).
+                WarnAboutSharedWolfOnUpgrade();
                 RefuseStartupIfUpgradeHazardWithoutOverride();
                 return;
             }
@@ -367,9 +361,18 @@ namespace Server.System.Agency
             // with accumulated DMagic state loses ALL of it.
             WarnAboutSharedDMagicOnUpgrade();
 
-            // [Phase 4 Slice B-2] WarnAboutSharedWolfOnUpgrade call lands
-            // alongside the projector splice + Harmony postfixes — see the
-            // deferral note on the helper definition.
+            // [Phase 4 Slice B-2] WOLF upgrade-lens diagnostic — under
+            // gate=on, the Slice B-2 projector strips ALL 5 WOLF child node
+            // families (CREWROUTES / DEPOTS / HOPPERS / ROUTES /
+            // TERMINALS) from WOLF_ScenarioModule on first per-agency
+            // connect. Operator flipping the gate on an upgrade universe
+            // with accumulated WOLF logistics graph loses ALL of it,
+            // including any mid-flight CrewRoutes (pre-spec §4.d kerbal-
+            // stranding hazard — kerbals on Boarding/Enroute routes
+            // become permanently Missing on the shared roster unless
+            // restored by hand before upgrade or by Slice E-F's
+            // deleteagency kerbal-restoration helper after upgrade).
+            WarnAboutSharedWolfOnUpgrade();
 
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
@@ -578,10 +581,31 @@ namespace Server.System.Agency
                     }
                 }
             }
-            // [Phase 4 Slice B-2] WOLF hazard predicate ships alongside the
-            // projector splice + Harmony postfixes. Until then the WOLF
-            // pass-through via the legacy SHA path is functionally correct
-            // (shared mode) so the hazard wouldn't be load-bearing here yet.
+            // [Phase 4 Slice B-2 / WOLF-R4] WOLF hazard predicate. Any
+            // shared WOLF_ScenarioModule child node family (CREWROUTES /
+            // DEPOTS / HOPPERS / ROUTES / TERMINALS) with at least one
+            // entry means the projector will strip on first per-agency
+            // connect, deleting the WOLF logistics graph + permanently
+            // orphaning any mid-flight CrewRoute passengers in
+            // RosterStatus.Missing. Same fail-closed posture as the other
+            // hazards. Per pre-spec §4.d, all 5 child families count —
+            // missing-any-one of them is a silent-pass gap (an operator
+            // with only TERMINALS state would boot into strip-on-first-
+            // connect without acknowledgment).
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("WOLF_ScenarioModule", out var wolfScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("WOLF_ScenarioModule"))
+                {
+                    if ((wolfScn.GetNode("DEPOTS")?.Value.GetNodes("DEPOT").Any() ?? false)
+                        || (wolfScn.GetNode("ROUTES")?.Value.GetNodes("ROUTE").Any() ?? false)
+                        || (wolfScn.GetNode("HOPPERS")?.Value.GetNodes("HOPPER").Any() ?? false)
+                        || (wolfScn.GetNode("TERMINALS")?.Value.GetNodes("TERMINAL").Any() ?? false)
+                        || (wolfScn.GetNode("CREWROUTES")?.Value.GetNodes("ROUTE").Any() ?? false))
+                    {
+                        hasHazard = true;
+                    }
+                }
+            }
             if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScn))
             {
                 lock (Scenario.ScenarioDataUpdater.GetSemaphore("ScenarioUpgradeableFacilities"))
