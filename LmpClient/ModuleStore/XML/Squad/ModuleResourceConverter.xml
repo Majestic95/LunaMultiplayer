@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<!--
+  Bridge XML for the BaseConverter inheritance chain.
+
+  KSP inheritance: PartModule -> BaseConverter -> ModuleResourceConverter -> USI_Converter.
+
+  FieldModuleStore.GetChildCustomizations propagates patches ONE LEVEL only
+  (FieldModuleStore.cs:79-96, "t.BaseType == moduleClass"). Without this file,
+  BaseConverter.xml reaches ModuleResourceConverter only; USI_Converter falls
+  outside the propagation and gets no patches at all -> converter recipe/state
+  never syncs across clients for any USI converter part.
+
+  This file is intentionally empty: the parent-recursive merge
+  (FieldModuleStore.AddParentsCustomizations, lines 103-113) folds
+  BaseConverter.xml's Fields and Methods into this definition at load time, and
+  the child-direct expansion then propagates the merged set to USI_Converter
+  (USITools/Converters/USI_Converter.cs:13-14 confirms USI_Converter :
+  ModuleResourceConverter) and any other direct subclass of
+  ModuleResourceConverter.
+
+  Pinned audit references (MKS x LMP compat handoff v3.2):
+    docs/research/mks-lmp-compatibility-handoff.md - section 4 (child propagation gap)
+    docs/research/mks-lmp-compatibility-handoff.md - section 7 Phase 1 step 1
+-->
+<ModuleDefinition xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+    <Fields></Fields>
+    <Methods></Methods>
+</ModuleDefinition>

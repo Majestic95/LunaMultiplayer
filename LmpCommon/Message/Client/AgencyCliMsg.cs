@@ -46,6 +46,12 @@ namespace LmpCommon.Message.Client
             [(ushort)AgencyMessageType.State] = typeof(AgencyStateMsgData),
             [(ushort)AgencyMessageType.Contract] = typeof(AgencyContractMsgData),
             [(ushort)AgencyMessageType.Visibility] = typeof(AgencyVisibilityMsgData),
+            // [Phase 3 Slice B] MUST stay in lockstep with AgencySrvMsg.cs — BUG-010 wire-symmetry rule.
+            [(ushort)AgencyMessageType.KolonyState] = typeof(AgencyKolonyStateMsgData),
+            // [Phase 3 Slice C] MUST stay in lockstep with AgencySrvMsg.cs — BUG-010 wire-symmetry rule.
+            [(ushort)AgencyMessageType.PlanetaryState] = typeof(AgencyPlanetaryStateMsgData),
+            // [Phase 3 Slice D] MUST stay in lockstep with AgencySrvMsg.cs — BUG-010 wire-symmetry rule.
+            [(ushort)AgencyMessageType.OrbitalState] = typeof(AgencyOrbitalStateMsgData),
         };
 
         public override ClientMessageType MessageType => ClientMessageType.Agency;

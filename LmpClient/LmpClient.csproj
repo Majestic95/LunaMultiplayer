@@ -171,6 +171,14 @@
     <Compile Include="Harmony\ModuleDockingNode_DockToVessel.cs" />
     <Compile Include="Harmony\ModuleDockingNode_Undock.cs" />
     <Compile Include="Harmony\ModuleDockingNode_UndockSameVessel.cs" />
+    <Compile Include="Harmony\KolonizationManager_TrackLogEntryPostfix.cs" />
+    <Compile Include="Harmony\ModulePlanetaryLogistics_LevelResourcesPostfix.cs" />
+    <Compile Include="Harmony\OrbitalLogisticsReflection.cs" />
+    <Compile Include="Harmony\OrbitalLogisticsTransferRequest_AbortPostfix.cs" />
+    <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPostfix.cs" />
+    <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPrefix.cs" />
+    <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DoFinalLaunchTasksPostfix.cs" />
+    <Compile Include="Harmony\ModuleLogisticsConsumer_DepotListPostfix.cs" />
     <Compile Include="Harmony\ContractPreLoader_Filter.cs" />
     <Compile Include="Harmony\ContractSystem_LoadContract.cs" />
     <Compile Include="Harmony\ContractSystem_OnAwake.cs" />
@@ -284,10 +292,14 @@
     <Compile Include="Systems\Admin\AdminMessageSender.cs" />
     <Compile Include="Systems\Admin\AdminSystem.cs" />
     <Compile Include="Systems\Agency\AgencyLabelFormatter.cs" />
+    <Compile Include="Systems\Agency\AgencyKolonySender.cs" />
+    <Compile Include="Systems\Agency\AgencyOrbitalSender.cs" />
+    <Compile Include="Systems\Agency\AgencyPlanetarySender.cs" />
     <Compile Include="Systems\Agency\AgencyMembership.cs" />
     <Compile Include="Systems\Agency\AgencyMessageHandler.cs" />
     <Compile Include="Systems\Agency\AgencyMessageSender.cs" />
     <Compile Include="Systems\Agency\AgencySystem.cs" />
+    <Compile Include="Systems\Agency\OrbitalDeliveryGate.cs" />
     <Compile Include="Systems\AsteroidComet\AsteroidCometEvents.cs" />
     <Compile Include="Systems\Label\LabelEvents.cs" />
     <Compile Include="Systems\Label\LabelSystem.cs" />
@@ -580,6 +592,7 @@
     <Compile Include="Windows\Systems\SystemsWindow.cs" />
     <Compile Include="Utilities\InstallChecker.cs" />
     <Compile Include="Systems\Warp\WarpSystem.cs" />
+    <Compile Include="Systems\Warp\KolonyProximityWarpRoutine.cs" />
     <Compile Include="Windows\Debug\DebugDrawer.cs" />
     <Compile Include="Windows\Debug\DebugWindow.cs" />
     <Compile Include="Windows\Mod\ModDrawer.cs" />
@@ -873,6 +886,9 @@
     <Content Include="ModuleStore\XML\Squad\ModuleDeployablePart.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleDeployableSolarPanel.xml" />
     <Content Include="ModuleStore\XML\Squad\BaseConverter.xml" />
+    <Content Include="ModuleStore\XML\Squad\ModuleResourceConverter.xml" />
+    <Content Include="ModuleStore\XML\USI\MKSModule.xml" />
+    <Content Include="ModuleStore\XML\USI\ModuleOrbitalLogistics.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleCommand.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleParachute.xml" />
     <Content Include="ModuleStore\XML\Squad\ModuleEngines.xml" />

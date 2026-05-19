@@ -64,6 +64,64 @@ namespace LmpClient.Systems.Agency
                     // already log-drops it.
                     LunaLog.LogWarning("[Agency]: Dropping inbound CreateRequest (S→C-illegal subtype).");
                     break;
+                case AgencyMessageType.KolonyState:
+                    // [Phase 3 Slice B] Stub forward-compat. The kolony client mirror
+                    // is deferred to a 5.18-series follow-up; the catch-up path on the
+                    // server (HandshakeSystem) sends an AgencyKolonyStateMsgData
+                    // unconditionally under gate=on (even an empty dict, by design —
+                    // see AgencyKolonyStateMsgData XML). Without this case the
+                    // existing 0.31-per-agency client would log "Unknown
+                    // AgencyMessageType KolonyState — dropping." every connect AND
+                    // every kolony mutation echo. Debug-level (not Warning) because
+                    // the message is a server-known-correct push; a future Slice B+
+                    // client mirror author moves real apply logic into this branch
+                    // following the AgencyContractMsgData/HandleContract precedent.
+                    // [Phase 3 Slice C / consumer-lens MUST FIX #4 — partial
+                    // apply.] The reviewer flagged log noise on every connect
+                    // (kolony + planetary stubs both fire under gate=on
+                    // unconditional catchup). The right downgrade target
+                    // would be LogDebug — but client-side LunaLog has no
+                    // LogDebug method (only Log / LogWarning / LogError;
+                    // verified at LmpClient/LunaLog.cs:43-67). Defer the
+                    // proper downgrade to a follow-up that adds
+                    // LunaLog.LogDebug as a sibling. Until then accept the
+                    // 2-lines-per-connect log presence: it surfaces the
+                    // "client mirror is deferred" status to 5.18-series
+                    // testers and operators investigating per-agency MKS
+                    // sync gaps, which is operationally useful information.
+                    LunaLog.Log("[Agency]: KolonyState received — client mirror not yet wired (Phase 3 Slice B, 5.18-series follow-up).");
+                    break;
+                case AgencyMessageType.PlanetaryState:
+                    // [Phase 3 Slice C] Same forward-compat stub as KolonyState.
+                    // HandshakeSystem ships AgencyPlanetaryStateMsgData
+                    // unconditionally under gate=on (even an empty dict) — without
+                    // this case existing 0.31-per-agency clients would log
+                    // "Unknown AgencyMessageType PlanetaryState" every connect.
+                    // A future Slice C+ client mirror author moves real apply
+                    // logic into this branch.
+                    // Same LogDebug-deferral rationale as the kolony stub
+                    // above (consumer-lens MUST FIX #4).
+                    LunaLog.Log("[Agency]: PlanetaryState received — client mirror not yet wired (Phase 3 Slice C, 5.18-series follow-up).");
+                    break;
+                case AgencyMessageType.OrbitalState:
+                    // [Phase 3 Slice D-1] Same forward-compat stub as KolonyState /
+                    // PlanetaryState. HandshakeSystem ships AgencyOrbitalStateMsgData
+                    // unconditionally under gate=on (even an empty dict) — without
+                    // this case existing 0.31-per-agency clients would log
+                    // "Unknown AgencyMessageType OrbitalState" every connect.
+                    // Slice D-2 will add the client-side emit path
+                    // (AgencyOrbitalSender from state-machine postfixes + the
+                    // Deliver-prefix gate-state-independent skip authority); this
+                    // stub stays in place across D-1 → D-2 because the catch-up
+                    // direction (S→C) is what triggers Unknown-subtype log spam,
+                    // and that direction is shipping in D-1. A future Slice D+
+                    // client mirror author moves real apply logic into this
+                    // branch (idempotent upsert-by-TransferGuid per pre-spec
+                    // §2.b.iii).
+                    // Same LogDebug-deferral rationale as the kolony / planetary
+                    // stubs above.
+                    LunaLog.Log("[Agency]: OrbitalState received — client mirror not yet wired (Phase 3 Slice D, 5.18-series follow-up).");
+                    break;
                 default:
                     LunaLog.LogWarning($"[Agency]: Unknown AgencyMessageType {msgData.AgencyMessageType} — dropping.");
                     break;

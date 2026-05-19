@@ -151,7 +151,49 @@ namespace LmpClient.Systems.Scenario
         }
 
         /// <summary>
-        /// This transforms the scenarioModule to a config node. We cannot do this in another thread as Lingoona 
+        /// [Phase 3 Slice B] Scenario module names that the legacy 30s SHA pass
+        /// must SUPPRESS when per-agency mode is active (gate=on). Under gate=on,
+        /// these scenarios route through their respective per-agency router +
+        /// owner-only echo + per-client projection — letting the SHA pass also
+        /// broadcast them would (a) leak cross-agency state via the shared
+        /// scenario, (b) fight the projector by overwriting the per-agency
+        /// canonical with shared-mode contents on every 30s tick.
+        ///
+        /// <para><b>Option B (pre-spec §3.g): runtime check at the call site,
+        /// not a static extension of <c>IgnoredScenarios.IgnoreSend</c>.</b>
+        /// The static list represents permanent design decisions (Funding etc.
+        /// always use the Share* wire); these Phase 3 scenarios are dual-mode
+        /// (gate=off keeps the SHA pass, gate=on routes per-agency). Keeping
+        /// the dynamic gate-conditional logic local to the consumer makes the
+        /// LmpCommon contract a permanent shape — fewer cross-project ripple
+        /// effects when Slice C/D add their own scenarios.</para>
+        ///
+        /// <para>Slices C/D append <c>"PlanetaryLogisticsScenario"</c> +
+        /// <c>"ScenarioOrbitalLogistics"</c> to this set.</para>
+        /// </summary>
+        private static readonly HashSet<string> PerAgencyOnlyIgnoreSend = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "KolonizationScenario",
+            // [Phase 3 Slice C] MKS planetary-logistics warehouse balances —
+            // routed per-agency under gate=on (AgencyPlanetaryRouter + projector
+            // splice). Under gate=off this entry is bypassed and the legacy 30s
+            // SHA pass continues unchanged (pre-Phase-3 behaviour preserved).
+            "PlanetaryLogisticsScenario",
+            // [Phase 3 Slice D-1] MKS orbital-logistics transfer queue — routed
+            // per-agency under gate=on (AgencyOrbitalRouter + projector splice).
+            // Under gate=off this entry is bypassed and the legacy 30s SHA pass
+            // continues unchanged. The companion Deliver-prefix
+            // (OrbitalLogisticsTransferRequest_DeliverPrefix, Slice D-2) runs
+            // GATE-STATE-INDEPENDENT — it closes the per-frame double-spend
+            // (pre-spec §1.c) under both gates. This suppression entry only
+            // affects the broadcast direction (the 30s SHA pass) under gate=on,
+            // letting the per-agency router + projector own the read+write
+            // surface without racing the SHA broadcast.
+            "ScenarioOrbitalLogistics",
+        };
+
+        /// <summary>
+        /// This transforms the scenarioModule to a config node. We cannot do this in another thread as Lingoona
         /// is called sometimes and that makes a hard crash
         /// </summary>
         private static void ParseModulesToConfigNodes(IEnumerable<ScenarioModule> modules)
@@ -162,6 +204,16 @@ namespace LmpClient.Systems.Scenario
                 var scenarioType = scenarioModule.GetType().Name;
 
                 if (IgnoredScenarios.IgnoreSend.Contains(scenarioType))
+                    continue;
+
+                // [Phase 3 Slice B] Gate-conditional suppression. Under gate=on
+                // the per-agency routers + projector own the kolony / planetary
+                // / orbital scenario flow; the legacy 30s SHA pass must stay
+                // out of their way. Under gate=off these scenarios continue to
+                // broadcast unchanged (pre-Phase-3 baseline preserved). See
+                // PerAgencyOnlyIgnoreSend XML for the dual-mode rationale.
+                if (SettingsSystem.ServerSettings.PerAgencyCareerEnabled
+                    && PerAgencyOnlyIgnoreSend.Contains(scenarioType))
                     continue;
 
                 if (!IsScenarioModuleAllowed(scenarioType))

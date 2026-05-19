@@ -1,5 +1,7 @@
+using LmpCommon.Message.Data.Agency;
 using LunaConfigNode.CfgNode;
 using Server.Context;
+using Server.Log;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -150,6 +152,57 @@ namespace Server.System.Agency
         /// </summary>
         public Dictionary<string, float> FacilityLevels { get; } =
             new Dictionary<string, float>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Phase 3 Slice A] Per-agency kolonization research entries (MKS
+        /// <c>KolonyTools.KolonizationManager.KolonizationInfo</c>). Keyed by
+        /// <c>$"{vesselId:N}|{bodyIndex}"</c> — the per-vessel partition lets admin
+        /// <c>transferagency</c> migrate kolony research with the vessel
+        /// (operator sign-off session 25 Q1). Populated by Phase 3
+        /// <c>AgencyKolonyRouter</c> (Slice B) and projected into outgoing
+        /// <c>KolonizationScenario</c> blobs by <see cref="AgencyScenarioProjector"/>
+        /// (Slice B). Persisted under a <c>KOLONY_ENTRIES</c> child node.
+        ///
+        /// **Concurrency contract** (same shape as <see cref="TechNodes"/>):
+        /// mutations AND reads MUST hold <see cref="AgencySystem.GetAgencyLock"/>.
+        /// Dictionary's non-concurrent enumerator throws (or worse) on a mid-
+        /// iteration mutation; the per-agency lock is the only safe enumeration
+        /// path.
+        /// </summary>
+        public Dictionary<string, AgencyKolonyEntry> KolonyEntries { get; } =
+            new Dictionary<string, AgencyKolonyEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Phase 3 Slice A] Per-agency planetary-logistics warehouse pool (MKS
+        /// <c>PlanetaryLogistics.PlanetaryLogisticsManager.PlanetaryLogisticsInfo</c>).
+        /// Keyed by <c>$"{bodyIndex}|{resourceName}"</c> — body-resource-keyed,
+        /// NOT vessel-keyed. Per pre-spec §4.e, planetary entries do NOT migrate
+        /// on <c>transferagency</c> (the entry represents a body's pool, not a
+        /// vessel's contribution). Populated by Phase 3 <c>AgencyPlanetaryRouter</c>
+        /// (Slice C); projected into outgoing <c>PlanetaryLogisticsScenario</c>
+        /// blobs (Slice C). Persisted under a <c>PLANETARY_ENTRIES</c> child node.
+        ///
+        /// **Concurrency contract**: same as <see cref="KolonyEntries"/>.
+        /// </summary>
+        public Dictionary<string, AgencyPlanetaryEntry> PlanetaryEntries { get; } =
+            new Dictionary<string, AgencyPlanetaryEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Phase 3 Slice A] Per-agency orbital-logistics transfer queue (MKS
+        /// <c>KolonyTools.ScenarioOrbitalLogistics.PendingTransfers</c> +
+        /// <c>ExpiredTransfers</c> projected per-agency). Keyed by
+        /// <see cref="AgencyOrbitalTransferEntry.TransferGuid"/>. Populated by
+        /// Phase 3 <c>AgencyOrbitalRouter</c> (Slice D) on transfer state-machine
+        /// transitions; projected into outgoing <c>ScenarioOrbitalLogistics</c>
+        /// blobs (Slice D). Persisted under an <c>ORBITAL_TRANSFERS</c> child node.
+        /// Per pre-spec §4.e: on <c>transferagency</c>, transfers where the
+        /// moved vessel is the Destination MIGRATE; transfers where the moved
+        /// vessel is the Origin stay in the source agency.
+        ///
+        /// **Concurrency contract**: same as <see cref="KolonyEntries"/>.
+        /// </summary>
+        public Dictionary<Guid, AgencyOrbitalTransferEntry> OrbitalTransfers { get; } =
+            new Dictionary<Guid, AgencyOrbitalTransferEntry>();
 
         /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
@@ -358,6 +411,87 @@ namespace Server.System.Agency
                     }
                     facRoot.CreateValue(new CfgNodeValue<string, string>(kvp.Key,
                         kvp.Value.ToString(CultureInfo.InvariantCulture)));
+                }
+            }
+
+            // [Phase 3 Slice A] Kolony entries — one KOLONY sub-node per entry.
+            // Plain numeric values, no Base64 (the entry is not a wire-compressed
+            // payload). All doubles use invariant culture per the BUG-013 precedent
+            // pinned by AgencyStateTest.Serialize_UsesInvariantCultureForDoubles.
+            // Emitted only when non-empty so a pristine 5.14c-era agency file stays
+            // visually identical (same convention as CONTRACTS at line 199).
+            if (KolonyEntries.Count > 0)
+            {
+                var kolonyRoot = new ConfigNode("") { Name = "KOLONY_ENTRIES" };
+                node.AddNode(kolonyRoot);
+                foreach (var entry in KolonyEntries.Values)
+                {
+                    if (entry == null)
+                        continue;
+                    var kNode = new ConfigNode("") { Name = "KOLONY" };
+                    kNode.CreateValue(new CfgNodeValue<string, string>("VesselId", entry.VesselId ?? string.Empty));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("BodyIndex", entry.BodyIndex.ToString(CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("LastUpdate", entry.LastUpdate.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("KolonyDate", entry.KolonyDate.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("GeologyResearch", entry.GeologyResearch.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("BotanyResearch", entry.BotanyResearch.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("KolonizationResearch", entry.KolonizationResearch.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("Science", entry.Science.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("Reputation", entry.Reputation.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("Funds", entry.Funds.ToString("R", CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("RepBoosters", entry.RepBoosters.ToString(CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("FundsBoosters", entry.FundsBoosters.ToString(CultureInfo.InvariantCulture)));
+                    kNode.CreateValue(new CfgNodeValue<string, string>("ScienceBoosters", entry.ScienceBoosters.ToString(CultureInfo.InvariantCulture)));
+                    kolonyRoot.AddNode(kNode);
+                }
+            }
+
+            // [Phase 3 Slice A] Planetary entries — one PLANETARY sub-node per
+            // entry. OwningVesselId persisted as Guid "N" format for consistency
+            // with the agency-file naming convention.
+            if (PlanetaryEntries.Count > 0)
+            {
+                var planetaryRoot = new ConfigNode("") { Name = "PLANETARY_ENTRIES" };
+                node.AddNode(planetaryRoot);
+                foreach (var entry in PlanetaryEntries.Values)
+                {
+                    if (entry == null)
+                        continue;
+                    var pNode = new ConfigNode("") { Name = "PLANETARY" };
+                    pNode.CreateValue(new CfgNodeValue<string, string>("OwningVesselId", entry.OwningVesselId.ToString("N", CultureInfo.InvariantCulture)));
+                    pNode.CreateValue(new CfgNodeValue<string, string>("BodyIndex", entry.BodyIndex.ToString(CultureInfo.InvariantCulture)));
+                    pNode.CreateValue(new CfgNodeValue<string, string>("ResourceName", entry.ResourceName ?? string.Empty));
+                    pNode.CreateValue(new CfgNodeValue<string, string>("StoredQuantity", entry.StoredQuantity.ToString("R", CultureInfo.InvariantCulture)));
+                    planetaryRoot.AddNode(pNode);
+                }
+            }
+
+            // [Phase 3 Slice A] Orbital transfers — one TRANSFER sub-node per
+            // entry. PayloadBytes is Base64-encoded decompressed form (matches
+            // the Stage 5.17d Contracts pattern at line 199 — operators diffing
+            // two AgencyState files see readable payloads; compression is a
+            // wire-only concern). Status persisted as raw int (opaque to server;
+            // client maps to MKS' DeliveryStatus enum at projection time).
+            if (OrbitalTransfers.Count > 0)
+            {
+                var orbitalRoot = new ConfigNode("") { Name = "ORBITAL_TRANSFERS" };
+                node.AddNode(orbitalRoot);
+                foreach (var entry in OrbitalTransfers.Values)
+                {
+                    if (entry == null)
+                        continue;
+                    var oNode = new ConfigNode("") { Name = "TRANSFER" };
+                    oNode.CreateValue(new CfgNodeValue<string, string>("TransferGuid", entry.TransferGuid.ToString("N", CultureInfo.InvariantCulture)));
+                    oNode.CreateValue(new CfgNodeValue<string, string>("OriginVesselId", entry.OriginVesselId.ToString("N", CultureInfo.InvariantCulture)));
+                    oNode.CreateValue(new CfgNodeValue<string, string>("DestinationVesselId", entry.DestinationVesselId.ToString("N", CultureInfo.InvariantCulture)));
+                    oNode.CreateValue(new CfgNodeValue<string, string>("Status", entry.Status.ToString(CultureInfo.InvariantCulture)));
+                    oNode.CreateValue(new CfgNodeValue<string, string>("StartTime", entry.StartTime.ToString("R", CultureInfo.InvariantCulture)));
+                    oNode.CreateValue(new CfgNodeValue<string, string>("Duration", entry.Duration.ToString("R", CultureInfo.InvariantCulture)));
+                    var dataBytes = entry.PayloadBytes ?? Array.Empty<byte>();
+                    var len = Math.Min(entry.NumBytes, dataBytes.Length);
+                    var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
+                    oNode.CreateValue(new CfgNodeValue<string, string>("PayloadBytes", base64));
+                    orbitalRoot.AddNode(oNode);
                 }
             }
 
@@ -628,6 +762,178 @@ namespace Server.System.Agency
                 }
             }
 
+            // [Phase 3 Slice A] Kolony entries parse — KOLONY_ENTRIES is a
+            // Phase 3 addition. Older AgencyState files predate it and load
+            // with an empty KolonyEntries dict (forward-compat). Per-entry
+            // isolation: missing required fields (VesselId / BodyIndex) skip
+            // the slot with a [fix:MKS-R2] LunaLog.Warning so operator hand-edits
+            // produce a visible trace (review-finding-#3 — silent drop would be
+            // an operability gap matching the 5.17d router's per-entry log
+            // pattern at AgencyContractRouter.cs:119-122). Malformed numerics
+            // default to 0 via ParseDoubleOrZero / ParseIntOrZero. Duplicate
+            // dict keys keep the LAST occurrence (Dictionary indexer overwrites
+            // — operator hand-edit case). VesselId is normalized to Guid "N"
+            // form when parseable so the dict key matches what the future
+            // Slice B router emits (pre-spec §2.f promise + review-finding-#1);
+            // raw-string fallback preserves the existing key for hand-edited
+            // pre-Slice-B test data + handles MKS quirks where VesselId may
+            // not be a clean Guid.
+            var kolonyRoot = node.GetNode("KOLONY_ENTRIES")?.Value;
+            if (kolonyRoot != null)
+            {
+                foreach (var kEntry in kolonyRoot.GetNodes("KOLONY"))
+                {
+                    var entryNode = kEntry.Value;
+                    var rawVesselId = entryNode.GetValue("VesselId")?.Value;
+                    if (string.IsNullOrEmpty(rawVesselId))
+                    {
+                        LunaLog.Warning("[fix:MKS-R2] KOLONY entry skipped: missing VesselId");
+                        continue;
+                    }
+                    if (!int.TryParse(entryNode.GetValue("BodyIndex")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bodyIndex))
+                    {
+                        LunaLog.Warning($"[fix:MKS-R2] KOLONY entry skipped: unparseable BodyIndex (VesselId={rawVesselId})");
+                        continue;
+                    }
+
+                    // Normalize VesselId to Guid "N" form when the raw value is a
+                    // valid Guid in any standard format — guarantees Slice B routers
+                    // and hand-edited files converge on the same dict key.
+                    var vesselId = Guid.TryParse(rawVesselId, out var vesselGuid)
+                        ? vesselGuid.ToString("N", CultureInfo.InvariantCulture)
+                        : rawVesselId;
+
+                    var entry = new AgencyKolonyEntry
+                    {
+                        VesselId = vesselId,
+                        BodyIndex = bodyIndex,
+                        LastUpdate = ParseDoubleOrZero(entryNode.GetValue("LastUpdate")?.Value),
+                        KolonyDate = ParseDoubleOrZero(entryNode.GetValue("KolonyDate")?.Value),
+                        GeologyResearch = ParseDoubleOrZero(entryNode.GetValue("GeologyResearch")?.Value),
+                        BotanyResearch = ParseDoubleOrZero(entryNode.GetValue("BotanyResearch")?.Value),
+                        KolonizationResearch = ParseDoubleOrZero(entryNode.GetValue("KolonizationResearch")?.Value),
+                        Science = ParseDoubleOrZero(entryNode.GetValue("Science")?.Value),
+                        Reputation = ParseDoubleOrZero(entryNode.GetValue("Reputation")?.Value),
+                        Funds = ParseDoubleOrZero(entryNode.GetValue("Funds")?.Value),
+                        RepBoosters = ParseIntOrZero(entryNode.GetValue("RepBoosters")?.Value),
+                        FundsBoosters = ParseIntOrZero(entryNode.GetValue("FundsBoosters")?.Value),
+                        ScienceBoosters = ParseIntOrZero(entryNode.GetValue("ScienceBoosters")?.Value),
+                    };
+
+                    state.KolonyEntries[$"{vesselId}|{bodyIndex.ToString(CultureInfo.InvariantCulture)}"] = entry;
+                }
+            }
+
+            // [Phase 3 Slice A] Planetary entries parse — PLANETARY_ENTRIES is
+            // a Phase 3 addition. Same forward-compat shape as KOLONY_ENTRIES.
+            // Per-entry isolation: missing or unparseable OwningVesselId Guid
+            // / BodyIndex / ResourceName skip the slot with a [fix:MKS-R2]
+            // LunaLog.Warning per review-finding-#3.
+            var planetaryRoot = node.GetNode("PLANETARY_ENTRIES")?.Value;
+            if (planetaryRoot != null)
+            {
+                foreach (var pEntry in planetaryRoot.GetNodes("PLANETARY"))
+                {
+                    var entryNode = pEntry.Value;
+                    var rawOwningVesselId = entryNode.GetValue("OwningVesselId")?.Value;
+                    if (!Guid.TryParse(rawOwningVesselId, out var owningVesselId))
+                    {
+                        LunaLog.Warning($"[fix:MKS-R2] PLANETARY entry skipped: unparseable OwningVesselId ({rawOwningVesselId ?? "<null>"})");
+                        continue;
+                    }
+                    if (!int.TryParse(entryNode.GetValue("BodyIndex")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bodyIndex))
+                    {
+                        LunaLog.Warning($"[fix:MKS-R2] PLANETARY entry skipped: unparseable BodyIndex (OwningVesselId={owningVesselId:N})");
+                        continue;
+                    }
+                    var resourceName = entryNode.GetValue("ResourceName")?.Value;
+                    if (string.IsNullOrEmpty(resourceName))
+                    {
+                        LunaLog.Warning($"[fix:MKS-R2] PLANETARY entry skipped: missing ResourceName (OwningVesselId={owningVesselId:N})");
+                        continue;
+                    }
+
+                    var entry = new AgencyPlanetaryEntry
+                    {
+                        OwningVesselId = owningVesselId,
+                        BodyIndex = bodyIndex,
+                        ResourceName = resourceName,
+                        StoredQuantity = ParseDoubleOrZero(entryNode.GetValue("StoredQuantity")?.Value),
+                    };
+
+                    state.PlanetaryEntries[$"{bodyIndex.ToString(CultureInfo.InvariantCulture)}|{resourceName}"] = entry;
+                }
+            }
+
+            // [Phase 3 Slice A] Orbital transfers parse — ORBITAL_TRANSFERS is
+            // a Phase 3 addition. Per-entry isolation: missing TransferGuid
+            // skips with [fix:MKS-R2] LunaLog.Warning (review-finding-#3);
+            // malformed Base64 PayloadBytes reduces to empty + NumBytes=0
+            // (matches the Contracts per-entry rule at line 444-451) so the slot
+            // is observable (operator can see "this transfer's payload is broken")
+            // without aborting the parent agency load.
+            var orbitalRoot = node.GetNode("ORBITAL_TRANSFERS")?.Value;
+            if (orbitalRoot != null)
+            {
+                foreach (var oEntry in orbitalRoot.GetNodes("TRANSFER"))
+                {
+                    var entryNode = oEntry.Value;
+                    var rawTransferGuid = entryNode.GetValue("TransferGuid")?.Value;
+                    if (!Guid.TryParse(rawTransferGuid, out var transferGuid))
+                    {
+                        LunaLog.Warning($"[fix:MKS-R2] TRANSFER entry skipped: unparseable TransferGuid ({rawTransferGuid ?? "<null>"})");
+                        continue;
+                    }
+                    Guid.TryParse(entryNode.GetValue("OriginVesselId")?.Value, out var originVesselId);
+                    Guid.TryParse(entryNode.GetValue("DestinationVesselId")?.Value, out var destinationVesselId);
+
+                    var entry = new AgencyOrbitalTransferEntry
+                    {
+                        TransferGuid = transferGuid,
+                        OriginVesselId = originVesselId,
+                        DestinationVesselId = destinationVesselId,
+                        Status = ParseIntOrZero(entryNode.GetValue("Status")?.Value),
+                        StartTime = ParseDoubleOrZero(entryNode.GetValue("StartTime")?.Value),
+                        Duration = ParseDoubleOrZero(entryNode.GetValue("Duration")?.Value),
+                    };
+
+                    var base64 = entryNode.GetValue("PayloadBytes")?.Value;
+                    if (!string.IsNullOrEmpty(base64))
+                    {
+                        try
+                        {
+                            entry.PayloadBytes = Convert.FromBase64String(base64);
+                            entry.NumBytes = entry.PayloadBytes.Length;
+                            // [Upgrade-lens MF2 / MKS-R2] Operator hand-edit /
+                            // future MKS-version-with-larger-blobs safety: clamp
+                            // PayloadBytes to the wire MaxPayloadBytes so the
+                            // SendOrbitalCatchupTo path can never produce a wire
+                            // payload larger than the receiver will accept. The
+                            // wire deserialize throws InvalidDataException above
+                            // MaxPayloadBytes, which would disconnect a player at
+                            // handshake completion (silent kick-loop). Truncate
+                            // here with a Warning + keep the entry observable so
+                            // the operator can investigate the oversized blob
+                            // before deciding whether to manually drain or
+                            // archive.
+                            if (entry.NumBytes > AgencyOrbitalTransferEntry.MaxPayloadBytes)
+                            {
+                                LunaLog.Warning($"[fix:MKS-R2] TRANSFER entry PayloadBytes truncated from {entry.NumBytes} to MaxPayloadBytes={AgencyOrbitalTransferEntry.MaxPayloadBytes} bytes (TransferGuid={transferGuid:N}). Hand-edit or future MKS-version with larger TRANSFER blobs — re-verify wire compat or drain the affected transfer.");
+                                entry.NumBytes = AgencyOrbitalTransferEntry.MaxPayloadBytes;
+                            }
+                        }
+                        catch (FormatException)
+                        {
+                            LunaLog.Warning($"[fix:MKS-R2] TRANSFER entry kept with empty PayloadBytes: unparseable Base64 (TransferGuid={transferGuid:N})");
+                            entry.PayloadBytes = Array.Empty<byte>();
+                            entry.NumBytes = 0;
+                        }
+                    }
+
+                    state.OrbitalTransfers[transferGuid] = entry;
+                }
+            }
+
             return state;
         }
 
@@ -636,6 +942,13 @@ namespace Server.System.Agency
             if (string.IsNullOrEmpty(raw))
                 return 0d;
             return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : 0d;
+        }
+
+        private static int ParseIntOrZero(string raw)
+        {
+            if (string.IsNullOrEmpty(raw))
+                return 0;
+            return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
         }
     }
 }

@@ -273,7 +273,14 @@ New settings: add a field with `[XmlElement]` and a default value, then verify r
 
 ## Admin Commands (`Server/Command/Command/`)
 
-18 commands: `backup`, `restoreBackup`, `ban`, `kick`, `say`, `nuke`, `dekessler`, `clearvessels`, `vessel`, `cleancontracts`, `setfunds`, `setscience`, `changesettings`, `countclients`, `listclients`, `listlocks`, `connectionstats`, `displayhelp`, `restartserver`.
+23 commands registered in [`CommandHandler.cs:RegisterCommands`](Server/Command/CommandHandler.cs): `backup`, `ban`, `changesettings`, `cleancontracts`, `clearvessels`, `connectionstats`, `countclients`, `dekessler`, `deleteagency`, `help`, `kick`, `listagencies`, `listclients`, `listlocks`, `nukeksc`, `restartserver`, `say`, `setagency`, `setfunds`, `setscience`, `setvesselagency`, `transferagency`, `vessel`.
+
+Per-agency-career family (Stage 5.18d + Phase 3 closer):
+- `listagencies` (5.18d) — read-only registry dump
+- `setagency funds|science|reputation <token> <amount>` (5.18d) — scalar mutation
+- `transferagency <agency> <new-owner>` (5.18d) — owner-RENAME only; preserves AgencyId + vessel stamps
+- `deleteagency <agency> --confirm` (5.18d) — destructive, demotes vessels to Unassigned sentinel
+- `setvesselagency <vessel-guid> <agency-token>` (Phase 3 Slice E-2, MKS-aware) — REASSIGNS a single vessel's `lmpOwningAgency` stamp; migrates per-router MKS partitions per pre-spec §4.e (kolony entries MOVE; orbital transfers MOVE if vessel is Destination, KEEP-in-source if Origin-only; planetary entries NO-MIGRATE per Q2); releases stale vessel-scoped locks; broadcasts `AgencyVisibilityMsgData` to all clients; scans third-agency orbital transfers for stranded cross-references
 
 Mutating commands should default to non-destructive (precedent: `BackupCommand` requires explicit subcommands).
 

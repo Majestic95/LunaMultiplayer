@@ -71,6 +71,38 @@ namespace Server.Message
                 case AgencyMessageType.CreateRequest:
                     HandleCreateRequest(client, (AgencyCreateRequestMsgData)data);
                     break;
+                case AgencyMessageType.KolonyState:
+                    // [Phase 3 Slice B] MKS kolony per-agency routing. The MsgData
+                    // is shared S↔C (pre-spec §2.e); inbound from the client postfix
+                    // carries a wire-supplied AgencyId which the router IGNORES,
+                    // deriving the authoritative sender's agency from
+                    // AgencyByPlayerName instead. Same trust posture as
+                    // AgencyContractRouter. TryRoute returns false if the gate is
+                    // off (defensive — a buggy client emitting under gate=off);
+                    // we drop silently in that case (siblings drop server-→-client
+                    // subtypes the same way).
+                    AgencyKolonyRouter.TryRoute(client, (AgencyKolonyStateMsgData)data);
+                    break;
+                case AgencyMessageType.PlanetaryState:
+                    // [Phase 3 Slice C] MKS planetary-logistics per-agency routing.
+                    // Same trust posture + dual-mode silence as KolonyState — the
+                    // router IGNORES the wire-supplied AgencyId and derives the
+                    // authoritative sender from AgencyByPlayerName. Dispatched here
+                    // for inbound C→S; the matching owner-only echo goes back out
+                    // via AgencySystemSender.SendPlanetaryStateToOwner.
+                    AgencyPlanetaryRouter.TryRoute(client, (AgencyPlanetaryStateMsgData)data);
+                    break;
+                case AgencyMessageType.OrbitalState:
+                    // [Phase 3 Slice D] MKS orbital-logistics per-agency routing.
+                    // Same trust posture + dual-mode silence as KolonyState /
+                    // PlanetaryState. Inbound from the client transfer
+                    // state-machine postfixes (DoFinalLaunchTasks / Abort /
+                    // terminal Status writes via Deliver). The cross-agency
+                    // gate consults the DESTINATION vessel's OwningAgencyId
+                    // (not Origin) per pre-spec §2.b.iii. Owner-only echo via
+                    // AgencySystemSender.SendOrbitalStateToOwner.
+                    AgencyOrbitalRouter.TryRoute(client, (AgencyOrbitalStateMsgData)data);
+                    break;
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:

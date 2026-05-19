@@ -34,6 +34,7 @@ namespace Server.Command
             RegisterCommand("setagency", new SetAgencyCommand().Execute, "Set a per-agency career scalar. Usage: /setagency funds|science|reputation <agency-id-or-owner> <amount>");
             RegisterCommand("deleteagency", new DeleteAgencyCommand().Execute, "DELETE a per-agency career (destructive). Usage: /deleteagency <agency-id-or-owner> --confirm");
             RegisterCommand("transferagency", new TransferAgencyCommand().Execute, "Rename the owner of an existing per-agency career. Usage: /transferagency <agency-id-or-owner> <new-player-name>");
+            RegisterCommand("setvesselagency", new SetVesselAgencyCommand().Execute, "Reassign a vessel to a different per-agency career (with MKS per-router migration). Usage: /setvesselagency <vessel-guid> <agency-id-or-owner>");
             RegisterCommand("setfunds", new SetFundsCommand().Execute, "Set funds value");
             RegisterCommand("setscience", new SetScienceCommand().Execute, "Set science value");
             RegisterCommand("restartserver", new RestartServerCommand().Execute, "Restarts the server");
