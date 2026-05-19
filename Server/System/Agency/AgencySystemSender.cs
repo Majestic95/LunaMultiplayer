@@ -399,6 +399,19 @@ namespace Server.System.Agency
         /// send catch-up." Same shape as the Stage 5.17d contract catch-up
         /// pre-spec contract.</para>
         ///
+        /// <para><b>Client apply: REPLACE, not merge</b> (Round-1
+        /// integration-logic SHOULD FIX, Phase 3 Slice E-2 review). A
+        /// returning owner whose server-side dict was mutated while offline
+        /// (e.g. an admin /setvesselagency migrated some of their entries
+        /// OUT to a different agency) must see the post-mutation state
+        /// authoritatively. The client's 5.18b-style mirror MUST apply this
+        /// message as a full REPLACE of its per-agency kolony dict — not a
+        /// merge against stale cached entries. Without REPLACE semantics,
+        /// an entry the server removed (migrated out) survives in the
+        /// client mirror as orphan UI state until the next mid-session
+        /// removal echo (which may never come if the command landed during
+        /// the offline window).</para>
+        ///
         /// <para><b>No defensive copy needed</b> — unlike contract entries,
         /// kolony entries have no mutable byte-array fields. We snapshot the
         /// dict's <c>.Values</c> array under the per-agency lock so a concurrent
@@ -542,6 +555,12 @@ namespace Server.System.Agency
         /// <see cref="SendKolonyCatchupTo"/> — a pre-Slice-C client mirror
         /// author needs the empty state to distinguish "no per-agency
         /// planetary balances yet" from "server didn't send catch-up."</para>
+        ///
+        /// <para><b>Client apply: REPLACE, not merge</b> — same rationale
+        /// as <see cref="SendKolonyCatchupTo"/>. Offline owners may have had
+        /// their planetary partition mutated by admin commands (or by
+        /// hand-edit on disk); the mirror must replace its cached dict
+        /// wholesale, not merge.</para>
         ///
         /// <para><b>No defensive copy needed</b> — planetary entries have no
         /// mutable byte-array fields (4 small fields: 1 Guid + 1 int + 1
@@ -690,6 +709,13 @@ namespace Server.System.Agency
         /// <see cref="SendPlanetaryCatchupTo"/> — a pre-Slice-D client mirror
         /// author needs the empty state to distinguish "no per-agency orbital
         /// transfers yet" from "server didn't send catch-up."</para>
+        ///
+        /// <para><b>Client apply: REPLACE, not merge</b> — same rationale
+        /// as <see cref="SendKolonyCatchupTo"/>. An offline owner whose
+        /// orbital partition lost entries (admin /setvesselagency migrated
+        /// them to a different agency) or gained entries (the reverse)
+        /// must see the post-mutation state authoritatively; merging
+        /// against the stale cache leaves orphan transfers in the UI.</para>
         ///
         /// <para><b>Defensive copy of PayloadBytes per entry</b> — orbital is
         /// the only Phase 3 entry with a mutable byte-array field. Each

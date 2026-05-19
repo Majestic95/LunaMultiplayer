@@ -22,6 +22,22 @@ namespace Server.System.Vessel
         /// </summary>
         private static readonly ConcurrentDictionary<Guid, object> Semaphore = new ConcurrentDictionary<Guid, object>();
 
+        /// <summary>
+        /// Returns the canonical per-vessel writer lock object used by
+        /// <see cref="RawConfigNodeInsertOrUpdate"/> to gate vessel field
+        /// writes (S4 retro-review precedent, see line ~88). Exposed for
+        /// admin-command authors who mutate <c>Vessel.OwningAgencyId</c>
+        /// outside the proto-ingest path (Phase 3 Slice E-2
+        /// <c>SetVesselAgencyCommand</c>) — they MUST hold this lock around
+        /// the field write or risk a torn-write race against the proto
+        /// ingest. Mirrors the
+        /// <see cref="Scenario.ScenarioDataUpdater.GetSemaphore"/> BUG-033
+        /// design template. Idempotent on the <see cref="ConcurrentDictionary"/>
+        /// key so concurrent callers receive the same object.
+        /// </summary>
+        public static object GetVesselLock(Guid vesselId) =>
+            Semaphore.GetOrAdd(vesselId, _ => new object());
+
         #endregion
 
         /// <summary>
