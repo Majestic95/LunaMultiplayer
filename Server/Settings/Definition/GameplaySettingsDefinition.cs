@@ -1,11 +1,39 @@
 ﻿using LmpCommon.Xml;
 using System;
+using System.Xml;
+using System.Xml.Serialization;
 
 namespace Server.Settings.Definition
 {
     [Serializable]
     public class GameplaySettingsDefinition
     {
+        // [fix:BUG-039] XmlSerializer drops unknown child elements by default; the server's
+        // Load()-then-Save() cycle (SettingsBase.Load at SettingsBase.cs:30-31, "We call the
+        // save to add the new settings into the file") then rewrote the file without them,
+        // so operator-added custom keys vanished on first server start. The [XmlAnyElement]
+        // collection captures any unrecognised child elements at load time and XmlSerializer
+        // emits them back out on save. Operators can now add custom <SomeKey>value</SomeKey>
+        // elements to gameplaysettings.xml and have them round-trip cleanly (preserved across
+        // restarts; useful for operator metadata, mod-tool coordination, and forward-compat
+        // when LMP adds a setting before the operator updates their files).
+        //
+        // PUBLIC FIELD (not a property) is deliberate: System.Reflection.GetProperties() does
+        // not return public fields, so SettingsHandler.HasDifferencesAgainstGivenSetting's
+        // preset-comparison reflection (lines 65-71) does not see this member — no
+        // null-deref hazard, no false flip-to-Custom on operators with custom elements.
+        //
+        // Custom elements move to the END of the parent element on round-trip (standard
+        // XmlSerializer ordering for [XmlAnyElement]). Original sibling order with known
+        // settings is not preserved. Acceptable trade-off vs. dropping the data entirely.
+        //
+        // Scoped to GameplaySettingsDefinition only — the bug is specifically filed against
+        // gameplaysettings.xml (#587). If operators ask for the same on the other 11 settings
+        // files, replicate the field shape there.
+        [XmlAnyElement]
+        public XmlElement[] CustomElements;
+
+
         //General options
 
         [XmlComment(Value = "Allow Reverting")]

@@ -1,4 +1,6 @@
 using System;
+using System.Xml;
+using System.Xml.Serialization;
 
 namespace LunaServerGui.SettingsCatalog.Definitions;
 
@@ -10,6 +12,15 @@ namespace LunaServerGui.SettingsCatalog.Definitions;
 [Serializable]
 public class GameplaySettingsDefinition
 {
+    // [fix:BUG-039] Mirrors the server-side CustomElements field so the GUI's XML
+    // round-trip preserves operator-added custom elements in gameplaysettings.xml.
+    // Without this mirror an operator who edits gameplaysettings.xml through the
+    // Admin GUI would silently drop their custom elements on save, re-introducing
+    // BUG-039 via the GUI-edit path. See the server-side field for the design
+    // rationale (public field vs property; trade-off on element ordering).
+    [XmlAnyElement]
+    public XmlElement[] CustomElements;
+
     //General options
 
     [XmlComment(Value = "Allow Reverting")]

@@ -330,7 +330,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-039] Cannot add custom keys in `gameplaysettings.xml`
 - **Severity:** Medium
-- **Status:** Open
+- **Status:** ✅ Fixed on fork (2026-05-19). Root cause: `XmlSerializer.Deserialize` silently drops unrecognised child elements; `SettingsBase.Load` does an immediate `Save()` after load ("We call the save to add the new settings into the file"), which rewrote the file without the operator's custom keys. Fix: `GameplaySettingsDefinition` adds an `[XmlAnyElement] public XmlElement[] CustomElements;` field that captures unrecognised children at deserialisation and round-trips them on serialisation. Public **field** (not property) is deliberate so `SettingsHandler.HasDifferencesAgainstGivenSetting`'s preset-comparison reflection (which uses `GetProperties()` only) does not see it — no null-deref hazard, no false flip-to-Custom for operators with custom elements. Custom elements move to the end of the parent on round-trip (standard XmlSerializer `[XmlAnyElement]` ordering); the original interleaved order with known settings is not preserved but the data IS. Scoped to `GameplaySettingsDefinition` only; if operators ask for the same shape on the other 11 settings files, replicate the field shape there. 4 new `ServerTest/GameplaySettingsCustomElementsTest` cases pin the contract (populate, null-when-absent, full Load+Save round-trip, public-field-not-property regression guard).
 - **Sources:** [#587](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/587)
 
 ### Network & throughput
