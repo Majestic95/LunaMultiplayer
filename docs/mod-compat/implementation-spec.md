@@ -43,6 +43,7 @@ All per-mod audits ([SCANsat](SCANsat.md), [MJ2](MechJeb2.md), [`[x]` Science](x
 | **S4** | DMagic asteroid + anomaly per-agency | Core LMP fork | AgencyState + new router + projector entry (two child collections) | ~180 lines + ServerTest | S2 (copy-paste pattern) |
 | **S5** | `[x]` Science foreign-agency filter | Luna Compat / sidecar Harmony | `ScienceContext` vessel enumeration | ~15 lines Harmony postfix | None |
 | **S6** | KIS re-attach re-stamp | Luna Compat / sidecar Harmony | `KISAddonPickup` attach finalisation | ~10 lines Harmony postfix | None |
+| **S7** ✅ | EPL cross-agency pad/recycler preflight | Luna Compat sidecar (`Majestic95/LunaCompat@1dc3196`) | `ELBuildControl.BuildCraft` prefix + `ELRecycler.CanRecycle` postfix | ~210 lines (incl. XML doc) | None (independent) |
 
 **Mods with no work owed:** MechJeb2, Kerbal Engineer Redux, OPM (data-only), Trajectories, DPAI, TweakScale, Near Future suite, **FFT** (S3 retired 2026-05-19 — orphan file not in compiled DLL; see §S3). Documented in their respective audits.
 
@@ -62,7 +63,7 @@ Suggested build sequence — but slices are independent enough to parallelise on
 4. **S1 in parallel** with S4 (no dependency on the per-agency-ScenarioModule pattern; touches the docking-merge ingress instead).
 5. **S5 + S6 in parallel** with any core slice (sidecar Harmony work; independent of core LMP).
 
-Estimated build sequence wall-clock if serialised: ~3 review-bounded slices' worth of work remaining after S2 + S3 retirement. Two of the original six (S5, S6) belong in Luna Compat sidecar and can be assigned to whoever owns that adjunct.
+Estimated build sequence wall-clock if serialised: **all 6 active slices (S1, S2, S4, S5, S6, S7) shipped 2026-05-19**. S3 retired the same day as no-work-owed. Three slices (S5/S6/S7) landed in Luna Compat sidecar (`Majestic95/LunaCompat@feature/per-agency-mod-compat`); the others in the core fork's `feature/per-agency` branch.
 
 ---
 
@@ -560,6 +561,74 @@ public static class ScienceContext_FilterByAgency_Patch
 
 ---
 
+## S7 — EPL cross-agency pad/recycler preflight (sidecar Harmony) ✅ SHIPPED
+
+**Goal.** Extraplanetary Launchpads is **substantially per-agency-safe in stock form** (all career state vessel-local; no Funds/Science/ScenarioModule interaction) — but cross-agency use of foreign pads/recyclers becomes a silent exploit vector under 5.17a write-rejection. An Agency-A pilot initiating a build on Agency-B's pad locally drains B's pad-resource view across the building tick loop, while server-side relay-writes are rejected; the new-vessel proto stamps with Agency-A's agency. Same shape for recycler use — local part-destruction proceeds while resource-recovery deposit relays reject.
+
+**Owner.** Luna Compat sidecar (`Majestic95/LunaCompat` fork, `feature/per-agency-mod-compat` branch). NOT this fork's codebase — EPL itself isn't linked from LMP, only the Harmony patch crosses the boundary.
+
+**Shipped** in `Majestic95/LunaCompat@1dc3196` (2026-05-19) — extends the existing `Mods/ExtraplanetaryLaunchpads/ExtraplanetaryLaunchpadsIntegration.cs` (recycler-RNG seed-pin code preserved) with a new `EplPerAgencyPreflight` static helper class (~210 lines including XML doc).
+
+**Hook targets (verified 2026-05-19 against `F:/tmp/mks-external/EPL` SHA `0bb3c5b0`; corrected during multi-lens review).**
+- **Build path:** `ExtraplanetaryLaunchpads.ELBuildControl.BuildCraft()` at `Source/BuildControl.cs:833`. The user-clicked entry that flips `state = State.Building` and starts the `DoWork_Build` resource-debit loop. Original spec cited `BuildAndLaunchCraft` (line 684) but that runs at the END of the build, AFTER resources are already drained — hooking it would have left the pad-resource-drain griefing vector open. Prefix-abort at `BuildCraft` blocks the entire debit loop upfront.
+- **Recycler path:** `ExtraplanetaryLaunchpads.ELRecycler.CanRecycle(Vessel vsl)` at `Source/Recycler/Recycler.cs:83`. Original spec cited a `RecyclerFSM.CollectParts` prefix, but `OnTriggerStay` at `Recycler.cs:110-112` sets `RecycleField.enabled = false` BEFORE invoking `CollectParts` — aborting `CollectParts` would have left the trigger collider permanently disarmed for the recycler's owner. Postfixing `CanRecycle` to return `false` instead stops `OnTriggerStay`'s `if (... && CanRecycle(...))` block before the disarm, leaving the trigger armed for legitimate use.
+
+**Hook shape (as shipped)**
+
+```csharp
+// LunaCompat/Mods/ExtraplanetaryLaunchpads/ExtraplanetaryLaunchpadsIntegration.cs
+// — extends existing file with a sibling EplPerAgencyPreflight static helper.
+
+internal static class EplPerAgencyPreflight
+{
+    private static bool _armed;
+    private static Guid _lastRecyclerToastedVesselId = Guid.Empty;
+
+    internal static void SetupOnce(ClientModIntegration caller, ILogger logger)
+    {
+        if (_armed) return;
+
+        var buildControlType = AccessTools.TypeByName("ExtraplanetaryLaunchpads.ELBuildControl");
+        var buildCraftMethod = buildControlType != null
+            ? AccessTools.Method(buildControlType, "BuildCraft") : null;
+        if (buildCraftMethod != null)
+            LunaCompat.HarmonyInstance.Patch(buildCraftMethod,
+                prefix: new HarmonyMethod(typeof(EplPerAgencyPreflight), nameof(PrefixBuildCraft)));
+
+        var recyclerType = AccessTools.TypeByName("ExtraplanetaryLaunchpads.ELRecycler");
+        var canRecycleMethod = recyclerType != null
+            ? AccessTools.Method(recyclerType, "CanRecycle", [typeof(Vessel)]) : null;
+        if (canRecycleMethod != null)
+            LunaCompat.HarmonyInstance.Patch(canRecycleMethod,
+                postfix: new HarmonyMethod(typeof(EplPerAgencyPreflight), nameof(PostfixCanRecycle)));
+
+        _armed = true;
+    }
+
+    private static bool PrefixBuildCraft(object __instance) { /* ... abort if pad agency != local */ }
+    private static void PostfixCanRecycle(object __instance, Vessel vsl, ref bool __result) { /* ... override to false */ }
+}
+```
+
+**Acceptance**
+
+- `PerAgencyCareer=on`: Agency A pilot lands on Agency B's pad → red `Cannot build on agency {B-name}'s launchpad.` toast, no `state = State.Building` flip, no resource drain. Agency A pilot brings craft into Agency B's recycler trigger field → red `Cannot recycle at agency {B-name}'s recycler.` toast (single-fired per cross-agency vessel), `RecycleField.enabled` stays true, no part destruction.
+- Same-agency build / recycle works normally.
+- Unassigned-sentinel (pre-0.31 vessel) bypasses the check — any agency may interact (spec §10 Q3).
+- Gate=off: full pass-through; behaviour matches stock LunaMP + LunaCompat bit-for-bit.
+
+**Why this is per-agency-specific (not stock LunaCompat work).** Under shared-mode LMP, all clients trust each other's writes — EPL's cross-vessel relay just succeeds. Under 5.17a write-rejection, the relay fails on the foreign-vessel side but the local build-side has already committed (pad-resource view drained, new vessel proto stamped). The preflight is needed because the client cannot rely on the server's write-reject to surface user feedback — by the time the rejection lands the local state has diverged and the operator believes the build/recycle succeeded.
+
+**Caveats.**
+- EPL isn't a compile-time dep of LunaCompat — same `AccessTools.TypeByName` pattern as the existing `KisIntegration` (graceful no-op when EPL is not installed, plus `Warning` log on type/method resolve failure for operator visibility into EPL upstream drift).
+- Toast color uses `UnityEngine.Color.red` (LunaCompat convention for action-denied, per `Logger.LogServerPluginMissing` precedent) — distinct from S5's pass-through filter which has no toast.
+- The recycler-path postfix tracks `_lastRecyclerToastedVesselId` to single-fire the toast per cross-agency vessel encounter. `OnTriggerStay` calls `CanRecycle` per physics tick, so naive per-call toasting would produce per-frame screen spam.
+- The agency-lookup path for "pad/recycler's lmpOwningAgency" goes through `AgencySystem.Singleton.TryGetOwningAgency(vessel.id, out agencyId)` — already public on LmpClient (5.18b). Dict-miss is permissive (matches S5 / spec §10 Q3 reconnect-window policy).
+
+Full audit context: [extraplanetary-launchpads.md](extraplanetary-launchpads.md).
+
+---
+
 ## S6 — KIS re-attach re-stamp (sidecar Harmony)
 
 **Goal.** When a KIS-stored part is attached to a new vessel via EVA, the resulting part takes the destination vessel's `lmpOwningAgency`, overwriting any stamp the snapshotted source part carried.
@@ -626,7 +695,7 @@ In addition to per-slice ServerTests:
 |------|--------|
 | Per-mod audits complete | ✅ 12 mods walked |
 | Design questions answered | ✅ 12 ratified 2026-05-18 |
-| Slices specified | ✅ 6 (S1–S6) |
+| Slices specified | ✅ 6 (S1–S6) + S7 (added 2026-05-19 from EPL audit) |
 | D1 (Path B for S2/S3/S4) | ✅ ratified 2026-05-18, folded in 2026-05-19 |
 | D2 (synchronous connect-time catch-up via `SendScenariosToClient`) | ✅ ratified 2026-05-18, folded in 2026-05-19 |
 | D3 (`transferagency` migrate-with-vessel for S2 Scanners) | ✅ ratified 2026-05-18, folded in 2026-05-19 |
@@ -636,7 +705,8 @@ In addition to per-slice ServerTests:
 | S3 RETIRED against verified FFT source (`ad59fbb5`) — orphan ScenarioModule not in csproj Compile list; FFT joins no-work-owed list | ✅ retired 2026-05-19 |
 | S4 implementation shipped (`feat(server,agency): Mod-compat S4 — DMagic asteroid science + anomalies per-agency` commit `06cc7444`) | ✅ 2026-05-19 |
 | S1 implementation shipped — couple reconciler covering stock docking + KAS pipe coupling; M1 (per-vessel lock race fix) + M2 (broadcast visibility + disk flush on adopt branch) applied via multi-lens review | ✅ 2026-05-19 |
-| S5 / S6 hook targets corrected against verified upstream source — work owed to fork-LunaCompat at `Majestic95/LunaCompat` (sidecar codebase, separate from this fork) | ⏳ pending (separate session) |
-| Slices implemented | S1 + S2 + S4 done; S5 + S6 pending in LunaCompat sidecar |
+| S5 + S6 shipped in fork-LunaCompat sidecar | ✅ 2026-05-19 (S5 `e96b18d` + S6 in main-fork commit `1720d1e1`) |
+| S7 — EPL cross-agency pad/recycler preflight shipped in fork-LunaCompat — hook targets corrected during multi-lens review (`BuildCraft` upfront-of-debit vs original `BuildAndLaunchCraft` post-debit; `CanRecycle` postfix vs original `CollectParts` prefix that would have permanently disarmed the trigger) | ✅ 2026-05-19 (commit `1dc3196`) |
+| Slices implemented | S1 + S2 + S4 (core fork) + S5 + S6 + S7 (LunaCompat sidecar) — all 6 active slices done; S3 retired |
 | Cross-cutting tests authored | ⏳ pending — S1+S2+S4 in-repo coverage at unit + projector level; end-to-end MockClientTest cross-cutting (couple-then-scan) deferred |
 | Operator policy doc update for LunaCompat coordination | ⏳ pending (folded into S2 SCANsat operator policy) |
