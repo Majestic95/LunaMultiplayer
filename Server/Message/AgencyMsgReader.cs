@@ -103,6 +103,19 @@ namespace Server.Message
                     // AgencySystemSender.SendOrbitalStateToOwner.
                     AgencyOrbitalRouter.TryRoute(client, (AgencyOrbitalStateMsgData)data);
                     break;
+                case AgencyMessageType.WolfDepotState:
+                    // [Phase 4 Slice B] MKS WOLF depot per-agency routing.
+                    // Same trust posture + dual-mode silence as Kolony /
+                    // Planetary / Orbital. Inbound from client postfixes on
+                    // ScenarioPersister.CreateDepot + Depot.Establish /
+                    // Survey / NegotiateProvider / NegotiateConsumer (Slice B
+                    // client-side). No cross-agency vessel-proxy check —
+                    // depots are body+biome-keyed, not vessel-keyed; two
+                    // agencies can each have a depot at the same body+biome
+                    // (separate per-agency dicts). Owner-only echo via
+                    // AgencySystemSender.SendWolfDepotStateToOwner.
+                    AgencyWolfDepotRouter.TryRoute(client, (AgencyWolfDepotStateMsgData)data);
+                    break;
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:

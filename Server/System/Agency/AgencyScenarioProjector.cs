@@ -1622,5 +1622,157 @@ namespace Server.System.Agency
             var replacement = $"{key} = {newValue.ToString(CultureInfo.InvariantCulture)}";
             return pattern.Replace(serializedText, replacement, count: 1);
         }
+
+        // [Phase 4 Slice B-2] SpliceAgencyWolfState lands alongside the
+        // client-side Harmony postfixes on ScenarioPersister.CreateDepot /
+        // Depot.Establish / Survey / Negotiate* and the IgnoredScenarios
+        // filter for WOLF_ScenarioModule. Shipping the projector splice
+        // without the postfixes + filter would leave gate=on operators with
+        // empty per-agency WOLF UI (the splice strips shared state but no
+        // client-side path populates the per-agency dict). Atomic ship
+        // required per the §2.c contract.
+#if false
+        /// <summary>
+        /// [Phase 4 Slice B-2 — WOLF] Strip shared <c>WOLF_ScenarioModule</c>
+        /// child node families and splice in per-agency entries. WOLF's
+        /// on-disk shape per <c>ScenarioPersister.OnSave</c> at MKS SHA
+        /// <c>ed0f6aa6</c>:
+        /// <code>
+        /// WOLF_ScenarioModule {
+        ///     CREWROUTES { ROUTE { ... } ROUTE { ... } }
+        ///     DEPOTS { DEPOT { ... } DEPOT { ... } }
+        ///     HOPPERS { HOPPER { ... } HOPPER { ... } }
+        ///     ROUTES { ROUTE { ... } ROUTE { ... } }
+        ///     TERMINALS { TERMINAL { ... } TERMINAL { ... } }
+        /// }
+        /// </code>
+        ///
+        /// <para><b>Strip ALL 5 child node families first</b> (clean the
+        /// slate) — Slices C-E will extend this method to also emit
+        /// ROUTES / HOPPERS / TERMINALS / CREWROUTES from
+        /// <c>agency.WolfRoutes</c> / etc. Until then, the missing 4 child
+        /// nodes load as empty in WOLF (per <c>ScenarioPersister.OnLoad</c>'s
+        /// <c>HasNode</c> guards at lines 289/303/314/332/343).</para>
+        ///
+        /// <para><b>Emit ORDER: DEPOTS FIRST</b> (pre-spec §2.c) because
+        /// WOLF's <c>ScenarioPersister.OnLoad</c> at line 288-302 loads
+        /// depots first and other entity types call
+        /// <c>_registry.GetDepot</c> during their <c>OnLoad</c>. Slices
+        /// C-E inserting their emit calls must place them AFTER the depot
+        /// emit + must include the foreign-key integrity sweep
+        /// (pre-spec §2.c) to drop entries that reference depots not in
+        /// the agency's pool — otherwise WOLF's OnLoad throws
+        /// <c>DepotDoesNotExistException</c> and the scene load hangs.</para>
+        ///
+        /// <para><b>Per-entry isolation</b>: a malformed entry's failure
+        /// is logged + skipped, siblings continue. Whole-scenario parse
+        /// failure falls back to the input unchanged + logs at Error
+        /// level (same pattern as <see cref="SpliceAgencyKolonyEntries"/>)
+        /// so a hung handshake never blocks the player.</para>
+        ///
+        /// <para><b>ConfigNode value-name mapping.</b> The disk persistence
+        /// format in <see cref="AgencyState"/> uses PascalCase
+        /// (<c>Body</c> / <c>Biome</c> / <c>IsEstablished</c> /
+        /// <c>IsSurveyed</c>); the wire/scenario format expected by
+        /// WOLF's <c>Depot.OnLoad</c> at <c>Depot.cs:219-243</c> matches
+        /// (Body / Biome / IsEstablished / IsSurveyed). 1:1 — no field-
+        /// name re-mapping needed. ResourceStream sub-nodes are named
+        /// <c>RESOURCE</c> on the wire (per <c>Depot.cs:256-263</c>)
+        /// with values <c>ResourceName</c> / <c>Incoming</c> /
+        /// <c>Outgoing</c>.</para>
+        /// </summary>
+        private static string SpliceAgencyWolfState(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "WOLF_ScenarioModule" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:WOLF-R4] WOLF_ScenarioModule projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Strip ALL 5 pre-existing child node families. Removing
+            // top-level nodes via .ToArray() so the enumerator isn't
+            // invalidated by RemoveNode during iteration. WOLF's OnLoad
+            // tolerates missing nodes per ScenarioPersister.cs:289-343.
+            foreach (var name in new[] { "CREWROUTES", "DEPOTS", "HOPPERS", "ROUTES", "TERMINALS" })
+            {
+                foreach (var existing in node.GetNodes(name).ToArray())
+                    node.RemoveNode(existing.Value);
+            }
+
+            // Snapshot agency WOLF state under the per-agency lock so a
+            // concurrent router upsert can't tear our iteration.
+            AgencyWolfDepotEntry[] depotSnapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+            {
+                depotSnapshot = new AgencyWolfDepotEntry[targetAgency.WolfDepots.Count];
+                var i = 0;
+                foreach (var kvp in targetAgency.WolfDepots)
+                {
+                    if (kvp.Value == null) continue;
+                    depotSnapshot[i++] = kvp.Value;
+                }
+                if (i < depotSnapshot.Length)
+                    Array.Resize(ref depotSnapshot, i);
+            }
+
+            // Emit DEPOTS first (WOLF OnLoad ordering invariant). Slices
+            // C-E will append HOPPERS / ROUTES / TERMINALS / CREWROUTES
+            // emit blocks AFTER this one (with FK integrity sweeps for
+            // the depot-referencing types).
+            if (depotSnapshot.Length > 0)
+            {
+                var depotsContainer = new ConfigNode("") { Name = "DEPOTS" };
+                node.AddNode(depotsContainer);
+                foreach (var entry in depotSnapshot)
+                {
+                    if (entry == null)
+                        continue;
+                    try
+                    {
+                        var dNode = new ConfigNode("") { Name = "DEPOT" };
+                        dNode.CreateValue(new CfgNodeValue<string, string>("Body", entry.Body ?? string.Empty));
+                        dNode.CreateValue(new CfgNodeValue<string, string>("Biome", entry.Biome ?? string.Empty));
+                        dNode.CreateValue(new CfgNodeValue<string, string>("IsEstablished", entry.IsEstablished.ToString(CultureInfo.InvariantCulture)));
+                        dNode.CreateValue(new CfgNodeValue<string, string>("IsSurveyed", entry.IsSurveyed.ToString(CultureInfo.InvariantCulture)));
+
+                        if (entry.ResourceStreams != null)
+                        {
+                            foreach (var stream in entry.ResourceStreams)
+                            {
+                                if (stream == null || string.IsNullOrEmpty(stream.ResourceName))
+                                    continue;
+                                // Per WOLF Depot.cs:257-262, streams are nested
+                                // as RESOURCE child nodes (NOT WOLF_RESOURCE_STREAM
+                                // — that's our disk-side name). Wire format must
+                                // match WOLF's OnLoad parse contract.
+                                var sNode = new ConfigNode("") { Name = "RESOURCE" };
+                                sNode.CreateValue(new CfgNodeValue<string, string>("ResourceName", stream.ResourceName));
+                                sNode.CreateValue(new CfgNodeValue<string, string>("Incoming", stream.Incoming.ToString(CultureInfo.InvariantCulture)));
+                                sNode.CreateValue(new CfgNodeValue<string, string>("Outgoing", stream.Outgoing.ToString(CultureInfo.InvariantCulture)));
+                                dNode.AddNode(sNode);
+                            }
+                        }
+                        depotsContainer.AddNode(dNode);
+                    }
+                    catch (Exception)
+                    {
+                        // Per-entry isolation — drop this depot, keep others.
+                    }
+                }
+            }
+
+            // [Phase 4 Slices C-E insertion point]
+            // Slice C inserts WOLF_ROUTES emit here (after FK sweep against
+            //   the just-emitted depot pool).
+            // Slice D inserts WOLF_HOPPERS + WOLF_TERMINALS emit here.
+            // Slice E inserts WOLF_CREWROUTES emit here (after FK sweep).
+
+            return node.ToString();
+        }
+#endif
     }
 }

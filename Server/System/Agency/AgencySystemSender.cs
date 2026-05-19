@@ -861,5 +861,132 @@ namespace Server.System.Agency
             var batchSuffix = batchCount > 1 ? $" in {batchCount} batches" : string.Empty;
             LunaLog.Normal($"[fix:per-agency-career] Broadcast ownership-visibility — {total} change(s){batchSuffix}");
         }
+
+        /// <summary>
+        /// [Phase 4 Slice B — WOLF] Owner-only echo of a per-agency depot
+        /// batch. Emitted by <see cref="AgencyWolfDepotRouter.TryRoute"/>
+        /// after a successful upsert + persist. Peers never receive another
+        /// agency's per-agency depots (spec §10 Q1 PrivateAgencyResources=true)
+        /// — projection through <see cref="AgencyScenarioProjector"/>'s
+        /// <c>WOLF_ScenarioModule</c> case is the only path by which
+        /// cross-agency awareness leaks into the read-side, and projection
+        /// happens per-target-client at scene-load time.
+        ///
+        /// <para>Mirrors <see cref="SendKolonyStateToOwner"/> shape including
+        /// the protective null-filter on entries + removedKeys. No-op when
+        /// gate=off / owner==null / batch empty.</para>
+        /// </summary>
+        public static void SendWolfDepotStateToOwner(
+            ClientStructure owner,
+            Guid agencyId,
+            IReadOnlyList<AgencyWolfDepotEntry> entries,
+            IReadOnlyList<string> removedKeys = null)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (owner == null)
+                return;
+
+            var entriesEmpty = entries == null || entries.Count == 0;
+            var removedEmpty = removedKeys == null || removedKeys.Count == 0;
+            if (entriesEmpty && removedEmpty)
+                return;
+
+            // Protective filter mirrors SendKolonyStateToOwner — skip nulls
+            // so EntryCount matches the non-null slot count on the wire.
+            var nonNullEntries = entriesEmpty
+                ? null
+                : new List<AgencyWolfDepotEntry>(entries.Count);
+            if (!entriesEmpty)
+            {
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    if (entries[i] != null) nonNullEntries.Add(entries[i]);
+                }
+            }
+
+            var nonNullRemoved = removedEmpty
+                ? null
+                : new List<string>(removedKeys.Count);
+            if (!removedEmpty)
+            {
+                for (var i = 0; i < removedKeys.Count; i++)
+                {
+                    if (!string.IsNullOrEmpty(removedKeys[i])) nonNullRemoved.Add(removedKeys[i]);
+                }
+            }
+
+            var emitEntries = nonNullEntries != null && nonNullEntries.Count > 0;
+            var emitRemoved = nonNullRemoved != null && nonNullRemoved.Count > 0;
+            if (!emitEntries && !emitRemoved)
+                return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfDepotStateMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.EntryCount = emitEntries ? nonNullEntries.Count : 0;
+            msgData.Entries = emitEntries ? nonNullEntries.ToArray() : new AgencyWolfDepotEntry[0];
+            msgData.RemovedKeyCount = emitRemoved ? nonNullRemoved.Count : 0;
+            msgData.RemovedKeys = emitRemoved ? nonNullRemoved.ToArray() : new string[0];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice B — WOLF] Connect-time catch-up: ships the
+        /// owner's persisted <c>AgencyState.WolfDepots</c> dictionary as a
+        /// single batch <see cref="AgencyWolfDepotStateMsgData"/>. Wired
+        /// into <c>HandshakeSystem.HandleHandshakeRequest</c> immediately
+        /// after the Phase 3 Slice D <see cref="SendOrbitalCatchupTo"/>
+        /// call so the pre-Slice-B-client client mirror lands with a
+        /// complete per-agency depot view before any mid-session mutation
+        /// arrives.
+        ///
+        /// <para>Sends unconditionally under gate=on, even for empty
+        /// dictionaries (same shape as <see cref="SendKolonyCatchupTo"/>).
+        /// REPLACE semantics on the client side — an offline-window admin
+        /// /deleteagency on a stale depot must produce post-mutation
+        /// authoritative state on reconnect.</para>
+        ///
+        /// <para><b>Chunking TODO (Slice B review SHOULD CONSIDER #1):</b>
+        /// catchup ships <c>state.WolfDepots.Count</c> entries unconditionally.
+        /// If a megabase cohort accumulates &gt;200 depots
+        /// (<see cref="AgencyWolfDepotStateMsgData.MaxEntryCount"/>), the
+        /// receive-side <c>InternalDeserialize</c> at slot 9 throws
+        /// <c>InvalidDataException</c> + the client disconnects at handshake
+        /// completion. Phase 3 Slice D-1 closed this for orbital via
+        /// <see cref="SendOrbitalCatchupTo"/>'s chunked loop — pattern is
+        /// available to mirror here when soak shows clipping. Acceptable
+        /// for Slice B (200 depots/agency is well above realistic cohort
+        /// sizes; matches the pre-existing Kolony/Planetary gap that hasn't
+        /// fired in soak).</para>
+        /// </summary>
+        public static void SendWolfDepotCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (client == null || state == null)
+                return;
+
+            AgencyWolfDepotEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(state.AgencyId))
+            {
+                snapshot = new AgencyWolfDepotEntry[state.WolfDepots.Count];
+                var i = 0;
+                foreach (var kvp in state.WolfDepots)
+                {
+                    if (kvp.Value == null) continue;
+                    snapshot[i++] = kvp.Value;
+                }
+                if (i < snapshot.Length)
+                    Array.Resize(ref snapshot, i);
+            }
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfDepotStateMsgData>();
+            msgData.AgencyId = state.AgencyId;
+            msgData.EntryCount = snapshot.Length;
+            msgData.Entries = snapshot;
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+        }
     }
 }

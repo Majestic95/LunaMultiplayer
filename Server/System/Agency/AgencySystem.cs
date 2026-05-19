@@ -203,6 +203,13 @@ namespace Server.System.Agency
                 WarnAboutSharedOrbitalOnUpgrade();
                 WarnAboutSharedSCANsatOnUpgrade();
                 WarnAboutSharedDMagicOnUpgrade();
+                // [Phase 4 Slice B-2] WarnAboutSharedWolfOnUpgrade ships
+                // alongside the projector splice + Harmony postfixes — see
+                // the deferral note on the helper definition. Firing this
+                // warning + the matching hazard predicate before the
+                // projector strip path is wired would refuse boot for
+                // operators whose WOLF state would actually keep working
+                // (legacy SHA pass continues under partial Slice B).
                 RefuseStartupIfUpgradeHazardWithoutOverride();
                 return;
             }
@@ -359,6 +366,10 @@ namespace Server.System.Agency
             // record). Operator flipping the gate on an upgrade universe
             // with accumulated DMagic state loses ALL of it.
             WarnAboutSharedDMagicOnUpgrade();
+
+            // [Phase 4 Slice B-2] WarnAboutSharedWolfOnUpgrade call lands
+            // alongside the projector splice + Harmony postfixes — see the
+            // deferral note on the helper definition.
 
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
@@ -567,6 +578,10 @@ namespace Server.System.Agency
                     }
                 }
             }
+            // [Phase 4 Slice B-2] WOLF hazard predicate ships alongside the
+            // projector splice + Harmony postfixes. Until then the WOLF
+            // pass-through via the legacy SHA path is functionally correct
+            // (shared mode) so the hazard wouldn't be load-bearing here yet.
             if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScn))
             {
                 lock (Scenario.ScenarioDataUpdater.GetSemaphore("ScenarioUpgradeableFacilities"))
@@ -1221,6 +1236,108 @@ namespace Server.System.Agency
                 "(2) Fresh-start workflow (spec §10): stop the server, archive Universe/, " +
                 "restart. Each agency begins with empty DMagic state as designed. " +
                 "(3) Stay on shared-agency mode (PerAgencyCareer=false) — no DMagic data loss.");
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice B / WOLF-R4 upgrade-lens diagnostic] Fires when
+        /// (a) gate is on, (b) zero agencies loaded (fresh-mint upcoming),
+        /// (c) the universe is non-pristine (vessels exist — signals
+        /// in-place upgrade), (d) the shared <c>WOLF_ScenarioModule</c>
+        /// has at least one non-empty child node family (CREWROUTES /
+        /// DEPOTS / HOPPERS / ROUTES / TERMINALS). Under those conditions,
+        /// the Slice B projector strips ALL 5 child families from the
+        /// outgoing scenario blob and replaces them with the (empty)
+        /// per-agency pool — operator's accumulated WOLF logistics graph
+        /// is invisible on first connect.
+        ///
+        /// <para><b>Mid-flight CrewRoute kerbal stranding</b> (pre-spec
+        /// §4.d MUST FIX): a CrewRoute with FlightStatus=Boarding or
+        /// Enroute carries kerbals in <c>RosterStatus.Missing</c> +
+        /// <c>SetTimeForRespawn(double.MaxValue)</c>. The strip-on-load
+        /// removes the CrewRoute but doesn't restore the kerbals — they
+        /// stay Missing forever unless the operator pre-empts via the
+        /// Boarding/Enroute → Arrived completion OR Slices E-F's
+        /// <c>deleteagency</c> kerbal-restoration helper (not yet shipped
+        /// in Slice B). The WARN text spells this out + operator options.</para>
+        ///
+        /// <para>Counted via <see cref="ScenarioStoreSystem.CurrentScenarios"/>
+        /// + the per-scenario lock the projector uses to read. WOLF's
+        /// on-disk shape is <c>WOLF_ScenarioModule { CREWROUTES { ROUTE
+        /// { ... } } DEPOTS { DEPOT { ... } } HOPPERS { HOPPER { ... } }
+        /// ROUTES { ROUTE { ... } } TERMINALS { TERMINAL { ... } } }</c>
+        /// per WOLF's <c>ScenarioPersister.OnSave</c> at MKS SHA
+        /// <c>ed0f6aa6</c>.</para>
+        ///
+        /// <para><b>[Phase 4 Slice B — dead code; Slice B-2 call site
+        /// lands here]</b> This helper is defined but uncalled in Slice B
+        /// (per the deferral notes at the upper LoadExistingAgencies +
+        /// LoadAgency call sites). Slice B-2 wires both call sites
+        /// simultaneously with the projector splice, IgnoredScenarios
+        /// filter, hazard predicate, and Harmony postfixes. C# does not
+        /// warn on unused <c>private static</c> methods, so this method
+        /// compiles silently. Do NOT strip as dead code before Slice B-2
+        /// ships.</para>
+        /// </summary>
+        private static void WarnAboutSharedWolfOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint agency on a new universe is fine.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("WOLF_ScenarioModule", out var scenario))
+                return;
+
+            int depots = 0, routes = 0, hoppers = 0, terminals = 0, crewRoutes = 0, midFlightCrewRoutes = 0;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("WOLF_ScenarioModule"))
+            {
+                depots = scenario.GetNode("DEPOTS")?.Value.GetNodes("DEPOT").Count() ?? 0;
+                routes = scenario.GetNode("ROUTES")?.Value.GetNodes("ROUTE").Count() ?? 0;
+                hoppers = scenario.GetNode("HOPPERS")?.Value.GetNodes("HOPPER").Count() ?? 0;
+                terminals = scenario.GetNode("TERMINALS")?.Value.GetNodes("TERMINAL").Count() ?? 0;
+                var crewRoutesContainer = scenario.GetNode("CREWROUTES")?.Value;
+                if (crewRoutesContainer != null)
+                {
+                    foreach (var crEntry in crewRoutesContainer.GetNodes("ROUTE"))
+                    {
+                        crewRoutes++;
+                        // WOLF's CrewRoute.OnSave at CrewRoute.cs:255 wraps the
+                        // route fields inside a ROUTE child node. The Status
+                        // string is at routeNode.GetValue("FlightStatus").
+                        var routeNode = crEntry.Value.GetNode("ROUTE")?.Value ?? crEntry.Value;
+                        var status = routeNode.GetValue("FlightStatus")?.Value ?? string.Empty;
+                        if (status == "Boarding" || status == "Enroute")
+                            midFlightCrewRoutes++;
+                    }
+                }
+            }
+
+            var total = depots + routes + hoppers + terminals + crewRoutes;
+            if (total == 0)
+                return;
+
+            var midFlightSuffix = midFlightCrewRoutes > 0
+                ? $" INCLUDING {midFlightCrewRoutes} mid-flight CrewRoute(s) with passengers in RosterStatus.Missing — those kerbals will be PERMANENTLY ORPHANED on strip unless restored manually before upgrade"
+                : string.Empty;
+
+            LunaLog.Warning(
+                "[fix:WOLF-R4] PerAgencyCareer=true on an upgrade universe carries " +
+                $"shared-agency WOLF state: {depots} depot(s) + {routes} route(s) + " +
+                $"{hoppers} hopper(s) + {terminals} terminal(s) + {crewRoutes} crew-route(s)" +
+                midFlightSuffix + ". " +
+                "The Phase 4 projector strips ALL 5 WOLF child node families on first per-agency " +
+                "connect; accumulated WOLF logistics graph is NOT migrated. " +
+                "RECOVERY OPTIONS: " +
+                "(1) BEFORE upgrade: ensure no CrewRoutes are mid-flight (let in-flight routes " +
+                "complete to Arrived OR Disembark passengers OR delete routes via in-game UI). " +
+                "Then optionally reset the shared WOLF state via removing the WOLF child nodes " +
+                "from Universe/Scenarios/WOLF_ScenarioModule.txt. Set " +
+                "AllowEnablePerAgencyOnExistingUniverse=true in Settings/GameplaySettings.xml. " +
+                "Players accept the loss + the kerbal-stranding hazard is avoided. " +
+                "(2) Fresh-start workflow (spec §10): stop the server, archive Universe/, " +
+                "restart. Each agency begins with empty WOLF state. No mid-flight kerbal hazard. " +
+                "(3) Stay on shared-agency mode (PerAgencyCareer=false) — no WOLF data loss; " +
+                "WOLF continues as shared graph under the Phase 4 gate=off path.");
         }
 
         /// <summary>

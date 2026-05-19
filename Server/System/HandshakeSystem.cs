@@ -98,6 +98,17 @@ namespace Server.System
                         // state-independent; this catchup only delivers the
                         // owner-only transfer-snapshot under gate=on.
                         AgencySystemSender.SendOrbitalCatchupTo(client, assignedState);
+                        // [Phase 4 Slice B] MKS WOLF depot catch-up. Persisted
+                        // per-agency WolfDepots (populated by
+                        // AgencyWolfDepotRouter on prior sessions) ship to the
+                        // reconnecting owner before any mid-session mutation.
+                        // Unconditional under gate=on so the empty-dict case is
+                        // observable by the pre-Slice-B client mirror author.
+                        // Slices C-E will append SendWolfRouteCatchupTo /
+                        // SendWolfHopperCatchupTo / SendWolfTerminalCatchupTo /
+                        // SendWolfCrewRouteCatchupTo here as the per-router
+                        // surfaces land.
+                        AgencySystemSender.SendWolfDepotCatchupTo(client, assignedState);
                     }
 
                     // [Mod-compat / Path B D2 catch-up] Synchronous connect-
