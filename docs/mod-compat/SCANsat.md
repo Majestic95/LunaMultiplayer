@@ -66,7 +66,65 @@ Document your measured behaviour in the field under **both** gates:
 
 ## Mod-source walk (SCANsat repo `KSPModStewards/SCANsat`)
 
-Walked branch `master` via WebFetch on 2026-05-18. Source file references below are paths into that repo, not into this fork.
+Walked branch `master` via WebFetch on 2026-05-18. **Re-walked 2026-05-19 against local shallow clone** at `F:/tmp/mks-external/SCANsat` (commit `0d67371`) — corrections from the re-walk are inlined below; obsolete claims from the original pass are struck through where they would mislead future readers. The structural facts now in the "Re-walked 2026-05-19" subsection are the **authoritative spec source for the S2 implementation**; downstream slices (S3 FFT, S4 DMagic) follow the same audit-via-prespec discipline against their own sources.
+
+### Re-walked 2026-05-19 — verified blob structure
+
+Authoritative ground truth, cited line numbers reference `F:/tmp/mks-external/SCANsat` at SHA `0d67371`.
+
+**SCANcontroller is the only ScenarioModule SCANsat ships.** The other class names that turn up in a broad grep:
+- `SCANquickload.cs:15` — `Debug_AutoLoadPersistentSaveOnStartup : MonoBehaviour`, gated by `#if DEBUG`. Not a ScenarioModule.
+- `SCAN_UI/SCANsatRPM.cs:31` — `JSISCANsatRPM : InternalModule`, RasterPropMonitor IVA integration. Not a ScenarioModule.
+
+So all SCANsat scenario-side persistence lives in `SCANcontroller.OnSave` (`SCANsat/SCANcontroller.cs:783-865`) / `OnLoad` (`:605-781`).
+
+**Three root containers** at the `SCANcontroller` blob level:
+
+```
+SCANcontroller {
+  [~30 KSPField root-level UI scalars: mainMapVisible, bigMapColor, zoomMapType, overlaySelection, ...]
+  Scanners {
+    Vessel { guid=..., name=..., Sensor { type=..., fov=..., min_alt=..., max_alt=..., best_alt=..., require_light=... } ...N sensors }
+    Vessel { ... }
+  }
+  Progress {
+    Body { Name=..., Map=<opaque>, Disabled=..., MinHeightRange=..., MaxHeightRange=..., ClampHeight=...?, PaletteName=..., PaletteSize=..., PaletteReverse=..., PaletteDiscrete=..., LandingTarget=...? }
+    Body { ... }
+  }
+  SCANResources {
+    ResourceType { Resource=..., MinColor=..., MaxColor=..., Transparency=..., MinMaxValues="bodyIndex|min|max,bodyIndex|min|max,..." }
+    ResourceType { ... }
+  }
+}
+```
+
+Key facts the audit's first pass got wrong or omitted:
+
+1. **`Progress` is a SINGLE container with `Body` children**, not "multiple `Progress` nodes at root level, one per body." The 2026-05-18 audit's wording "per-body `Progress` child nodes" was the right description, but the spec consumer (`implementation-spec.md` S2 section) read it ambiguously. Verbatim source: `node.AddNode(node_progress)` after a loop builds `Body` children into `node_progress` (`SCANcontroller.cs:842`).
+
+2. **`Scanners → Vessel → Sensor` is three-level nested**, not two. Each `Vessel` node holds 1-N `Sensor` children (a single vessel can carry an altimetry sensor AND a survey sensor AND a resource scanner simultaneously). Verbatim: `foreach (SCANsensor sensor in sv.sensors) { ConfigNode node_sensor = new ConfigNode("Sensor"); ... node_vessel.AddNode(node_sensor); }` (`SCANcontroller.cs:797-806`). The original audit's row for the Scanners surface said "keyed by vessel GUID (sensor type, FOV, altitude range)" which flattened the nested Sensor records into the Vessel scalar fields — implementation-wrong.
+
+3. **`SCANResources` is a third root container the audit didn't enumerate.** Contains `ResourceType` children: `Resource` name + display config (`MinColor`/`MaxColor`/`Transparency`) + `MinMaxValues` (`SCANcontroller.cs:847-861`). `MinMaxValues` is a pipe-and-comma-delimited string of `bodyIndex|min|max` tuples produced by `saveResources(SCANresourceGlobal r)` (`SCANcontroller.cs:2194-2208`) and parsed by `loadCustomResourceValues(ConfigNode node)` (`:2210-2289`). These values are body-resource display ranges, not player-discovered amounts (they're set from `SCANresourceBody.MinValue`/`MaxValue` which are defaulted from the resource config and operator-mutable via the SCANsat UI). **Treat as shared.**
+
+4. **Field name corrections** vs the 2026-05-18 audit's working assumptions:
+   - Body child uses `Name` (the celestial body name string), not `BodyName`.
+   - Body child uses `Map` (the opaque coverage blob), not `body_scan`. `Map` is the output of `SCANdata.shortSerialize()` — Base64-encoded CLZF2-compressed `BinaryFormatter`-serialized `Int16[360,180]` with `/`→`-` and `=`→`_` URL-safe substitution (`SCAN_Data/SCANdata.cs:1020-1028`). Round-trip safe and opaque from the LMP side — we round-trip it as a string, never decode it.
+   - `LandingTarget` is ONE string `"lat,lon"` (e.g. `"12.3400,-45.6700"`), not separate `LandingTargetLatitude` / `LandingTargetLongitude` fields. Emitted only when MechJeb is loaded AND a vessel waypoint exists (`SCANcontroller.cs:823-828`).
+   - `ClampHeight` is emitted only when `body_scan.TerrainConfig.ClampTerrain` is non-null (`SCANcontroller.cs:834-836`). Optional on every body.
+   - Sensor field names are lowercase-underscore: `type`, `fov`, `min_alt`, `max_alt`, `best_alt`, `require_light` (not PascalCase). Vessel uses lowercase `guid` and `name`.
+
+5. **30+ KSPField root-level UI scalars on `SCANcontroller`** (`:52-121`) — `mainMapVisible`, `bigMapColor`, `zoomMapType`, `overlaySelection`, etc. These persist via KSP's stock KSPField mechanism at the ScenarioModule root level (NOT inside any child container) when KSP serialises the scenario. They are pure UI preferences (window visibility, palette selection, projection mode); they are not player-progress. **Treat as shared.** The per-agency design intentionally does not partition them; under gate=on every client sees whatever the operator-seed scenario contained, plus their own runtime mutations get suppressed by the router (Path B). Tradeoff: minor visual difference between clients vs gate=off — acceptable.
+
+6. **`SCAN_Settings_Config`** (`SCANsat/SCAN_Settings_Config.cs`) is an EXTERNAL config file at `GameData/SCANsat/PluginData/Settings.cfg`, not part of any scenario blob. It hooks `GameEvents.onGameStateSaved` to write the file, but the file lives outside the savegame entirely. Untouched by Stage 5 per-agency design.
+
+7. **SCANsat ships ZERO Contract Configurator contracts** — confirmed by repo scan: no `ContractParameter` subclass, no CC config files. The `BodyContextKeys` sanitisation in `LmpClient/Systems/Scenario/ScenarioSystem.cs` defends against the external `CC_SCANsat` pack. Per-agency contract routing under `AgencyContractRouter` already handles SCANsat-pack contracts via the generic Q6 path.
+
+8. **PartModule persistence is bottle-shaped via vessel-proto** and does not need fork-side intervention:
+   - `SCANsat : PartModule, IScienceDataContainer` (`SCAN_PartModules/SCANsat.cs`): one `[KSPField(isPersistant)] bool scanning`. Rides vessel-proto.
+   - `ModuleSCANresourceScanner : SCANsat` (`SCAN_PartModules/SCANresourceScanner.cs`): inherits `scanning`. No additional persistent fields.
+   - `SCANexperiment` (`SCAN_PartModules/SCANexperiment.cs`): persists `List<ScienceData>` via stock `ScienceData.Save`. Rides vessel-proto.
+   - `SCANresourceDisplay` (`SCAN_PartModules/SCANresourceDisplay.cs`): no persistent fields.
+   - `SCANRPMStorage` (`SCAN_PartModules/SCANRPMStorage.cs`): persists `SCANsatRPM → Prop` children (per-IVA-prop map state). Rides vessel-proto. UI-only state — does not impact per-agency partitioning.
 
 ### State inventory
 
@@ -165,17 +223,25 @@ With Luna Compat + this fork aligned on versions:
 
 ### Last validated
 
-- **Fork commit:** `c36d6f97` (2026-05-18)
-- **SCANsat upstream:** `KSPModStewards/SCANsat`, `master` branch, WebFetch pass on 2026-05-18.
+- **Fork commit:** `3628da08` (2026-05-19 re-walk); `c36d6f97` (2026-05-18 original pass).
+- **SCANsat upstream:** `KSPModStewards/SCANsat`, master branch HEAD `0d67371911e9cf9a8a08cc7f7e23a9cccb006dae`. Shallow clone at `F:/tmp/mks-external/SCANsat` per the `[[reference-mks-external-clones]]` precedent. Original 2026-05-18 audit was WebFetch-based; 2026-05-19 re-walk uses the local clone for thorough multi-file traversal.
 - **Fork files re-read:** `LmpClient/Systems/Scenario/ScenarioSystem.cs` (BodyIndexKeys + BodyContextKeys + `FindMissingBodyReference`), `Server/System/Agency/AgencyContractRouter.cs` (SharedScenarioStates = {Offered, Generated}), `Server/System/Agency/AgencyScenarioProjector.cs` (CareerScenarios set + `SpliceAgencyContractsIntoScenario`), `Server/System/ScenarioSystem.cs` (`SendScenarioModules`), `LmpCommon/Message/Data/ModMsgData.cs` (relay shape).
-- **SCANsat files inspected:** `SCANsat/SCANcontroller.cs` (KSPScenario attribute + OnLoad/OnSave shape), `SCANsat/SCANsat.cs` (PartModule + persistent fields), `SCANsat/SCANresourceScanner.cs` (extends SCANsat with no extra isPersistant), top-level `SCANsat/SCAN_Data/` file inventory.
-- **Corrections applied this pass:**
+- **SCANsat files inspected (2026-05-19 re-walk):** `SCANsat/SCANcontroller.cs:40-2289` (KSPScenario attribute + OnLoad/OnSave + KSPField root scalars + `saveResources`/`loadCustomResourceValues` helpers + GameEvents subscriptions), `SCAN_Data/SCANdata.cs:1020-1047` (`shortSerialize`/`shortDeserialize` blob format), `SCAN_PartModules/SCANsat.cs:52` (`bool scanning` persistent), `SCAN_PartModules/SCANresourceScanner.cs` (inherits SCANsat, no additional persistent fields), `SCAN_PartModules/SCANexperiment.cs:94-115` (ScienceData persistence — rides vessel-proto), `SCAN_PartModules/SCANRPMStorage.cs:25-73` (RPM IVA prop state — rides vessel-proto), `SCAN_PartModules/SCANresourceDisplay.cs` (no persistent fields), `SCANquickload.cs:15-71` (DEBUG-only KSPAddon, NOT a ScenarioModule), `SCAN_UI/SCANsatRPM.cs:31` (InternalModule, NOT a ScenarioModule), `SCAN_Settings_Config.cs:194-203` (external Settings.cfg, not a scenario surface), full grep for `ContractParameter`/`ContractConfigurator` (confirmed empty).
+- **Corrections applied 2026-05-18:**
   1. `ContractSystem` projection is no longer deferred — slice (j) shipped (covered in previous pass).
-  2. Coverage persistence question answered from source: lives in `SCANcontroller`'s OnSave `Progress` child nodes, `body_scan.integerSerialize()`. `SCANcontroller` is not in `AgencyScenarioProjector.CareerScenarios`, so today's behaviour is shared-coverage-across-agencies.
+  2. Coverage persistence question answered from source: lives in `SCANcontroller`'s OnSave `Progress` child nodes. `SCANcontroller` is not in `AgencyScenarioProjector.CareerScenarios`, so today's behaviour is shared-coverage-across-agencies.
   3. SCANsat itself ships no CC contract definitions; the BodyContextKeys protect against an *external* CC pack's payload. Operational implication: SCANsat CC pack must be in the frozen modlist if the operator advertises SCANsat contracts.
-- **Gaps still open (product calls, not research):** all resolved 2026-05-18 — see below.
+- **Corrections applied 2026-05-19 (this pass):**
+  1. `Progress` is a SINGLE container with `Body` children; original audit's wording "per-body Progress child nodes" was reading-ambiguous and consumed wrong by the spec.
+  2. `Scanners → Vessel → Sensor` is 3-level nested with 1-N sensors per vessel — the audit flattened nested Sensor records into Vessel scalars, which is implementation-wrong.
+  3. `SCANResources` is a third root container not enumerated by the original audit (rule: shared, not partitioned per §6).
+  4. Field-name corrections: `Name` (not `BodyName`), `Map` (not `body_scan`), single `LandingTarget` string (not split lat/lon), lowercase sensor field names, lowercase `guid`/`name` on Vessel.
+  5. `ClampHeight` + `LandingTarget` are conditional emits (optional per body).
+  6. 30+ root-level KSPField UI scalars are persisted at the ScenarioModule root by KSP (rule: shared per §7).
+  7. SCANsat ships exactly ONE ScenarioModule (`SCANcontroller`). Other candidate classes (`SCANquickload`, `SCANsatRPM`) are NOT ScenarioModules — DEBUG-only `KSPAddon` and `InternalModule` respectively. The 2026-05-18 audit row for `SCANsat/SCANsat.cs` was correct on the PartModule side; the rest of the enumeration here is supplemental.
+- **Gaps still open (product calls, not research):** all resolved 2026-05-18 / 2026-05-19 — see Decisions table.
 
-### Decisions ratified — 2026-05-18
+### Decisions ratified — 2026-05-18 (extended 2026-05-19)
 
 | Question | Answer |
 |----------|--------|
@@ -183,6 +249,10 @@ With Luna Compat + this fork aligned on versions:
 | §2 Layering on first connect | **Each agency starts at 0% on every body.** No baseline shared layer. |
 | §3 Scanner-node filtering | **Filter to per-agency-owned vessels** (consistent with `lmpOwningAgency`). |
 | §4 Modlist policy | (Resolved earlier) Mandatory + version-pinned per [README.md](README.md). |
+| §6 SCANResources scope (2026-05-19 re-walk) | **Shared, NOT partitioned.** `MinMaxValues` is body-resource display range, not player-discovered amount; `MinColor`/`MaxColor`/`Transparency` are visualization config. The 2026-05-18 audit did not enumerate this container; the re-walk caught it. Pin: do not include `SCANResources` in the per-agency router/projector partition. |
+| §7 Root UI scalars (2026-05-19 re-walk) | **Shared, frozen at operator seed.** The ~30 `KSPField` root-level scalars (`mainMapVisible`, `bigMapColor`, `zoomMapProjection`, etc.) are UI preferences. Under gate=on the router suppresses the shared-store write, so each client's runtime UI tweaks accumulate in their LOCAL `SCANcontroller` state but the SERVER's projection always serves the operator-seeded baseline scalars. Acceptable tradeoff: minor visual config difference between gate=on and gate=off; no operator pain. |
+| §8 Body-level scope (2026-05-19 re-walk) | **All Body fields per-agency, not just `Map`.** The `Disabled` / `MinHeightRange` / `MaxHeightRange` / `ClampHeight` / palette fields are runtime-mutable per-player UI preferences (set via SCANsat's body-config UI). Partitioning the WHOLE `Body` child node — rather than carving out just `Map` — is simpler to reason about and the per-body wire-bytes overhead (~8 small strings × bodies × agencies) is trivial. |
+| §9 Multi-Sensor-per-Vessel handling (2026-05-19 re-walk) | **`AgencyScannerEntry` carries `List<SensorRecord>` nested**, not flat. The original spec's flat fields (`SensorType`, `Fov`, `MinAlt`, `MaxAlt`) cannot represent a vessel running multiple sensors simultaneously — the audit-via-prespec catch that drove the re-walk. Sensor record is its own type: `{ SensorType, Fov, MinAlt, MaxAlt, BestAlt, RequireLight }`. |
 | §5 Luna Compat plugin coordination | **Fork-side router takes precedence.** Operator policy: disable LunaCompat's SCANsat server plugin entry (`ModSettingsStructure.xml`) when `PerAgencyCareer` is on. No upstream coordination owed. |
 
 Project-wide precedent: this answer also governs FFT antimatter factory ([near-future-and-far-future.md](near-future-and-far-future.md)) and DMagic asteroid science + anomaly records ([dmagic-orbital-science.md](dmagic-orbital-science.md)) — both share the same architectural shape.

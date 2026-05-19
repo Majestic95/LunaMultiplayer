@@ -2,6 +2,8 @@
 
 **Status.** Ratified 2026-05-18 against fork `c36d6f97`; **re-ratified 2026-05-19** against fork `c7d8e9f2` (post-MKS merge `d4ff0511` + BUG-038 XML prologue fix + per-agency contract relay v3 hotfix). The post-MKS-rebase addendum (D1/D2/D3 design decisions + M1–M11 mechanical rebases) has been folded into this document; the addendum itself is archived at [archive/implementation-spec-post-mks-rebase.md](archive/implementation-spec-post-mks-rebase.md) for the historical paper trail.
 
+**S2 re-walked 2026-05-19** against SCANsat SHA `0d67371` (local clone at `F:/tmp/mks-external/SCANsat`). The S2 section's entry shapes, container layout, and field names were corrected to match verbatim source — see [SCANsat.md](SCANsat.md) "Re-walked 2026-05-19" subsection for the authoritative structural facts. Decisions §6 (SCANResources shared), §7 (root UI scalars shared), §8 (all Body fields per-agency), §9 (multi-Sensor-per-Vessel nested) extend the 2026-05-18 ratification.
+
 All per-mod audits ([SCANsat](SCANsat.md), [MJ2](MechJeb2.md), [`[x]` Science](x-science-continued.md), [OPM](outer-planets-mod.md), [KER](kerbal-engineer-redux.md), [KAS](kerbal-attachment-system.md), [KIS](kerbal-inventory-system.md), [Trajectories](trajectories.md), [DPAI](docking-port-alignment-indicator.md), [TweakScale](tweakscale.md), [Near Future + FFT](near-future-and-far-future.md), [DMagic](dmagic-orbital-science.md)) are complete. All design questions are resolved. This document consolidates the resulting code slices in implementation order.
 
 **Operating context.** Branch `feature/per-agency`. All slices are gated behind `AgencySystem.PerAgencyEnabled` (the combined `PerAgencyCareer=true && GameMode==Career` check) and produce **zero observable behaviour change** when the gate is off, per the Stage 5 dual-mode contract.
@@ -247,19 +249,57 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
 
 **New files**
 
+> **Structural authority (2026-05-19 re-walk).** The entry shapes below were rewritten 2026-05-19 against the local SCANsat clone at `F:/tmp/mks-external/SCANsat` SHA `0d67371`. The 2026-05-18 audit-derived shapes assumed flat fields on Scanner and missed `SCANResources`; both were fixed in [SCANsat.md](SCANsat.md) Decisions §6/§7/§8/§9. See SCANsat.md "Re-walked 2026-05-19" subsection for the verbatim source citations.
+>
+> **Three root containers exist** in the `SCANcontroller` blob: `Scanners`, `Progress`, `SCANResources`. The Path B router touches only the first two; **`SCANResources` is shared** per Decision §6 (its `MinMaxValues` is per-body resource display range / world config, not player-discovered amount). The ~30 root-level `KSPField` UI scalars are also shared per Decision §7.
+>
+> **`Scanners → Vessel → Sensor` is three-level nested.** Each Vessel node may contain 1-N Sensor children (a single vessel running survey + altimetry + resource sensors simultaneously). The entry type below carries `List<AgencyScannerSensorRecord>` to preserve this shape — flat fields cannot represent it.
+
 - `Server/System/Agency/AgencyCoverageBodyEntry.cs`
-  - Persistent shape mirrors SCANsat's `Progress` child node: `string BodyName`, `byte[] BodyScan` (the integer-serialised bitmap), `double TerrainConfigMin`, `double TerrainConfigMax`, palette settings, landing-target lat/lon. Serialise via the post-MKS pattern (invariant-culture doubles per **Invariant 9**).
+  - One per body. Mirrors SCANsat's `Progress → Body` child node verbatim:
+    ```csharp
+    public string BodyName;                 // -> "Name" (the celestial body's bodyName, e.g. "Kerbin")
+    public bool Disabled;                   // -> "Disabled"
+    public float MinHeightRange;            // -> "MinHeightRange"
+    public float MaxHeightRange;            // -> "MaxHeightRange"
+    public float? ClampHeight;              // -> "ClampHeight" (nullable; emit only if non-null)
+    public string PaletteName;              // -> "PaletteName"
+    public int PaletteSize;                 // -> "PaletteSize"
+    public bool PaletteReverse;             // -> "PaletteReverse"
+    public bool PaletteDiscrete;            // -> "PaletteDiscrete"
+    public string Map;                      // -> "Map" — opaque Base64-CLZF2-BinaryFormatter blob (URL-safe `/`→`-`, `=`→`_`); round-trip as string, NEVER decode
+    public string LandingTarget;            // -> "LandingTarget" (nullable; "lat,lon" combined string; emit only if non-null)
+    ```
+    Per Decision §8, ALL Body fields are partitioned per-agency (not just `Map`). Invariant-culture doubles + floats on serialize per **Invariant 9** (BUG-013 precedent).
+- `Server/System/Agency/AgencyScannerSensorRecord.cs` *(new — required by multi-Sensor-per-Vessel finding)*
+  - Nested record type — one per active sensor on a vessel. Mirrors `Scanners → Vessel → Sensor`:
+    ```csharp
+    public int SensorType;                  // -> "type" (SCANtype enum as int)
+    public float Fov;                       // -> "fov"
+    public double MinAlt;                   // -> "min_alt"
+    public double MaxAlt;                   // -> "max_alt"
+    public double BestAlt;                  // -> "best_alt"
+    public bool RequireLight;               // -> "require_light"
+    ```
+    Invariant-culture doubles on serialize.
 - `Server/System/Agency/AgencyScannerEntry.cs`
-  - Persistent shape mirrors SCANsat's `Scanners` child node: `Guid VesselId`, `int SensorType`, `float Fov`, `double MinAlt`, `double MaxAlt`. Indexed by `VesselId`. Invariant-culture doubles.
+  - One per vessel. Mirrors `Scanners → Vessel`:
+    ```csharp
+    public Guid VesselId;                   // -> "guid" (lowercase)
+    public string VesselName;               // -> "name" (lowercase) — informational; KSP looks it up at load time from FlightGlobals
+    public List<AgencyScannerSensorRecord> Sensors;  // -> N "Sensor" child nodes inside the Vessel node
+    ```
+    Indexed in `AgencyState.Scanners` by `VesselId`. Migrates with vessel under `transferagency` per D3.
 - `Server/System/Agency/AgencyScanRouter.cs`
   - `public static class AgencyScanRouter`
-  - `public static bool TryRoute(ClientStructure client, string scenarioText)` — caller is the `RawConfigNodeInsertOrUpdate` ingress for module name `SCANcontroller`. Returns `true` when the per-agency path handled the inbound; caller suppresses the shared-scenario write.
-  - Router shape mirrors `AgencyKolonyRouter.TryRoute` (see "Canonical post-MKS reference patterns" above): single try/catch per entry, batch loop holds the per-agency lock once, no owner echo (Path B).
-  - Parses the inbound scenario blob, splits per-body and per-vessel state into the sender's `AgencyState.Coverage` / `AgencyState.Scanners`, persists via `AgencySystem.SaveAgency`.
+  - `public static bool TryRoute(ClientStructure client, string scenarioText)` — caller is the `RawConfigNodeInsertOrUpdate` ingress for module name `SCANcontroller`. Returns `true` when the per-agency path handled the inbound; caller suppresses the shared-scenario write (Path B per D1).
+  - Router shape mirrors `AgencyKolonyRouter.TryRoute`: single try/catch per entry, batch loop holds the per-agency lock once, no owner echo (Path B), no dedicated wire.
+  - Parses the inbound `SCANcontroller` blob; iterates the `Progress → Body` children into `AgencyState.Coverage` (body-keyed upsert); iterates the `Scanners → Vessel → Sensor` children into `AgencyState.Scanners` (vessel-keyed upsert with the nested sensor list). `SCANResources` and root-level UI scalars are explicitly IGNORED (Decision §6/§7 — shared, not partitioned). Persists via `AgencySystem.SaveAgency`.
   - Per-body upsert (latest-wins, correct under 1:1 player↔agency).
-  - Per-vessel scanner upsert filtered to the sender's owned vessels only (cross-agency scanner-record claims rejected with `LunaLog.Warning("[fix:S2-SCANsat] ...")`).
+  - Per-vessel scanner upsert filtered to the sender's owned vessels only (cross-agency scanner-record claims rejected with `LunaLog.Warning("[fix:S2-SCANsat] ...")` per Invariant 8 — Warning, not Debug, for cross-agency claims).
   - **Missing-container fallback (M8).** If the inbound blob has no `Progress` or `Scanners` container at all (operator running with an empty SCANsat install state, or pre-first-scan client), treat each missing container as a no-op for that category — NOT as a parse failure. Whole-scenario parse failure (malformed blob) still falls through to the input-unchanged path per Invariant 5.
   - Log convention: `[fix:S2-SCANsat]`. Warning on cross-agency-claim rejection; Debug on race-window drops (malformed Guid, vessel-not-in-store).
+  - **Suppression model under Path B**: under gate=on, the router's `TryRoute=true` causes the caller (`ScenarioDataUpdater.RawConfigNodeInsertOrUpdate`) to SKIP the `CurrentScenarios.AddOrUpdate("SCANcontroller", ...)` write entirely. Server's `CurrentScenarios["SCANcontroller"]` stays at the operator-seeded baseline (initial server load) forever; the projector splices per-agency state on top of that frozen baseline. Under gate=off, `TryRoute` early-returns `false` and the legacy AddOrUpdate path runs unchanged.
 
 **Existing files to modify**
 
@@ -268,7 +308,11 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
     ```csharp
     /// <summary>
     /// [Mod-compat S2 — SCANsat] Per-agency per-body coverage state. Keyed by
-    /// CelestialBody name (Ordinal compare matches SCANsat's stock convention).
+    /// CelestialBody name (Ordinal compare matches SCANsat's stock convention —
+    /// SCANsat reads `Body.Name` as a string and looks up
+    /// `FlightGlobals.Bodies.FirstOrDefault(b => b.bodyName == body_name)`).
+    /// Carries the full Body child-node shape per Decision §8: not just
+    /// coverage bitmap but also per-player palette + terrain-range UI prefs.
     ///
     /// **Concurrency contract** (same shape as <see cref="KolonyEntries"/>):
     /// mutations AND reads MUST hold <see cref="AgencySystem.GetAgencyLock"/>.
@@ -281,8 +325,13 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
 
     /// <summary>
     /// [Mod-compat S2 — SCANsat] Per-agency per-vessel active-scanner records.
-    /// Keyed by vessel GUID. Migrates with vessel under
-    /// <c>transferagency</c> (D3 — see migration policy below).
+    /// Keyed by vessel GUID. Each entry carries a nested
+    /// <see cref="AgencyScannerEntry.Sensors"/> list — a single vessel may
+    /// run survey + altimetry + resource sensors simultaneously, so the
+    /// entry-per-vessel shape with N nested sensor records is the correct
+    /// representation (Decision §9; flat fields cannot represent it).
+    /// Migrates with vessel under <c>transferagency</c> (D3 — see migration
+    /// policy below).
     ///
     /// **Concurrency contract** (same shape as <see cref="KolonyEntries"/>):
     /// mutations AND reads MUST hold <see cref="AgencySystem.GetAgencyLock"/>.
@@ -290,19 +339,22 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
     public Dictionary<Guid, AgencyScannerEntry> Scanners { get; }
         = new Dictionary<Guid, AgencyScannerEntry>();
     ```
-  - Add Serialize / Parse paths mirroring the post-MKS `KolonyEntries` shape: invariant-culture doubles, per-entry try/catch with `LunaLog.Warning("[fix:S2-SCANsat] skipped malformed entry ...")` on parse failure.
+  - Add Serialize / Parse paths mirroring the post-MKS `KolonyEntries` shape: invariant-culture doubles + floats, per-entry try/catch with `LunaLog.Warning("[fix:S2-SCANsat] skipped malformed entry ...")` on parse failure. Persisted under `SCAN_COVERAGE` and `SCAN_SCANNERS` child nodes of the agency file (mirrors `KOLONY_ENTRIES` naming convention).
 - `Server/System/Agency/AgencyScenarioProjector.cs`
   - Add `"SCANcontroller"` to `CareerScenarios`.
   - Add `case "SCANcontroller": return SpliceSCANsatCoverageIntoScenario(serializedText, targetAgency);` to the `Project` switch.
-  - New `SpliceSCANsatCoverageIntoScenario(string, AgencyState)` — round-trip through `ConfigNode`. Build via the canonical strip-then-splice template (see "Canonical post-MKS reference patterns" → `SpliceAgencyKolonyEntries`). Find-or-create both `Progress` and `Scanners` containers; strip shared children; emit per-agency children from `targetAgency.Coverage` and `targetAgency.Scanners`. UI preference scalars (`colours`, `map_*`, etc.) pass through unchanged. Per-entry isolation + whole-scenario parse-failure fallback per Invariants 4 + 5.
-  - **Empty-container retention (M9).** After stripping shared children, emit an empty `Progress { }` and empty `Scanners { }` container if the agency has no entries (rather than omitting the containers entirely). Matches stock SCANsat's `SCANcontroller.OnLoad` expectation that the containers exist even when empty. Defensive default — verifiable against [SCANsat upstream](https://github.com/KSPModStewards/SCANsat) at implementation time.
+  - New `SpliceSCANsatCoverageIntoScenario(string, AgencyState)` — round-trip through `ConfigNode`. Build via the canonical strip-then-splice template (see "Canonical post-MKS reference patterns" → `SpliceAgencyKolonyEntries`). For BOTH `Progress` and `Scanners` containers: find-or-create the container, strip shared children (`Body` and `Vessel` respectively), emit per-agency children from `targetAgency.Coverage` and `targetAgency.Scanners`. **Do NOT touch `SCANResources`** (Decision §6: shared) and **do NOT touch the ~30 root-level UI scalars** (Decision §7: shared). Whole-scenario parse-failure fallback per Invariant 5; per-entry isolation per Invariant 4.
+  - **Vessel-name source**: `AgencyScannerEntry.VesselName` is informational; SCANsat's `OnLoad` re-derives the vessel name from `FlightGlobals` at load time. Emit whatever the agency state carries; an empty string is acceptable.
+  - **Sensor list serialise**: emit one `Sensor` child node per `AgencyScannerSensorRecord` inside its parent `Vessel` node. Order is not load-bearing (SCANsat enumerates sensors-as-a-set, not list).
+  - **Empty-container retention (M9).** After stripping shared children, emit an empty `Progress { }` and empty `Scanners { }` container if the agency has no entries (rather than omitting the containers entirely). Matches `SCANcontroller.OnLoad`'s null-check shape: `node_progress != null` / `node_vessels != null` — empty containers are fine, missing containers cause the OnLoad branch to skip. Confirmed against `SCANsat/SCANcontroller.cs:614` and `:783` (re-walk 2026-05-19).
 - `Server/System/ScenarioSystem.cs` — new helper per D2:
   ```csharp
   internal static void SendScenariosToClient(ClientStructure client, params string[] scenarioNames);
   ```
 - `Server/System/HandshakeSystem.cs::HandleHandshakeRequest` — call site for the helper immediately after the existing Path A catch-up block. Pass `"SCANcontroller"` (this slice) + `"FarFutureTechnologyPersistence"` (S3) + `"DMScienceScenario"` (S4) in a single call so the helper's per-name loop handles them uniformly.
-- `Server/System/Scenario/ScenarioDataUpdater.cs` (or whichever method handles `RawConfigNodeInsertOrUpdate` for `SCANcontroller`)
-  - Before writing the shared scenario, call `AgencyScanRouter.TryRoute(client, scenarioAsConfigNode)`. If true, suppress the shared-store write.
+- `Server/System/Scenario/ScenarioBaseDataUpdater.cs` (confirmed at re-walk: `RawConfigNodeInsertOrUpdate` lives here, not in `ScenarioContractsDataUpdater.cs`)
+  - Inside the existing `Task.Run` body, after the brace-strip + `new ConfigNode(trimmed)` parse, dispatch on `scenarioModule`: when `"SCANcontroller"`, call `AgencyScanRouter.TryRoute(client, scenario)`. If it returns `true`, RETURN before `CurrentScenarios.AddOrUpdate` (Path B suppression). Otherwise fall through to the normal AddOrUpdate path (gate-off, or per-agency router declined).
+  - **Caveat at implementation time**: the current `RawConfigNodeInsertOrUpdate` signature is `(string scenarioModule, string scenarioAsConfigNode)` — it does NOT carry a `ClientStructure`. Either extend the signature to thread the sender's client through (cheap; ~3 call-site edits), OR introduce a sibling overload that takes a `ClientStructure`. The sibling-overload form is friendlier to upstream merge cost; the extended-signature form is friendlier to test code. Pick at code-time after confirming the call-site count via `grep RawConfigNodeInsertOrUpdate`.
 - **`transferagency` migration (per D3).** Extend the Slice E vessel-migration scan loop with a parallel pass: value-field-scan `AgencyState[A].Scanners` for entries with `VesselId == V`, move to `AgencyState[B].Scanners` (overwrite any pre-existing entry there). Per-body `Coverage` does **NOT** migrate (coverage is body-keyed, agency-scoped). S3 + S4 do not need migration logic — single-record / asteroid-name-keyed / body+name-keyed.
 
 **Operator policy doc update**
@@ -313,19 +365,24 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
 **Tests**
 
 - `ServerTest/Agency/AgencyScanRouterTest.cs`
-  - Two agencies; agency A submits a `SCANcontroller` blob with Eve coverage. Agency B's submitted blob with Duna coverage. Verify each agency's `AgencyState.Coverage` contains only their own bodies after both routes complete.
-  - Per-vessel scanner filter: agency A's vessel-GUID scanners present after route; agency B's not.
-  - Empty `Progress` / `Scanners` container in inbound → no-op for the missing category (M8).
-  - Cross-agency-claim rejection logs `Warning` (M4).
+  - Two agencies; agency A submits a `SCANcontroller` blob with Eve `Body` coverage entry. Agency B's submitted blob with Duna `Body` entry. Verify each agency's `AgencyState.Coverage` contains only their own body name keys after both routes complete.
+  - Per-vessel scanner filter: agency A's `Vessel.guid` present in `AgencyState[A].Scanners`; absent from `AgencyState[B].Scanners`.
+  - Multi-Sensor-per-Vessel: agency A submits a Vessel node with TWO Sensor children (e.g. SCANtype.Altimetry + SCANtype.AnomalyDetail). Verify the resulting `AgencyScannerEntry.Sensors` list has both records preserved (Decision §9).
+  - Empty `Progress` / `Scanners` container in inbound → no-op for the missing category (M8). Missing `SCANResources` container is also no-op (it's never partitioned anyway).
+  - Cross-agency-claim rejection: agency B sends a Vessel node carrying agency A's owned vessel id → upsert rejected, `LunaLog.Warning("[fix:S2-SCANsat] ...")` emitted (Invariant 8).
+  - Gate=off (`PerAgencyEnabled=false`): `TryRoute` early-returns `false`, agency-state untouched.
 - `ServerTest/Agency/AgencyScenarioProjectorSCANsatTest.cs`
-  - Synthesise a shared `SCANcontroller` blob with both agencies' content; project for agency A → output has ONLY agency A's bodies + scanners.
-  - Project against an agency with empty `Coverage`/`Scanners` → output has empty `Progress` and empty `Scanners` containers (UI prefs survive). Pins M9.
+  - Synthesise a shared `SCANcontroller` blob with two `Body` children (Eve + Duna) + two `Vessel` children (one owned by A, one by B) + a `SCANResources` container with two `ResourceType` children. Project for agency A → output `Progress` contains ONLY agency A's bodies (from `AgencyState[A].Coverage`), output `Scanners` contains ONLY agency A's vessel; `SCANResources` UNCHANGED (Decision §6); root-level UI scalars UNCHANGED (Decision §7).
+  - Project against an agency with empty `Coverage` / `Scanners` → output has empty `Progress { }` and empty `Scanners { }` containers (UI scalars + `SCANResources` survive). Pins M9.
   - Whole-scenario parse failure → return input unchanged, log `Error`.
+  - Multi-Sensor preservation through projection: agency state holds a `Vessel` with two nested `Sensor` records; projector emits both back into the projected blob's `Vessel` child. Verifies sensor-list round-trip end-to-end.
 - `ServerTest/Agency/AgencyStateSCANsatRoundTripTest.cs`
-  - Invariant-culture round-trip on every double-valued field (`TerrainConfigMin`/`Max`, `Fov`, `MinAlt`, `MaxAlt`, landing-target lat/lon). Mirrors `AgencyStateTest.Serialize_UsesInvariantCultureForDoubles` (Invariant 9 / BUG-013 precedent).
-  - Per-entry parse-failure isolation: malformed `Progress` child does not abort `Parse`, logs `Warning("[fix:S2-SCANsat] ...")`.
+  - Invariant-culture round-trip on every floating-point field across both `AgencyCoverageBodyEntry` (`MinHeightRange`, `MaxHeightRange`, `ClampHeight`) and `AgencyScannerSensorRecord` (`Fov`, `MinAlt`, `MaxAlt`, `BestAlt`). Mirrors `AgencyStateTest.Serialize_UsesInvariantCultureForDoubles` (Invariant 9 / BUG-013 precedent).
+  - Optional-field round-trip: entry with `ClampHeight == null` serialises without the field; entry with `LandingTarget == null` serialises without the field; both round-trip back to `null`.
+  - `Map` opaque-blob round-trip: a synthetic Base64-CLZF2-style string round-trips byte-equal (no accidental Trim/Normalize).
+  - Per-entry parse-failure isolation: a malformed `Body` child does not abort `Parse`, logs `Warning("[fix:S2-SCANsat] ...")`, sibling entries survive (Invariant 4).
 - `ServerTest/Agency/AgencyTransferAgencySCANsatMigrationTest.cs` (D3)
-  - Two agencies A + B. Vessel V's `Scanners` record in `AgencyState[A].Scanners`. `transferagency V A→B` → record moves to `AgencyState[B].Scanners`; absent from A; `AgencyState[B].Coverage` and `[A].Coverage` both unchanged.
+  - Two agencies A + B. Vessel V's `AgencyScannerEntry` (carrying 2 sensors) in `AgencyState[A].Scanners`. `transferagency V A→B` → entry moves to `AgencyState[B].Scanners` with the nested sensor list intact; absent from A; `AgencyState[B].Coverage` and `[A].Coverage` both unchanged.
 
 **Acceptance**
 
@@ -521,6 +578,7 @@ In addition to per-slice ServerTests:
 | D2 (synchronous connect-time catch-up via `SendScenariosToClient`) | ✅ ratified 2026-05-18, folded in 2026-05-19 |
 | D3 (`transferagency` migrate-with-vessel for S2 Scanners) | ✅ ratified 2026-05-18, folded in 2026-05-19 |
 | M1–M11 (mechanical rebases — post-MKS-canonical references, find-or-create container, log tags, lock contract, invariant culture, empty-container handling, sync catch-up) | ✅ applied 2026-05-19 |
+| S2 entry shapes corrected against verified SCANsat source (`0d67371`) — multi-Sensor nested, SCANResources shared, all-Body-fields per-agency, root UI scalars shared | ✅ applied 2026-05-19 (Decisions §6/§7/§8/§9 in SCANsat.md) |
 | Slices implemented | ⏳ pending |
 | Cross-cutting tests authored | ⏳ pending |
 | Operator policy doc update for LunaCompat coordination | ⏳ pending (folded into S2) |
