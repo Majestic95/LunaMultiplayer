@@ -390,8 +390,18 @@ namespace LmpClient
             //Set the game mode
             HighLogic.CurrentGame.Mode = ConvertGameMode(SettingsSystem.ServerSettings.GameMode);
 
-            //Set difficulty
-            HighLogic.CurrentGame.Parameters = SettingsSystem.ServerSettings.ServerParameters;
+            //Set difficulty.
+            // [fix:BUG-036] Replace per-section instead of wholesale-assigning the whole
+            // GameParameters container, so mod-added GameParameterSection subclasses
+            // registered on HighLogic.CurrentGame.Parameters (CTB / Kerbal Engineer /
+            // others) survive rejoin. Wholesale assignment used to nuke the entire list of
+            // sections including unrelated ones — operators perceived this as "mod
+            // settings reset on rejoin." Six predefined KSP sections covered explicitly
+            // (Flight / Editor / TrackingStation / SpaceCenter / Difficulty / Career);
+            // Advanced + CommNet flow through the existing CustomParams<T>() helpers
+            // below which already preserve mod sections. Ported from upstream PR #594
+            // (iddqd0, 2025-08).
+            SetParams(HighLogic.CurrentGame);
             SetAdvancedParams(HighLogic.CurrentGame);
             SetCommNetParams(HighLogic.CurrentGame);
 
@@ -413,6 +423,29 @@ namespace LmpClient
             GamePersistence.SaveGame(HighLogic.CurrentGame, "persistent", HighLogic.SaveFolder, SaveMode.OVERWRITE);
             HighLogic.CurrentGame.Start();
             LunaLog.Log("[LMP]: Started!");
+        }
+
+        /// <summary>
+        /// [fix:BUG-036] Per-section assignment of the six predefined KSP GameParameters
+        /// sections from the server-supplied <see cref="SettingsSystem.ServerSettings.ServerParameters"/>.
+        /// Used instead of wholesale-assigning <c>HighLogic.CurrentGame.Parameters = ServerParameters</c>
+        /// so any mod-registered <see cref="GameParameters.GameParameterSection"/> subclasses
+        /// living on <c>HighLogic.CurrentGame.Parameters</c> (CTB, etc.) survive the rejoin.
+        /// Ported from upstream PR #594 (iddqd0, 2025-08).
+        ///
+        /// Re-audit when KSP's <c>GameParameters</c> schema grows: a future KSP release
+        /// adding a seventh predefined section would silently leave that section at
+        /// <c>GetDefaultParameters</c> defaults instead of the server's value. Low risk
+        /// against KSP1 maintenance status, but worth catching in a future-KSP audit.
+        /// </summary>
+        public void SetParams(Game currentGame)
+        {
+            currentGame.Parameters.Flight = SettingsSystem.ServerSettings.ServerParameters.Flight;
+            currentGame.Parameters.Editor = SettingsSystem.ServerSettings.ServerParameters.Editor;
+            currentGame.Parameters.TrackingStation = SettingsSystem.ServerSettings.ServerParameters.TrackingStation;
+            currentGame.Parameters.SpaceCenter = SettingsSystem.ServerSettings.ServerParameters.SpaceCenter;
+            currentGame.Parameters.Difficulty = SettingsSystem.ServerSettings.ServerParameters.Difficulty;
+            currentGame.Parameters.Career = SettingsSystem.ServerSettings.ServerParameters.Career;
         }
 
         public void SetAdvancedParams(Game currentGame)

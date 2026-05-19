@@ -312,9 +312,9 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-036] Mod difficulty/gameplay settings reset on rejoin
 - **Severity:** Medium
-- **Status:** Open (open PR [#594](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/594) by iddqd0 "Fix game parameter syncing to not overwrite unrelated existing game parameters" sits idle from 2025)
+- **Status:** ✅ Fixed on fork (2026-05-19). Ported from upstream PR [#594](https://github.com/LunaMultiplayer/LunaMultiplayer/pull/594) (iddqd0, 2025-08, idle since filing). Root cause: `LmpClient/MainSystem.cs:StartGameNow` wholesale-assigned `HighLogic.CurrentGame.Parameters = SettingsSystem.ServerSettings.ServerParameters`, which replaces KSP's `GameParameters` container in its entirety. Any mod-registered `GameParameterSection` subclasses (CTB / Click-Through-Blocker, Kerbal Engineer, etc.) living on `HighLogic.CurrentGame.Parameters` but not on LMP's wire schema were wiped — operators perceived this as "mod settings reset every time I rejoin." Fix: new `SetParams(Game)` helper assigns the six predefined KSP sections individually (`Flight` / `Editor` / `TrackingStation` / `SpaceCenter` / `Difficulty` / `Career`) instead of replacing the container. Existing `SetAdvancedParams` + `SetCommNetParams` already used the section-preserving `CustomParams<T>()` helper and remain unchanged. Note: this is the original PR #594 author's design; the AdvancedParams / CommNet path was already correct on master so iddqd0's commit only had to address the wholesale-replace site.
 - **Sources:** [#548](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/548), [#587](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/587)
-- **Notes:** PR #594 looks like the right shape of fix; it has been open without movement since August 2025 and is now in the upstream backlog.
+- **Notes:** Adoption decision: ported verbatim (with adapter comments calling out `[fix:BUG-036]` so operators grepping `[fix:` see the entry). The original PR remains open upstream; this fork-adoption resolves the symptom for our cohort without waiting on AdmiralRadish's review queue.
 
 ### Server-side stability & performance
 
