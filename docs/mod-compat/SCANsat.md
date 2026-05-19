@@ -55,12 +55,7 @@ Scenarios this projector currently rewrites on send (verified against `Server/Sy
 
 The `ContractSystem` line was the only deferred surface listed in this doc’s prior pass — that slice has now landed (`SpliceAgencyContractsIntoScenario`), in addition to the per-agency wire echo via `AgencyContractMsgData` that 5.17d shipped.
 
-**Open design question (now answered — see mod-source walk below).** Coverage lives in `SCANcontroller`'s OnSave/OnLoad as per-body `Progress` child nodes containing integer-serialised bitmaps. `SCANcontroller` is NOT in `AgencyScenarioProjector.CareerScenarios`, so today every agency receives the unioned coverage of all players. This is consistent behaviour, not a bug — but it is a product call worth surfacing explicitly before playtest.
-
-Document your measured behaviour in the field under **both** gates:
-
-- `PerAgencyCareer` off — baseline LMP shared career.
-- `PerAgencyCareer` on — each agency isolation expectations.
+**Resolved 2026-05-18; implementation deferred to Stage 5 S2 slice.** Coverage lives in `SCANcontroller`'s OnSave/OnLoad as `Progress → Body` children carrying the opaque `Map` bitmap blob (corrected from earlier wording "per-body `Progress` child nodes" — see "Re-walked 2026-05-19" below). Pre-S2, `SCANcontroller` is NOT in `AgencyScenarioProjector.CareerScenarios`; every agency receives shared coverage. Decision §1 (Decisions table below) makes coverage per-agency once S2 ships.
 
 ---
 
@@ -128,14 +123,22 @@ Key facts the audit's first pass got wrong or omitted:
 
 ### State inventory
 
+> **Note (2026-05-19 re-walk).** The SCANcontroller persistence-shape cell was rewritten against verbatim source; the prior wording flattened multi-Sensor nesting and missed the third root container (`SCANResources`). See the "Re-walked 2026-05-19" subsection above for the authoritative description; the row below is a one-line summary.
+
 | Class / file | Role | Persistence shape |
 |--------------|------|--------------------|
-| `SCANsat/SCANcontroller.cs` (`SCANcontroller : ScenarioModule`) | Single global scenario, `[KSPScenario(AddToAllGames \| AddToExistingGames, FLIGHT, SPACECENTER, TRACKSTATION)]` | OnSave writes: per-body `Progress` child nodes (`body_scan.integerSerialize()` coverage bitmap, terrain config, landing target lat/lon); a `Scanners` child node keyed by vessel GUID (sensor type, FOV, altitude range); a `SCANResources` child node with per-body min/max per resource; ~25 UI/preference scalars (colors, map size/projection, toolbar flags). Loaded back in OnLoad symmetrically. |
-| `SCANsat/SCANsat.cs` (`SCANsat : PartModule, IScienceDataContainer`) | Scanner sensor PartModule | One `[KSPField(isPersistant = true)] bool scanning`. PartModule-side `OnLoad/OnSave` persist a `List<ScienceData> storedData` (held science before transmit/recover) plus RPM IVA prop config. |
-| `SCANsat/SCANresourceScanner.cs` (`ModuleSCANresourceScanner : SCANsat, IAnimatedModule`) | Resource-flavor sensor part | No additional `isPersistant` fields beyond what `SCANsat` adds — inherits the `scanning` bool + science container behaviour. |
-| `SCANsat/SCAN_Data/SCANdata.cs` | In-memory coverage / data class | Holds the live `Int32[]` bitmap that gets `integerSerialize()`'d on save. Not directly persisted — round-trips through `SCANcontroller`. |
-| `SCANsat/SCAN_Data/{SCANanomaly, SCANresourceBody, SCANterrainConfig, SCANwaypoint, SCANtype, SCANresourceGlobal, SCANresourceType}.cs` | Per-body / per-resource / per-anomaly support types | All consumed through `SCANcontroller`'s scenario blob — no independent save targets. |
-| `SCANsat/SCAN_UI/*` | GUI windows | Purely local; preferences fold back into `SCANcontroller`'s UI scalars. |
+| `SCANsat/SCANcontroller.cs` (`SCANcontroller : ScenarioModule`) | Single global scenario, `[KSPScenario(AddToAllGames \| AddToExistingGames, FLIGHT, SPACECENTER, TRACKSTATION)]` — the ONLY ScenarioModule SCANsat ships. | Three root containers: `Scanners → Vessel → Sensor` (3-level, 1-N sensors per vessel), `Progress → Body` (with opaque `Map` bitmap), `SCANResources → ResourceType` (display config — shared). Plus ~30 root-level KSPField UI scalars. See "Re-walked 2026-05-19" subsection for verbatim source citations + the per-field structural reference S2 implementation builds against. |
+| `SCANsat/SCANsat.cs` (`SCANsat : PartModule, IScienceDataContainer`) | Scanner sensor PartModule | One `[KSPField(isPersistant = true)] bool scanning`. PartModule-side `OnLoad/OnSave` persist a `List<ScienceData> storedData` (held science before transmit/recover). Transparent to LMP via vessel-proto. |
+| `SCANsat/SCAN_PartModules/SCANresourceScanner.cs` (`ModuleSCANresourceScanner : SCANsat, IAnimatedModule`) | Resource-flavor sensor part | No additional `isPersistant` fields beyond what `SCANsat` adds — inherits the `scanning` bool. |
+| `SCANsat/SCAN_PartModules/SCANexperiment.cs` (`SCANexperiment : PartModule, IScienceDataContainer`) | Science experiment PartModule | Persists `List<ScienceData>` via stock `ScienceData.Save`. Rides vessel-proto. |
+| `SCANsat/SCAN_PartModules/SCANRPMStorage.cs` (`SCANRPMStorage : PartModule`) | RasterPropMonitor IVA prop state | Persists `SCANsatRPM → Prop` children (per-IVA-prop UI state). Rides vessel-proto; UI-only. |
+| `SCANsat/SCAN_PartModules/SCANresourceDisplay.cs` | UI-only display module | No persistent fields. |
+| `SCANsat/SCAN_Data/SCANdata.cs` | In-memory coverage / data class | Holds the live `Int16[360,180]` bitmap that gets `shortSerialize()`'d on save (Base64-CLZF2-BinaryFormatter blob with URL-safe char escaping). Not directly persisted — round-trips through `SCANcontroller`. |
+| `SCANsat/SCAN_Data/{SCANanomaly, SCANresourceBody, SCANterrainConfig, SCANwaypoint, SCANtype, SCANresourceGlobal, SCANresourceType, SCANROC, SCANexperimentType}.cs` | Per-body / per-resource / per-anomaly support types | All consumed through `SCANcontroller`'s scenario blob — no independent save targets. |
+| `SCANsat/SCANquickload.cs` (`Debug_AutoLoadPersistentSaveOnStartup : MonoBehaviour`) | DEBUG-only `[KSPAddon]`, gated by `#if DEBUG` | NOT a ScenarioModule. No persistence surface. |
+| `SCANsat/SCAN_UI/SCANsatRPM.cs` (`JSISCANsatRPM : InternalModule`) | RPM IVA integration | NOT a ScenarioModule. Persists via `SCANRPMStorage` PartModule above. |
+| `SCANsat/SCAN_UI/*` (other) | GUI windows | Purely local; preferences fold back into `SCANcontroller`'s KSPField UI scalars. |
+| `SCANsat/SCAN_Settings_Config.cs` | `[KSPAddon(MainMenu, true)]` singleton; writes external `GameData/SCANsat/PluginData/Settings.cfg` on `GameEvents.onGameStateSaved`. | NOT a scenario surface. Outside savegame. Untouched by Stage 5 work. |
 
 **No `Contracts/` subfolder in the SCANsat repo.** SCANsat's README says "Contract Configurator contracts for scanning each planet" but ships them via a separate community CC pack (the historical [`SCANsatContracts` pack](https://forum.kerbalspaceprogram.com/topic/72679-1125-scansat-v211-real-scanning-real-science-at-warp-speed-september-20-2025/) line). That means **the `coverage` / `scanType` / `scanMode` keys in this fork's `BodyContextKeys` are sanitising payloads produced by an *external* CC mod, not SCANsat itself.** Operators expecting SCANsat-themed contracts must install the CC pack separately and the modlist must include it — this is identical to the OPM modlist-uniformity rule.
 
@@ -159,7 +162,8 @@ Cross-walked against this fork's wire layer:
 | `Contracts` | If the external SCANsat CC contract pack is installed, those contracts hit `AgencyContractRouter` like any other CC contract. Q6 commitments apply: Offered slots stay shared, post-Accept persists per-agency. **The contract's parameter (e.g. `SCANsatCoverage` requiring 80% coverage of Duna) reads from `SCANcontroller`'s shared bitmap on the accepting client.** That's the leak: two agencies who both accept "scan Duna" share progress through the bitmap even though their contract entries are per-agency. |
 | `TechNodes`, `PurchasedParts`, `ExperimentalParts` | Not touched by SCANsat. |
 | `Strategies`, `Achievements`, `FacilityLevels` | Not touched by SCANsat. |
-| (No field) | The per-body coverage bitmap. **There is no per-agency representation today.** A `CoverageBitmaps` (or equivalent) field would be the natural home if per-agency coverage is desired. |
+| `Coverage` *(planned, S2 — Decision §1)* | Per-body coverage state, including `Map` blob + per-body palette/terrain UI prefs per Decision §8. Keyed by `BodyName` (string, Ordinal). Builds on this row's prior "no per-agency representation today" framing once S2 lands. |
+| `Scanners` *(planned, S2 — Decision §1/§3)* | Per-vessel active-scanner records with nested `List<AgencyScannerSensorRecord>` per Decision §9. Keyed by `VesselId` (Guid). Migrates with vessel under `transferagency` per D3. |
 
 ### Failure modes
 
@@ -180,16 +184,22 @@ Re-stated per surface with the source walk grounding:
 | Active / background scanner sync, scanner part progress, GUID `Scanners` node mediation | **Luna Compat (Harmony + server plugin)** — already shipped. No new fork code needed. |
 | Malformed CC `coverage`/`scanType`/`scanMode` PARAMs | **Luna MP fork client** — already shipped in `ScenarioSystem.FindMissingBodyReference`. |
 | Per-agency lifecycle of accepted SCANsat CC contracts (router-side) | **Luna MP fork server** — already covered by generic `AgencyContractRouter` via Q6. No SCANsat-specific code. |
-| Shared vs per-agency planet coverage bitmap | **Open product decision** — see below. If per-agency: new `AgencyState.CoverageBitmaps` + projector splice for `SCANcontroller`. If shared (status quo): document explicitly so operators don't expect it. |
-| GUID-keyed `Scanners` node filtering by agency | **Open product decision, downstream of the bitmap decision.** Filtering scanners without filtering coverage is asymmetric and confusing; keep these aligned. |
+| Shared vs per-agency planet coverage bitmap | **Resolved 2026-05-18 → per-agency** (Decision §1). S2 ships the `AgencyState.Coverage` field + `AgencyScanRouter` + projector splice for `SCANcontroller`. |
+| `Scanners` node filtering by agency | **Resolved 2026-05-18 → per-agency-owned vessels** (Decision §3). S2's projector filters to the requesting agency's owned vessels; `transferagency` migrates vessel-keyed scanner records per D3. |
 
-### Design questions raised by the source walk (for product call)
+### Design questions raised by the source walk
 
-1. **Coverage scoping.** Should each agency see their own scanned bitmap of every body, or stay shared (current)? Shared makes "exploration is collective" and avoids divergence; per-agency makes science / CC contracts truly isolated. **No design code change recommended until this is answered.**
-2. **If per-agency**: should reconnecting clients see *only their agency's* coverage, or a per-agency layer over a baseline shared layer? (The second has no current precedent in the fork; the first matches the strip-and-splice pattern of every other Stage 5.17e-6 surface.)
-3. **Scanner-node filtering**: if per-agency coverage is adopted, should the `Scanners` node project per-agency-owned vessels only, or stay shared? Suggested: project per-agency-owned (matches `lmpOwningAgency` already on vessels).
-4. ~~**External SCANsat CC pack as mandatory modlist entry**~~ — **resolved 2026-05-18.** Project-wide operator policy: all mods (including the external SCANsat CC pack) are mandatory and version-pinned for every joiner. See README.md "Operator policy — modlist uniformity" for the global rule. The fork's `BodyContextKeys` sanitisation remains in place as defence-in-depth, not as a supported operating state.
-5. **Luna Compat plugin coordination**: if we adopt per-agency coverage, does the Luna Compat server plugin need an agency-aware mode (additional payload on its existing wire), or do we route SCANsat scenario projection entirely through this fork and disable that part of the Luna Compat plugin? Coordination with Luna Compat upstream required either way.
+All resolved — see the **Decisions ratified** table below. Summary for quick scan:
+
+1. ~~Coverage scoping per-agency vs shared~~ — Decision §1 (per-agency).
+2. ~~Per-agency layer vs baseline-plus-overlay~~ — Decision §2 (each agency starts at 0%; no shared baseline).
+3. ~~Scanner-node filtering scope~~ — Decision §3 (per-agency-owned vessels only).
+4. ~~External SCANsat CC pack as mandatory modlist entry~~ — resolved earlier; see [README.md](README.md) "Operator policy — modlist uniformity."
+5. ~~Luna Compat plugin coordination~~ — Decision §5 (fork-side router takes precedence; operator disables LunaCompat's SCANsat server-plugin entry in `Universe\LunaCompat\ModSettingsStructure.xml` under `PerAgencyCareer=on`).
+6. ~~`SCANResources` scope~~ (added 2026-05-19) — Decision §6 (shared, not partitioned).
+7. ~~Root-level UI scalars scope~~ (added 2026-05-19) — Decision §7 (shared, frozen at operator seed under gate=on).
+8. ~~Body-field scope: just `Map`, or all Body fields per-agency?~~ (added 2026-05-19) — Decision §8 (all Body fields).
+9. ~~Multi-Sensor-per-Vessel representation~~ (added 2026-05-19) — Decision §9 (nested `List<AgencyScannerSensorRecord>` on `AgencyScannerEntry`).
 
 ---
 
@@ -200,7 +210,7 @@ Re-stated per surface with the source walk grounding:
 | Sync scanning parts, timers, orbit modules, RPC-style progress between clients | Luna Compat (Harmony + cfg + server plugin) |
 | Malformed SCANsat CC contract nodes on ingest | Luna MP fork client (`ScenarioSystem` validation path) |
 | Which agency owns an accepted SCANSat contract lifecycle | Luna MP fork server (`AgencyContractRouter` + future client mirror completeness) |
-| Shared vs per-agency “world map uncovered %” semantics | Design decision — possibly **explicit new persistence** if product requires divergence |
+| Shared vs per-agency “world map uncovered %” semantics | **Resolved → per-agency** (Decision §1). S2 implementation slice ships the per-agency `AgencyState.Coverage` persistence; see [implementation-spec.md](implementation-spec.md) §S2. |
 
 ---
 

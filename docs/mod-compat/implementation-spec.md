@@ -243,7 +243,7 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
 
 ## S2 — SCANsat per-agency coverage
 
-**Goal.** Each agency owns their own `SCANcontroller` state (per-body coverage bitmaps + the `Scanners` vessel-GUID list). Each agency starts at zero coverage on first connect to a fresh server. Operator policy: LunaCompat's SCANsat server plugin entry is disabled when `PerAgencyCareer` is on.
+**Goal.** Each agency owns their own `SCANcontroller` state — both the `Progress → Body` children (full Body shape per Decision §8: coverage `Map` blob + per-body palette + terrain ranges) and the `Scanners → Vessel → Sensor` nesting (per Decision §9: vessel-keyed entries with nested sensor list). Each agency starts at zero coverage on first connect to a fresh server. `SCANResources` and the ~30 root-level UI scalars stay shared (Decision §6/§7). Operator policy: LunaCompat's SCANsat server plugin entry is disabled when `PerAgencyCareer` is on.
 
 **Architecture: Path B (per D1).** Server-side router intercepts `RawConfigNodeInsertOrUpdate`; no client-side Harmony, no dedicated wire, no `IgnoredScenarios` entry, no owner echo. Synchronous connect-time catch-up via `ScenarioSystem.SendScenariosToClient` (per D2).
 
