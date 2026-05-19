@@ -1,8 +1,10 @@
 using LmpCommon.Message.Data.ShareProgress;
+using LmpCommon.Message.Server;
 using LunaConfigNode.CfgNode;
 using Server.Client;
 using Server.Context;
 using Server.Log;
+using Server.Server;
 using Server.Settings.Structures;
 using Server.System.Scenario;
 using System;
@@ -126,7 +128,7 @@ namespace Server.System.Agency
                 ApplyPerAgencyBatch(client, agencyId, agency, perAgencyEntries);
 
             if (sharedEntries.Count > 0)
-                ApplySharedBatch(sharedEntries);
+                ApplySharedBatch(client, sharedEntries);
 
             return true;
         }
@@ -184,14 +186,27 @@ namespace Server.System.Agency
         }
 
         /// <summary>
-        /// Routes Offered / Generated contracts to the shared scenario via the existing
-        /// <see cref="ScenarioDataUpdater.WriteContractDataToFile"/> path. We rebuild a
-        /// fresh <see cref="ShareProgressContractsMsgData"/> rather than mutating the
-        /// inbound — the existing writer iterates by <c>ContractCount</c> and our split
-        /// would otherwise leave per-agency entries in the array with a smaller count
-        /// (silent index mismatch).
+        /// Routes Offered / Generated contracts to the shared scenario AND relays the
+        /// shared subset to other connected clients via the legacy
+        /// <see cref="ShareProgressSrvMsg"/> path. We rebuild a fresh
+        /// <see cref="ShareProgressContractsMsgData"/> rather than mutating the inbound —
+        /// the existing writer iterates by <c>ContractCount</c> and our split would
+        /// otherwise leave per-agency entries in the array with a smaller count
+        /// (silent index mismatch), and the relay payload would carry another agency's
+        /// post-Accept state (spec §10 Q1 privacy violation).
+        ///
+        /// <para><b>Why peer relay is required.</b> Under <c>PerAgencyCareer=on</c>,
+        /// only the contract-lock holder generates contracts locally — every other
+        /// client has <c>ContractSystem.generateContractIterations=0</c> set by
+        /// <c>LmpClient/Harmony/ContractSystem_OnAwake.cs</c>. Without this relay,
+        /// non-lock-holding peers would never see live Offered/Generated updates and
+        /// would have to reconnect to pick them up from <c>SendScenarioModules</c>'s
+        /// projection. The relay payload contains ONLY shared-pool states; per-agency
+        /// entries route through <see cref="ApplyPerAgencyBatch"/>'s owner-only echo
+        /// (<see cref="AgencySystemSender.SendContractsToOwner"/>) so spec §10 Q1 is
+        /// not violated.</para>
         /// </summary>
-        private static void ApplySharedBatch(List<ContractInfo> entries)
+        private static void ApplySharedBatch(ClientStructure sender, List<ContractInfo> entries)
         {
             // ShareProgressContractsMsgData has an internal ctor — it's an
             // IMessageData and must come from the production factory so the
@@ -200,6 +215,20 @@ namespace Server.System.Agency
             var sharedMsg = ServerContext.ServerMessageFactory.CreateNewMessageData<ShareProgressContractsMsgData>();
             sharedMsg.ContractCount = entries.Count;
             sharedMsg.Contracts = entries.ToArray();
+
+            // Relay to all other connected clients. Mirror order of the legacy
+            // shared-agency path in ShareContractsSystem.ContractsReceived (relay first,
+            // then persist) — the relay enqueues onto Lidgren's send thread immediately
+            // while WriteContractDataToFile's Task.Run defers the disk write.
+            //
+            // INHERITED RACE NOTE: ContractInfo.Serialize calls Common.ThreadSafeCompress
+            // which reassigns Data to compressed bytes in place. If Lidgren's send-thread
+            // serialize wins against WriteContractDataToFile's Task.Run, the disk write
+            // parses compressed bytes as UTF-8 and silently drops the entry. This race
+            // is pre-existing in the legacy ShareContractsSystem ordering (relay then
+            // write) and has shipped without observed corruption — out of scope here.
+            MessageQueuer.RelayMessage<ShareProgressSrvMsg>(sender, sharedMsg);
+
             ScenarioDataUpdater.WriteContractDataToFile(sharedMsg);
         }
 

@@ -26,8 +26,13 @@ namespace MockClientTest
     ///        spec §10 Q1).</item>
     ///   <item>Under gate=on, an Offered contract sent by Alice is NOT echoed back as
     ///        <see cref="AgencyContractMsgData"/> (Offered contracts stay in the shared
-    ///        pool — Q6 commitment a) and NOT relayed to Bob (the projector / scenario
-    ///        path delivers them on demand, not as a push).</item>
+    ///        pool — Q6 commitment a), but IS relayed to Bob via the legacy
+    ///        <see cref="ShareProgressContractsMsgData"/> envelope. Without this relay,
+    ///        peers (who all have <c>generateContractIterations=0</c> because they
+    ///        don't hold the contract lock) would never see live Offered updates and
+    ///        would only get them on reconnect via <c>SendScenarioModules</c> projection.
+    ///        Privacy is preserved because the relayed payload contains only Offered /
+    ///        Generated entries — per-agency state never reaches the relay.</item>
     ///   <item>Per-agency contracts persist into <see cref="AgencyState.Contracts"/>
     ///        and round-trip to disk via the existing <see cref="AgencySystem.SaveAgency"/>
     ///        path.</item>
@@ -94,8 +99,17 @@ namespace MockClientTest
         }
 
         [TestMethod]
-        public void GateOn_OfferedContract_StaysInSharedScenario_NoOwnerEcho_NoPeerRelay()
+        public void GateOn_OfferedContract_StaysInSharedScenario_NoOwnerEcho_RelaysToPeer()
         {
+            // Pinned 2026-05-19 after soak finding: under PerAgencyCareer=on, peers
+            // do NOT generate contracts locally (ContractSystem_OnAwake sets
+            // generateContractIterations=0 for anyone who doesn't hold the contract
+            // lock). The shared scenario write alone only helps clients who reconnect
+            // afterwards — it does NOT push Offered updates to peers already in-flight.
+            // The router must relay the shared subset of the batch to peers so they
+            // see live updates, the same way the legacy shared-agency path did. Privacy
+            // is preserved because the relayed payload contains ONLY shared-pool states
+            // (Offered / Generated); per-agency entries take the owner-only echo path.
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
 
             using (var alice = new MockNetClient())
@@ -116,12 +130,25 @@ namespace MockClientTest
                 Assert.IsNull(strayEcho,
                     "Owner received an AgencyContractMsgData echo for an Offered contract — Q6 commitment (a) violated.");
 
-                // Privacy rule under gate=on: no peer relay. (In a future stage the
-                // projector will deliver Offered contracts via SendScenarioModules; for
-                // now they just live in the shared scenario, picked up on scene change.)
-                var strayShare = bob.WaitForReply<ShareProgressContractsMsgData>(TimeSpan.FromMilliseconds(200));
-                Assert.IsNull(strayShare,
-                    "Peer received a relayed ShareProgressContractsMsgData under gate=on for an Offered contract.");
+                // Live relay to peer: Bob receives the Offered contract via the legacy
+                // ShareProgressContractsMsgData envelope. Without this, peers see only
+                // stock built-in contracts ("Orbit Kerbin") and never get CC-generated
+                // Offereds — the soak-finding symptom that motivated this fix.
+                var relayed = bob.WaitForReply<ShareProgressContractsMsgData>(TimeSpan.FromSeconds(5));
+                Assert.IsNotNull(relayed,
+                    "Peer did NOT receive the relayed ShareProgressContractsMsgData for an Offered contract — peers cannot generate locally under gate=on, so this relay is the only live-update path.");
+                Assert.AreEqual(1, relayed.ContractCount);
+                Assert.AreEqual(contractGuid, relayed.Contracts[0].ContractGuid);
+
+                // Owner does NOT receive their own broadcast back (MessageQueuer.RelayMessage
+                // skips the sender). Peer also gets no AgencyContractMsgData for someone
+                // else's Offered — Q6 commitment (a) keeps Offereds out of per-agency wire.
+                var ownerSelfRelay = alice.WaitForReply<ShareProgressContractsMsgData>(TimeSpan.FromMilliseconds(200));
+                Assert.IsNull(ownerSelfRelay,
+                    "Owner received their own contract broadcast back — RelayMessage should skip the sender.");
+                var peerStrayAgency = bob.WaitForReply<AgencyContractMsgData>(TimeSpan.FromMilliseconds(200));
+                Assert.IsNull(peerStrayAgency,
+                    "Peer received an AgencyContractMsgData for an Offered contract — privacy/state-class invariant violated.");
 
                 // Alice's per-agency Contracts list stays empty — Offered never persists per-agency.
                 var aliceAgencyId = AgencySystem.AgencyByPlayerName["h-017d-offer-a"];
