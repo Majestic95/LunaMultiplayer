@@ -453,5 +453,138 @@ namespace LmpClientTest
             Assert.AreEqual(1, registry.Count, "no extra entries materialised");
             Assert.AreEqual(agencyId, registry[vesselId]);
         }
+
+        // --- Mod-compat S6: DetermineOutboundStamp ---
+        //
+        // Pins VesselSerializer.PreSerializationChecks's outbound-proto stamping
+        // decision. The helper is consulted on every outbound vessel proto wire
+        // serialization to re-inject lmpOwningAgency stripped by KSP's
+        // ProtoVessel.Save. Server-side first-stamp / preserve protects against
+        // any divergence; the value of the stamp matters for peer-side
+        // AgencySystem.VesselOwnership mirrors which read directly from the
+        // relayed bytes.
+
+        [TestMethod]
+        public void DetermineOutboundStamp_GateOff_ReturnsEmpty()
+        {
+            // Dual-mode silence: PerAgencyCareer=false → never stamp. The
+            // existing-relay-path contract is "no Agency wire under gate=off"
+            // (Stack Notes 2026-05-17 5.17d closure) and this helper preserves
+            // it by writing nothing into the outbound ConfigNode.
+            var mirror = Guid.NewGuid();
+            Assert.AreEqual(Guid.Empty, AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: true,
+                mirrorStampedAgencyId: mirror,
+                perAgencyEnabledClientGate: false));
+        }
+
+        [TestMethod]
+        public void DetermineOutboundStamp_KnownVesselWithRealId_ReassertsMirror()
+        {
+            // The common case: vessel was stamped server-side via 5.16b first-stamp,
+            // VesselSync round-tripped the value into our mirror, now we're sending
+            // a periodic drift-correction. KSP's Save stripped lmpOwningAgency;
+            // we re-inject the mirror's known value so peer-side mirrors don't
+            // see "field absent → preservation rule → stale" for a vessel
+            // whose canonical agency is known.
+            var ownerOnMirror = Guid.NewGuid();
+            Assert.AreEqual(ownerOnMirror, AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: true,
+                mirrorStampedAgencyId: ownerOnMirror,
+                perAgencyEnabledClientGate: true));
+        }
+
+        [TestMethod]
+        public void DetermineOutboundStamp_KnownVesselAsUnassigned_DoesNotUpgrade()
+        {
+            // 2026-05-19 upgrade-lens fix. The pre-0.31 sticky-Unassigned
+            // contract (Stack Notes 2026-05-17 Round-5: "pre-existing vessels
+            // including the Unassigned sentinel are sticky") forbids the
+            // relay path from converting an Unassigned vessel to any agency
+            // — admin-mediated transferagency is the only legitimate path.
+            // A LocalAgencyId fallback here would silently de-facto transfer
+            // every pre-0.31 vessel to whatever local agency happens to
+            // serialise it. Server-side branch (a) preserves Empty correctly,
+            // but the relayed bytes would carry LocalAgencyId and clobber
+            // peer mirrors via RecordOwnership's write-through-non-Empty rule.
+            // Pin Guid.Empty (no stamp) to forbid the upgrade at this layer.
+            Assert.AreEqual(Guid.Empty, AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: true,
+                mirrorStampedAgencyId: Guid.Empty,
+                perAgencyEnabledClientGate: true));
+        }
+
+        [TestMethod]
+        public void DetermineOutboundStamp_UnknownVessel_DoesNotStamp()
+        {
+            // 2026-05-19 reconnect-window fix. AgencySystem.OnDisabled clears
+            // VesselOwnership on disconnect. Between reconnect and the
+            // server's VesselSync repopulating the mirror, every locally-
+            // serialised vessel (including peer-owned vessels KSP happens
+            // to physics-load nearby) appears here as "vesselKnownToMirror
+            // false". A LocalAgencyId stamp would relay our stamp onto
+            // someone else's vessel, corrupting peer mirrors. Server-side
+            // branch (a) catches it (preserves canonical owner), but
+            // relayed bytes are the corruption vector. Pin Guid.Empty.
+            //
+            // The KIS-attach / fresh-launch acceptance case the original
+            // spec cited is covered by the server's branch (b) which
+            // resolves canonical owner from sender-PlayerName regardless
+            // of the wire field. Peer mirrors see "Unassigned" briefly
+            // until the next VesselSync — cosmetic, not corruption.
+            Assert.AreEqual(Guid.Empty, AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: false,
+                mirrorStampedAgencyId: Guid.Empty,
+                perAgencyEnabledClientGate: true));
+        }
+
+        [TestMethod]
+        public void DetermineOutboundStamp_UnknownVessel_WithMirrorStampedAgency_StillNoStamp()
+        {
+            // Edge case: vesselKnownToMirror=false but mirrorStampedAgencyId
+            // happens to be non-Empty. This shouldn't be possible from
+            // TryGetOwningAgency's contract (false ⇒ out param = default,
+            // which is Guid.Empty for Guid), but pin the contract anyway
+            // so a future refactor that loosens the helper's invariants
+            // doesn't silently open the "unknown + caller-supplied real id"
+            // path back into the LocalAgencyId-fallback shape we deleted.
+            var phantom = Guid.NewGuid();
+            Assert.AreEqual(Guid.Empty, AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: false,
+                mirrorStampedAgencyId: phantom,
+                perAgencyEnabledClientGate: true));
+        }
+
+        [TestMethod]
+        public void DetermineOutboundStamp_GateOff_KnownVessel_StillNoStamp()
+        {
+            // Reconfirm dual-mode silence under the "known vessel" condition
+            // (gate-off path runs first in the helper). Under gate=off the
+            // server's relay path doesn't emit any Agency wire either, so
+            // outbound proto stamping would create a one-sided wire that
+            // peer clients ignore at best, mis-handle at worst.
+            var ownerOnMirror = Guid.NewGuid();
+            Assert.AreEqual(Guid.Empty, AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: true,
+                mirrorStampedAgencyId: ownerOnMirror,
+                perAgencyEnabledClientGate: false));
+        }
+
+        [TestMethod]
+        public void DetermineOutboundStamp_KnownVesselWithRealId_ReassertsRegardlessOfLocalAgency()
+        {
+            // Documents the contract that the helper does not consult
+            // LocalAgencyId. The "transferagency lag" mitigation depends
+            // on this: peer P's mirror says V is owned by A; P serialises
+            // V; P's stamp = A regardless of P's own (possibly-Empty,
+            // possibly-something-else) agency. The helper does not accept
+            // a localAgencyId parameter so we can't even pass one in by
+            // accident; that's the documentation that survives a refactor.
+            var ownerOnMirror = Guid.NewGuid();
+            Assert.AreEqual(ownerOnMirror, AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: true,
+                mirrorStampedAgencyId: ownerOnMirror,
+                perAgencyEnabledClientGate: true));
+        }
     }
 }

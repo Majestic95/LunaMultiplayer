@@ -1,4 +1,6 @@
 ﻿using LmpClient.Extensions;
+using LmpClient.Systems.Agency;
+using LmpClient.Systems.SettingsSys;
 using LmpClient.Utilities;
 using System;
 
@@ -93,6 +95,34 @@ namespace LmpClient.VesselUtilities
             }
 
             var vesselId = new Guid(configNode.GetValue("pid"));
+
+            // [Mod-compat S6] Re-inject lmpOwningAgency stripped by ProtoVessel.Save.
+            // ProtoVessel.Save only writes KSP-known fields, so the unknown top-level
+            // lmpOwningAgency that VesselDataUpdater wrote into the canonical store
+            // never makes it back out through this path — every owner resend would
+            // otherwise arrive at peer clients with the field absent, leaving their
+            // AgencySystem.VesselOwnership mirrors stuck on the previously-recorded
+            // value until the next VesselSync. We only re-assert when the local
+            // mirror knows the vessel's real (non-Empty) agency — never originate
+            // a stamp from LocalAgencyId, because the relay path would then become
+            // a peer-mirror corruption vector under reconnect / transferagency-lag
+            // / pre-0.31-Unassigned races. See AgencyMembership.DetermineOutboundStamp
+            // XML for the three races and why the LocalAgencyId fallback is
+            // intentionally excluded.
+            var vesselKnownToMirror = AgencySystem.Singleton.TryGetOwningAgency(vesselId, out var mirrorStampedAgencyId);
+            var stampAgencyId = AgencyMembership.DetermineOutboundStamp(
+                vesselKnownToMirror: vesselKnownToMirror,
+                mirrorStampedAgencyId: mirrorStampedAgencyId,
+                perAgencyEnabledClientGate: SettingsSystem.ServerSettings.PerAgencyCareerEnabled);
+
+            if (stampAgencyId != Guid.Empty)
+            {
+                var stampValue = stampAgencyId.ToString("N");
+                if (configNode.HasValue("lmpOwningAgency"))
+                    configNode.SetValue("lmpOwningAgency", stampValue);
+                else
+                    configNode.AddValue("lmpOwningAgency", stampValue);
+            }
 
             //Defend against NaN orbits
             if (configNode.VesselHasNaNPosition())

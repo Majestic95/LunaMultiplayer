@@ -241,5 +241,120 @@ namespace LmpClient.Systems.Agency
             if (vesselOwningAgencyId == Guid.Empty) return false;
             return vesselOwningAgencyId != localAgencyId;
         }
+
+        /// <summary>
+        /// Mod-compat S6 — outbound-proto agency stamp decision helper. Returns the
+        /// agency id that <c>VesselSerializer.PreSerializationChecks</c> should write
+        /// into the outbound ConfigNode's <c>lmpOwningAgency</c> top-level field, or
+        /// <see cref="Guid.Empty"/> when no stamp should be written.
+        ///
+        /// <para><b>Why outbound stamping is needed.</b> KSP's
+        /// <c>ProtoVessel.Save(ConfigNode)</c> strips unknown top-level fields like
+        /// <c>lmpOwningAgency</c> on every owner resend (KSP doesn't know the field;
+        /// see the matching note on <see cref="RecordOwnership"/>). The server-side
+        /// store preserves the canonical value via
+        /// <c>VesselDataUpdater.RawConfigNodeInsertOrUpdate</c>'s first-stamp /
+        /// preserve logic, so server state is safe. But the relay path forwards the
+        /// ORIGINAL wire bytes to peer clients, which means peer-side
+        /// <c>AgencySystem.VesselOwnership</c> mirrors see "field absent → Empty"
+        /// for every relayed resend. The preservation rule in
+        /// <see cref="RecordOwnership"/> keeps prior values intact, but it can't
+        /// upgrade an Unassigned-sentinel (or absent) entry into a real id without
+        /// an authoritative push. Peer UI labels can therefore show "Unassigned"
+        /// for a freshly-created or recently-relayed vessel until the next
+        /// VesselSync round-trip lands. This helper closes that window for the
+        /// common case (known-vessel real-id re-assertion) and deliberately leaves
+        /// the other cases unstamped, so the relay path can never originate a new
+        /// stamp from this client (which would clobber peer mirrors that hold the
+        /// authoritative value).</para>
+        ///
+        /// <para><b>Branch logic (corrected by 2026-05-19 multi-lens review).</b>
+        /// <list type="bullet">
+        ///   <item><paramref name="perAgencyEnabledClientGate"/> false →
+        ///         <see cref="Guid.Empty"/> (dual-mode silence; no field written).</item>
+        ///   <item>Known vessel with a non-Empty real id in mirror → re-assert
+        ///         that id on the wire. Covers the common case: vessel was
+        ///         stamped server-side via 5.16b first-stamp, then VesselSync
+        ///         populated our mirror; KSP stripped the field on resend; we
+        ///         put it back so peer mirrors stay synchronised without
+        ///         needing another VesselSync round-trip.</item>
+        ///   <item>Everything else (unknown vessel / known-as-Unassigned /
+        ///         pre-handshake) → <see cref="Guid.Empty"/>. The local agency
+        ///         id is intentionally NOT used as a fallback even when
+        ///         non-Empty; see <b>Why no LocalAgencyId fallback</b> below.
+        ///         The helper does not even accept the local agency as a
+        ///         parameter, so a future contributor adding the fallback
+        ///         has to plumb it in explicitly — forcing the trade-off to
+        ///         be re-evaluated rather than slip in silently.</item>
+        /// </list></para>
+        ///
+        /// <para><b>Why no LocalAgencyId fallback.</b> Stamping the local
+        /// agency id on unknown / Unassigned-known vessels would corrupt
+        /// peer mirrors in three documented races:
+        /// <list type="number">
+        ///   <item><b>Reconnect window.</b> <see cref="AgencySystem.OnDisabled"/>
+        ///         clears the registry; until the post-reconnect VesselSync
+        ///         repopulates it, every locally-serialised vessel — including
+        ///         peer-owned vessels KSP happens to physics-load — would be
+        ///         relayed to peers with our stamp on it. Server-side branch (a)
+        ///         preserves canonical ownership, but peer-side
+        ///         <see cref="RecordOwnership"/> writes non-Empty through
+        ///         unconditionally — UI labels flip until the next authoritative
+        ///         push lands.</item>
+        ///   <item><b>Pre-0.31 Unassigned upgrade.</b> A pre-0.31 vessel
+        ///         persisted with no <c>lmpOwningAgency</c> is server-side
+        ///         <see cref="Guid.Empty"/> (Unassigned-sentinel per spec §10
+        ///         Q3 — sticky, transferagency-only-mediated). Mirror entry is
+        ///         <see cref="Guid.Empty"/>. A LocalAgencyId-fallback would
+        ///         silently de-facto transfer it to the local agency via the
+        ///         relay path, bypassing the admin-mediated transfer requirement.
+        ///         The 2026-05-17 Round-5 upgrade-lens fix explicitly pins this
+        ///         contract; this helper preserves it.</item>
+        ///   <item><b>Transferagency lag.</b> Admin <c>transferagency V → C</c>:
+        ///         <c>AgencyVisibilityMsgData</c> ships on ch 22; outbound proto
+        ///         on ch 8. Lidgren reliable-ordered is per-channel, no
+        ///         cross-channel ordering. A peer who has NOT yet received the
+        ///         visibility push but DOES periodically serialise V (e.g. as a
+        ///         physics-loaded nearby vessel) would stamp the stale prior
+        ///         owner on the wire — clobbering peers who DID receive the
+        ///         visibility push back to the prior owner.</item>
+        /// </list>
+        /// The KIS-attach acceptance case the original spec cited (stamp our
+        /// agency on a freshly-created vessel that's about to become ours) is
+        /// already covered by the server-side first-stamp branch (b), which
+        /// resolves the canonical owner from <c>AgencyByPlayerName[client.PlayerName]</c>
+        /// regardless of the wire field's presence. Peer mirrors will see
+        /// "Unassigned" for the brief window between the local-create and the
+        /// server's authoritative VesselSync reply — cosmetic, not corruption.
+        /// </para>
+        ///
+        /// <para><b>Cross-agency relay safety.</b> A peer client (B) who happens to
+        /// serialize vessel V_A (owned by A) — e.g. KSP tracking-station "Fly"
+        /// loads V_A locally — reads <paramref name="mirrorStampedAgencyId"/> = A
+        /// (their mirror's value for V_A) and stamps A on the wire. Server-side
+        /// <c>RawConfigNodeInsertOrUpdate</c> branch (a) preserves V_A's
+        /// canonical agency (A). Peer-side mirrors receiving the relay write A
+        /// via <see cref="RecordOwnership"/>. No corruption. The only stale-mirror
+        /// hazard left is the transferagency-lag race documented above, mitigated
+        /// by the explicit non-fallback rule.</para>
+        /// </summary>
+        public static Guid DetermineOutboundStamp(
+            bool vesselKnownToMirror,
+            Guid mirrorStampedAgencyId,
+            bool perAgencyEnabledClientGate)
+        {
+            if (!perAgencyEnabledClientGate) return Guid.Empty;
+
+            if (vesselKnownToMirror && mirrorStampedAgencyId != Guid.Empty)
+                return mirrorStampedAgencyId;
+
+            // Intentionally no LocalAgencyId fallback (no LocalAgencyId
+            // parameter, even). See XML "Why no LocalAgencyId fallback" for
+            // the three races this closes. The deliberate parameter removal
+            // makes the contract grep-friendly: any future caller that wants
+            // to stamp from LocalAgencyId has to plumb it in explicitly,
+            // forcing the trade-off to be re-evaluated.
+            return Guid.Empty;
+        }
     }
 }
