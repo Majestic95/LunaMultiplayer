@@ -325,7 +325,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-038] XML prologue encoding is declared wrong in server config files
 - **Severity:** Medium (correctness; can bite localized installs)
-- **Status:** Open
+- **Status:** ✅ Fixed on fork (2026-05-19). Root cause: `StringWriter.Encoding` is hard-coded to UTF-16, which both `XmlSerializer.Serialize` and `XmlDocument.Save` inspect when writing the `<?xml ?>` declaration; `File.WriteAllText` then writes the string as UTF-8 no-BOM, so the on-disk prologue's `encoding="utf-16"` claim disagrees with the actual bytes. Fix: wrap the three internal `new StringWriter()` sites in `LmpCommon/Xml/LunaXmlSerializer.cs` in a private `Utf8StringWriter : StringWriter` subclass that overrides `Encoding => UTF8`. Symmetric patch applied to the GUI's duplicated pipeline in `Tools/AdminGui/LunaServerGui/Services/SettingsXmlService.cs` to preserve the documented byte-equivalence contract — without it, every operator-edited file would ping-pong its prologue on each server save (the GUI's content-equality check would always disagree with the server's). Backward compat: pre-fix utf-16-prologue files load cleanly because `StreamReader` BOM-detects then falls back to UTF-8; first save post-update rewrites the prologue once via `ContentChecker` length-mismatch detection, subsequent saves no-op.
 - **Sources:** [#602](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/602)
 
 #### [BUG-039] Cannot add custom keys in `gameplaysettings.xml`

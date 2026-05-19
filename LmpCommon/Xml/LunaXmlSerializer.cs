@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Xml;
 using System.Xml.Serialization;
 
@@ -9,6 +10,16 @@ namespace LmpCommon.Xml
 {
     public class LunaXmlSerializer
     {
+        // [fix:BUG-038] StringWriter.Encoding is hard-coded to UTF-16, which XmlSerializer
+        // and XmlDocument inspect when writing the prologue. The disk write (File.WriteAllText)
+        // uses UTF-8 no-BOM, producing a prologue that disagrees with the actual byte encoding.
+        // Wrapping the buffers in a UTF-8-claiming StringWriter aligns the declaration with the
+        // bytes without changing the wire format or on-disk byte stream for ASCII content.
+        private sealed class Utf8StringWriter : StringWriter
+        {
+            public override Encoding Encoding => Encoding.UTF8;
+        }
+
         #region Read
 
         public static T ReadXmlFromPath<T>(string path) where T : class, new()
@@ -84,14 +95,14 @@ namespace LmpCommon.Xml
             string returnString;
             try
             {
-                using (var s = new StringWriter())
+                using (var s = new Utf8StringWriter())
                 using (var w = new XmlTextWriter(s))
                 {
                     w.Formatting = Formatting.Indented;
                     var serializer = new XmlSerializer(objectToSerialize.GetType());
                     serializer.Serialize(w, objectToSerialize);
                     var tempString = WriteComments(objectToSerialize, s.ToString());
-                    using (var sw = new StringWriter())
+                    using (var sw = new Utf8StringWriter())
                     using (var sr = new StringReader(tempString))
                     using (var xmlReader = new XmlTextReader(sr))
                     {
@@ -162,7 +173,7 @@ namespace LmpCommon.Xml
         {
             try
             {
-                using (var stringWriter = new StringWriter())
+                using (var stringWriter = new Utf8StringWriter())
                 {
                     var propertyComments = GetPropertiesAndComments(objectToSerialize);
                     if (!propertyComments.Any()) return contents;

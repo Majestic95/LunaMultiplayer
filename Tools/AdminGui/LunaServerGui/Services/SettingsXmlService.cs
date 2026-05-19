@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Xml;
 using System.Xml.Serialization;
 using LunaServerGui.SettingsCatalog;
@@ -159,14 +160,14 @@ public sealed class SettingsXmlService
         ArgumentNullException.ThrowIfNull(instance);
 
         string returnString;
-        using (var s = new StringWriter())
+        using (var s = new Utf8StringWriter())
         using (var w = new XmlTextWriter(s))
         {
             w.Formatting = Formatting.Indented;
             var serializer = new XmlSerializer(instance.GetType());
             serializer.Serialize(w, instance);
             var tempString = WriteComments(instance, s.ToString());
-            using var sw = new StringWriter();
+            using var sw = new Utf8StringWriter();
             using var sr = new StringReader(tempString);
             using var xmlReader = new XmlTextReader(sr);
             var xmlWriter = XmlWriter.Create(sw, new XmlWriterSettings { Indent = true });
@@ -235,7 +236,7 @@ public sealed class SettingsXmlService
             foreach (var child in children)
                 parent.InsertBefore(doc.CreateComment(propertyComments[child.Name]), child);
 
-            using var stringWriter = new StringWriter();
+            using var stringWriter = new Utf8StringWriter();
             doc.Save(stringWriter);
             return stringWriter.ToString();
         }
@@ -254,5 +255,17 @@ public sealed class SettingsXmlService
             .ToDictionary(
                 p => p.Name,
                 p => p.GetCustomAttribute<XmlCommentAttribute>()!.Value);
+    }
+
+    // [fix:BUG-038] Mirrors LmpCommon/Xml/LunaXmlSerializer.Utf8StringWriter so the
+    // server↔GUI byte-equivalence contract documented in the class header survives the
+    // prologue-encoding fix. StringWriter.Encoding is hard-coded to UTF-16, which
+    // XmlSerializer / XmlDocument.Save inspect when writing the <?xml ?> declaration;
+    // the disk write is UTF-8 no-BOM. Without this override, GUI-written files would
+    // declare utf-16 while the server-written ones declare utf-8 → server's
+    // load-then-Save re-rewrites the prologue on every restart, churning mtime + backups.
+    private sealed class Utf8StringWriter : StringWriter
+    {
+        public override Encoding Encoding => Encoding.UTF8;
     }
 }
