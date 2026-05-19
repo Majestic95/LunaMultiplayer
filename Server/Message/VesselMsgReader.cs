@@ -424,6 +424,15 @@ namespace Server.Message
                 dominantVessel.AuthoritativeSubspaceId = client.Subspace;
             }
 
+            //[Mod-compat S1] Reconcile lmpOwningAgency on the surviving vessel. The kept vessel
+            //keeps its stamp by default; the one mutation is when kept was Unassigned (pre-0.31
+            //sentinel) and merged was tracked — in which case adopt the merged stamp to preserve
+            //agency continuity. Cross-agency couples (both stamps non-Empty, differ) emit a
+            //Warning for operator visibility. Covers stock docking + KAS pipe coupling identically
+            //(both ride Part.Couple). No-op under gate=off. See AgencyVesselCoupleReconciler.cs
+            //for the full rule table.
+            AgencyVesselCoupleReconciler.Reconcile(msgData.VesselId, msgData.CoupledVesselId);
+
             //Now remove the weak vessel but DO NOT add to the removed vessels as they might undock!!!
             LunaLog.Debug($"Removing weak coupled vessel {msgData.CoupledVesselId}");
             VesselStoreSystem.RemoveVessel(msgData.CoupledVesselId);

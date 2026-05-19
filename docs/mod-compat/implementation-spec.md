@@ -2,6 +2,8 @@
 
 **Status.** Ratified 2026-05-18 against fork `c36d6f97`; **re-ratified 2026-05-19** against fork `c7d8e9f2` (post-MKS merge `d4ff0511` + BUG-038 XML prologue fix + per-agency contract relay v3 hotfix). The post-MKS-rebase addendum (D1/D2/D3 design decisions + M1–M11 mechanical rebases) has been folded into this document; the addendum itself is archived at [archive/implementation-spec-post-mks-rebase.md](archive/implementation-spec-post-mks-rebase.md) for the historical paper trail.
 
+**S5 / S6 hook names corrected 2026-05-19** against local clones at `F:/tmp/mks-external/X-Science` SHA `eb8bfd3a`, `F:/tmp/mks-external/KIS` SHA `1620d0cb`, `F:/tmp/mks-external/LunaCompat` SHA `25e164bf`. The 2026-05-18 audit's spec'd Harmony targets (`ScienceContext.GetUnloadedAndLoadedVesselScience` for S5; `KISAddonPickup.FinishAttach` for S6) **do not exist** in the actual mod source. Real targets are `ScienceContext.UpdateOnboardScience` (private void, `X-Science/ScienceContext.cs:122-203`) and the existing-LunaCompat-patched `KIS_Shared.CreatePart` chokepoint (already patched at `LunaCompat/Mods/KerbalInventorySystem/KisIntegration.cs:40-43` — S6 extends `PostfixCreatePart`). See §S5 + §S6 below for the corrected hook shapes. The csproj orphan check (the trap that retired S3) passes on both: `ScienceContext.cs` and `KISAddonPickup.cs` are in their respective compiled DLLs. Audit re-walk recipe from [[feedback-audit-via-prespec]] caught the wrong-target error before any code shipped.
+
 **S2 re-walked 2026-05-19** against SCANsat SHA `0d67371` (local clone at `F:/tmp/mks-external/SCANsat`). The S2 section's entry shapes, container layout, and field names were corrected to match verbatim source — see [SCANsat.md](SCANsat.md) "Re-walked 2026-05-19" subsection for the authoritative structural facts. Decisions §6 (SCANResources shared), §7 (root UI scalars shared), §8 (all Body fields per-agency), §9 (multi-Sensor-per-Vessel nested) extend the 2026-05-18 ratification.
 
 **S3 RETIRED 2026-05-19** against FFT SHA `ad59fbb5` (local clone at `F:/tmp/mks-external/FarFutureTechnologies`). The 2026-05-18 audit's central premise — that FFT ships a `FarFutureTechnologyPersistence` ScenarioModule — was structurally invalid: the orphan source file is not in FFT's csproj Compile list and references symbols that don't exist in the source tree. Stock FFT has no shared global state to partition; all real state is per-`PartModule` already partitioned via `lmpOwningAgency`. Full retirement record at §S3 + [near-future-and-far-future.md "Re-walked 2026-05-19"](near-future-and-far-future.md). FFT joins the "no work owed" list.
@@ -527,22 +529,26 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
 
 **Goal.** `[x]` Science Continued's onboard / unrecovered science checklist no longer shows science aboard vessels owned by other agencies.
 
-**Owner.** Luna Compat sidecar (or a fork-specific Luna Compat companion if upstream is slow). NOT core LMP fork.
+**Owner.** Luna Compat sidecar (fork at `Majestic95/LunaCompat`, per the 2026-05-19 source-walk decision; PR back to `TheXankriegor/LunaCompat` after soak). **NOT this fork's codebase.**
 
-**Harmony target.** `KSP_X_Science.ScienceContext` — the vessel enumeration inside the data-rebuild method (precise method name TBD at implementation time; the file is `X-Science/ScienceContext.cs` upstream, search for `FlightGlobals.Vessels.Where(x => x.loaded)`).
+**Hook target (corrected 2026-05-19).** `KSP_X_Science.ScienceContext.UpdateOnboardScience` — private void instance method at `X-Science/ScienceContext.cs:122-203`. The original spec'd `GetUnloadedAndLoadedVesselScience` does not exist in upstream. `UpdateOnboardScience` enumerates `FlightGlobals.Vessels.Where(x => x.loaded)` at line 134 AND walks unloaded vessels via `HighLogic.CurrentGame.flightState.Save(node)` → `node.GetNodes("VESSEL")` at lines 167-174 — both branches need filtering. Output goes into private `_onboardScience` dict exposed via public `OnboardScienceList` getter at line 33.
 
 **Hook shape**
 
 ```csharp
-[HarmonyPatch(typeof(ScienceContext), "GetUnloadedAndLoadedVesselScience")]  // or whatever the upstream method is named
+[HarmonyPatch(typeof(ScienceContext), "UpdateOnboardScience")]
 public static class ScienceContext_FilterByAgency_Patch
 {
-    public static IEnumerable<Vessel> Postfix(IEnumerable<Vessel> __result)
+    public static void Postfix(ScienceContext __instance)
     {
-        if (!LmpClientAgency.PerAgencyEnabled)
-            return __result;
+        if (!LmpClientAgency.PerAgencyEnabled) return;
         var myAgency = LmpClientAgency.LocalAgencyId;
-        return __result.Where(v => LmpClientAgency.GetVesselAgency(v) == myAgency);
+        // Filter __instance.OnboardScienceList in place — entries whose
+        // underlying Vessel's lmpOwningAgency does not match myAgency are
+        // removed. Two-path lookup:
+        //   - loaded branch keys are vessel guids → use AgencySystem.TryGetOwningAgency
+        //   - unloaded branch keys come from VESSEL ConfigNode → re-parse lmpOwningAgency field
+        // Implementation detail belongs in LunaCompat, not this fork's spec.
     }
 }
 ```
@@ -558,28 +564,34 @@ public static class ScienceContext_FilterByAgency_Patch
 
 **Goal.** When a KIS-stored part is attached to a new vessel via EVA, the resulting part takes the destination vessel's `lmpOwningAgency`, overwriting any stamp the snapshotted source part carried.
 
-**Owner.** Luna Compat sidecar (KIS is already a Luna Compat covered mod).
+**Owner.** Luna Compat sidecar (fork at `Majestic95/LunaCompat`). KIS is already covered by an existing LunaCompat patch — S6 EXTENDS that patch, not a new one.
 
-**Harmony target.** `KIS.KISAddonPickup` — the attach-finalisation method (precise name TBD at implementation time; search the upstream source for `OnAttachToolUsed` / `CreatePart` / similar — the path that ends with `Part` instantiation on the destination vessel).
+**Hook target (corrected 2026-05-19).** `KIS.KIS_Shared.CreatePart` — the 9-arg overload (`ConfigNode, Vector3, Quaternion, Part, Part, string, AttachNode, OnPartReady, bool`). This is the single chokepoint that BOTH `KISAddonPickup.CreateAttach` (new-part attach, `KISAddonPickup.cs:1411-1437`) AND `KISAddonPickup.MoveAttach` (re-attach via `KIS_Shared.MoveAssembly`) route through. The original spec'd `KISAddonPickup.FinishAttach` does not exist. **LunaCompat already patches this exact method** at `LunaCompat/Mods/KerbalInventorySystem/KisIntegration.cs:40-43` with a `PostfixCreatePart` that unflags-debris and broadcasts a vessel proto — S6 adds the agency restamp to the same postfix.
 
 **Hook shape**
 
 ```csharp
-[HarmonyPatch(typeof(KISAddonPickup), "FinishAttach")]  // precise name TBD
-public static class KISAddonPickup_RestampAgency_Patch
+// Extension to LunaCompat/Mods/KerbalInventorySystem/KisIntegration.cs::PostfixCreatePart
+static void PostfixCreatePart(Part __result)
 {
-    public static void Postfix(Part newPart, Vessel destinationVessel)
+    // ... existing unflags-debris + SendVesselMessage logic ...
+
+    if (LmpClientAgency.PerAgencyEnabled && __result?.vessel != null)
     {
-        if (!LmpClientAgency.PerAgencyEnabled || destinationVessel == null || newPart == null)
-            return;
-        var destAgency = LmpClientAgency.GetVesselAgency(destinationVessel);
+        var destAgency = LmpClientAgency.GetVesselAgency(__result.vessel);
         if (destAgency != Guid.Empty)
-            LmpClientAgency.StampPart(newPart, destAgency);
+        {
+            // Stamp the destination vessel's lmpOwningAgency onto the new
+            // part's top-level vessel ConfigNode field. The existing
+            // PostfixCreatePart already calls SendVesselMessage immediately
+            // after, so the stamp rides the same proto broadcast.
+            // Implementation detail belongs in LunaCompat.
+        }
     }
 }
 ```
 
-If verification confirms the stamp does NOT actually survive the KIS snapshot round-trip, this postfix is an idempotent no-op (the new part already has the right stamp). Building proactively per the decision.
+**Note on S1 interaction.** `KISAddonPickup.MoveAttach` calls `KIS_Shared.MoveAssembly` (not `Part.Couple` directly) — so the S1 server-side couple reconciler does NOT catch KIS re-attaches. S6 is therefore load-bearing for KIS-attach ownership correctness even after S1 ships. Stock docking + KAS pipe coupling DO go through `Part.Couple` and are covered by S1.
 
 **Acceptance**
 
@@ -622,6 +634,9 @@ In addition to per-slice ServerTests:
 | S2 entry shapes corrected against verified SCANsat source (`0d67371`) — multi-Sensor nested, SCANResources shared, all-Body-fields per-agency, root UI scalars shared | ✅ applied 2026-05-19 (Decisions §6/§7/§8/§9 in SCANsat.md) |
 | S2 implementation shipped (`feat(server,agency): Mod-compat S2 — SCANsat per-agency coverage + scanners` commit `9fddb7fd`) | ✅ 2026-05-19 |
 | S3 RETIRED against verified FFT source (`ad59fbb5`) — orphan ScenarioModule not in csproj Compile list; FFT joins no-work-owed list | ✅ retired 2026-05-19 |
-| Slices implemented | ⏳ pending |
-| Cross-cutting tests authored | ⏳ pending |
-| Operator policy doc update for LunaCompat coordination | ⏳ pending (folded into S2) |
+| S4 implementation shipped (`feat(server,agency): Mod-compat S4 — DMagic asteroid science + anomalies per-agency` commit `06cc7444`) | ✅ 2026-05-19 |
+| S1 implementation shipped — couple reconciler covering stock docking + KAS pipe coupling; M1 (per-vessel lock race fix) + M2 (broadcast visibility + disk flush on adopt branch) applied via multi-lens review | ✅ 2026-05-19 |
+| S5 / S6 hook targets corrected against verified upstream source — work owed to fork-LunaCompat at `Majestic95/LunaCompat` (sidecar codebase, separate from this fork) | ⏳ pending (separate session) |
+| Slices implemented | S1 + S2 + S4 done; S5 + S6 pending in LunaCompat sidecar |
+| Cross-cutting tests authored | ⏳ pending — S1+S2+S4 in-repo coverage at unit + projector level; end-to-end MockClientTest cross-cutting (couple-then-scan) deferred |
+| Operator policy doc update for LunaCompat coordination | ⏳ pending (folded into S2 SCANsat operator policy) |
