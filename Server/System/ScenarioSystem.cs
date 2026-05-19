@@ -113,15 +113,20 @@ namespace Server.System
         }
 
         /// <summary>
-        /// [Mod-compat S2 / Path B D2] Send a targeted, projected snapshot of
+        /// [Mod-compat / Path B D2] Send a targeted, projected snapshot of
         /// specific scenario modules to a single client. Used at handshake
-        /// completion to deliver per-agency projected SCANcontroller (S2) +
-        /// FarFutureTechnologyPersistence (future S3) + DMScienceScenario
-        /// (future S4) blobs WITHOUT waiting up to 30s for the next
-        /// <see cref="SendScenarioModules"/> tick. Path B routers suppress the
-        /// shared-store write under gate=on, so an owner reconnecting would
-        /// otherwise see the operator-seeded baseline scenario until the next
-        /// SHA pass — this helper closes that window.
+        /// completion to deliver per-agency projected blobs WITHOUT waiting
+        /// up to 30s for the next <see cref="SendScenarioModules"/> tick.
+        /// Path B routers suppress the shared-store write under gate=on, so
+        /// an owner reconnecting would otherwise see the operator-seeded
+        /// baseline scenario until the next SHA pass — this helper closes
+        /// that window.
+        ///
+        /// <para><b>Currently handles:</b> <c>SCANcontroller</c> (S2, commit
+        /// <c>9fddb7fd</c>) + <c>DMScienceScenario</c> (S4). Future S5/S6
+        /// (Luna Compat sidecar Harmony) append their module names to the same
+        /// call. S3 (FFT) was retired 2026-05-19 — orphan source file not in
+        /// compiled FFT.dll; see commit <c>9404bfae</c>.</para>
         ///
         /// <para>Each requested name is resolved via the same key-by-filename
         /// pattern <see cref="SendScenarioModules"/> uses

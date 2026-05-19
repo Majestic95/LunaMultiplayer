@@ -110,6 +110,16 @@ namespace Server.System.Agency
             // because the router has already filtered. No splice-time
             // ownership re-check.
             "SCANcontroller",
+            // [Mod-compat S4] DMagic Orbital Science per-agency projection.
+            // Strip-then-splice for Asteroid_Science → DM_Science (flat per-
+            // asteroid entries) and Anomaly_Records → DM_Anomaly_List →
+            // DM_Anomaly (2-level nested per Decision §B — group agency
+            // entries by BodyIndex on emit, one wrapper per body). No cross-
+            // agency rejection (no vessel keying); no transferagency
+            // migration. Wire field names lowercase (title/bsv/scv/sci/cap
+            // on asteroid; Body on wrapper; Name/Lat/Lon/Alt on anomaly per
+            // DMScienceScenario.OnLoad parse contract).
+            "DMScienceScenario",
         };
 
         /// <summary>
@@ -242,6 +252,14 @@ namespace Server.System.Agency
                 // §6 + §7 — shared, frozen at operator seed under gate=on).
                 case "SCANcontroller":
                     return SpliceSCANsatCoverageIntoScenario(serializedText, targetAgency);
+                // [Mod-compat S4] DMagic Orbital Science scenario splice. Strip
+                // shared Asteroid_Science → DM_Science children + Anomaly_Records
+                // → DM_Anomaly_List wrappers; splice in per-agency entries from
+                // AgencyState.DMagicAsteroidScience + AgencyState.DMagicAnomalies.
+                // Anomaly emit is 2-level nested per Decision §B — group entries
+                // by BodyIndex into per-body DM_Anomaly_List wrappers.
+                case "DMScienceScenario":
+                    return SpliceDMagicScienceIntoScenario(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
@@ -1387,6 +1405,195 @@ namespace Server.System.Agency
                     LunaLog.Warning(
                         $"[fix:S2-SCANsat] Vessel splice skipped for agency {targetAgency.AgencyId:N} " +
                         $"VesselId={entry.VesselId:N}: {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            return node.ToString();
+        }
+
+        /// <summary>
+        /// [Mod-compat S4] Strip shared <c>Asteroid_Science → DM_Science</c>
+        /// children and <c>Anomaly_Records → DM_Anomaly_List</c> wrappers,
+        /// splice in per-agency entries from
+        /// <see cref="AgencyState.DMagicAsteroidScience"/> +
+        /// <see cref="AgencyState.DMagicAnomalies"/>. Mirrors
+        /// <see cref="SpliceSCANsatCoverageIntoScenario"/> shape with one
+        /// extra twist — anomalies emit 2-level nested per Decision §B by
+        /// grouping agency entries on <see cref="AgencyDMagicAnomalyEntry.BodyIndex"/>.
+        ///
+        /// <para>DMScienceScenario shape (verified against
+        /// <c>F:/tmp/mks-external/DMagicOrbitalScience</c> SHA <c>a4e805b9</c>,
+        /// <c>Source/Scenario/DMScienceScenario.cs:68-182</c>):</para>
+        /// <code>
+        /// DMScienceScenario {
+        ///     Asteroid_Science { DM_Science { title=..., bsv=..., scv=..., sci=..., cap=... } ... }
+        ///     Anomaly_Records {
+        ///         DM_Anomaly_List { Body=N
+        ///             DM_Anomaly { Name=..., Lat=..., Lon=..., Alt=... } ...
+        ///         } ...
+        ///     }
+        /// }
+        /// </code>
+        ///
+        /// <para><b>Field names lowercase</b> — DMagic's OnLoad uses
+        /// <c>parse("title", ...)</c> / <c>parse("bsv", ...)</c> /
+        /// <c>parse("Name", ...)</c> / <c>parse("Lat", ...)</c> etc. The
+        /// fork-side disk format uses PascalCase (Title / BaseValue / Name /
+        /// Latitude) per the S2 disk-vs-wire convention; this splice converts
+        /// on emit.</para>
+        ///
+        /// <para><b>Numeric formats:</b> asteroid fields are <c>float</c>
+        /// (Decision §A), Lat/Lon/Alt are <c>double</c>. Both round-trip via
+        /// <c>"R"</c> + <see cref="CultureInfo.InvariantCulture"/> per
+        /// Invariant 9 (BUG-013). Stock DMagic emits anomaly coordinates
+        /// as <c>"N5"</c> (culture-sensitive); the fork's stricter "R"
+        /// output is BUG-013 defense + accepted by DMagic's parse on load.</para>
+        ///
+        /// <para><b>Anomaly group-by-BodyIndex emit (Decision §B).</b> Storage
+        /// is flat; wire is per-body nested. We build a Dictionary&lt;int,
+        /// List&lt;AgencyDMagicAnomalyEntry&gt;&gt; grouping then emit one
+        /// DM_Anomaly_List wrapper per body with that body's anomalies as
+        /// DM_Anomaly children. Empty agency → empty Anomaly_Records
+        /// container (M9 retention — DMagic.OnLoad iterates GetNodes returning
+        /// empty, harmless).</para>
+        ///
+        /// <para><b>Per-entry isolation</b> per Invariant 4 — both per-asteroid
+        /// + per-anomaly try/catch. <b>Whole-scenario parse failure</b> per
+        /// Invariant 5 — return input unchanged + log Error.</para>
+        /// </summary>
+        private static string SpliceDMagicScienceIntoScenario(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "DMScienceScenario" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:S4-DMagic] DMScienceScenario projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Find or create Asteroid_Science container, strip its DM_Science
+            // children. Same shape as KOLONIZATION strip-and-splice.
+            var asteroidContainer = node.GetNode("Asteroid_Science")?.Value;
+            if (asteroidContainer == null)
+            {
+                asteroidContainer = new ConfigNode("") { Name = "Asteroid_Science" };
+                node.AddNode(asteroidContainer);
+            }
+            else
+            {
+                foreach (var existing in asteroidContainer.GetNodes("DM_Science").ToArray())
+                    asteroidContainer.RemoveNode(existing.Value);
+            }
+
+            // Find or create Anomaly_Records container, strip its
+            // DM_Anomaly_List wrappers (which carry per-body groups —
+            // stripping a wrapper strips all its DM_Anomaly children too).
+            var anomaliesContainer = node.GetNode("Anomaly_Records")?.Value;
+            if (anomaliesContainer == null)
+            {
+                anomaliesContainer = new ConfigNode("") { Name = "Anomaly_Records" };
+                node.AddNode(anomaliesContainer);
+            }
+            else
+            {
+                foreach (var existing in anomaliesContainer.GetNodes("DM_Anomaly_List").ToArray())
+                    anomaliesContainer.RemoveNode(existing.Value);
+            }
+
+            // [Review SHOULD-FIX general#3] Snapshot under per-agency lock.
+            // `.ToArray()` copies references not values; the read-out loop
+            // below iterates outside the lock for performance (DMagic state
+            // can be large under heavy science play). This is safe ONLY because
+            // AgencyDMagicRouter.Upsert*Entries REPLACES dict slots whole-cloth
+            // (`agency.DMagicAsteroidScience[title] = new ...`) rather than
+            // mutating an existing entry's fields in place. A future router
+            // refactor that mutates instead of replaces would race against this
+            // snapshot — document the invariant on the router class XML if you
+            // ever consider that refactor. Same invariant applies to
+            // SpliceSCANsatCoverageIntoScenario (S2 precedent) and the kolony/
+            // planetary/orbital splices.
+            AgencyDMagicAsteroidEntry[] asteroidSnapshot;
+            AgencyDMagicAnomalyEntry[] anomalySnapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+            {
+                asteroidSnapshot = targetAgency.DMagicAsteroidScience.Values.ToArray();
+                anomalySnapshot = targetAgency.DMagicAnomalies.Values.ToArray();
+            }
+
+            // Splice DM_Science children (flat per-asteroid). Field names
+            // lowercase per DMagic OnLoad parse contract.
+            foreach (var entry in asteroidSnapshot)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.Title))
+                    continue;
+                try
+                {
+                    var aNode = new ConfigNode("") { Name = "DM_Science" };
+                    aNode.CreateValue(new CfgNodeValue<string, string>("title", entry.Title));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("bsv", entry.BaseValue.ToString("R", CultureInfo.InvariantCulture)));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("scv", entry.SciVal.ToString("R", CultureInfo.InvariantCulture)));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("sci", entry.Science.ToString("R", CultureInfo.InvariantCulture)));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("cap", entry.Cap.ToString("R", CultureInfo.InvariantCulture)));
+                    asteroidContainer.AddNode(aNode);
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Warning(
+                        $"[fix:S4-DMagic] DM_Science splice skipped for agency {targetAgency.AgencyId:N} " +
+                        $"title='{entry.Title}': {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            // Group anomalies by BodyIndex (Decision §B nested wire shape).
+            // Manual grouping rather than LINQ GroupBy keeps the deterministic
+            // order + lets per-entry isolation cover the group-building step.
+            var byBody = new Dictionary<int, List<AgencyDMagicAnomalyEntry>>();
+            foreach (var entry in anomalySnapshot)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.Name))
+                    continue;
+                if (!byBody.TryGetValue(entry.BodyIndex, out var list))
+                {
+                    list = new List<AgencyDMagicAnomalyEntry>();
+                    byBody[entry.BodyIndex] = list;
+                }
+                list.Add(entry);
+            }
+
+            // Emit one DM_Anomaly_List wrapper per body.
+            foreach (var kv in byBody)
+            {
+                try
+                {
+                    var listNode = new ConfigNode("") { Name = "DM_Anomaly_List" };
+                    listNode.CreateValue(new CfgNodeValue<string, string>("Body", kv.Key.ToString(CultureInfo.InvariantCulture)));
+                    foreach (var entry in kv.Value)
+                    {
+                        try
+                        {
+                            var anomNode = new ConfigNode("") { Name = "DM_Anomaly" };
+                            anomNode.CreateValue(new CfgNodeValue<string, string>("Name", entry.Name));
+                            anomNode.CreateValue(new CfgNodeValue<string, string>("Lat", entry.Latitude.ToString("R", CultureInfo.InvariantCulture)));
+                            anomNode.CreateValue(new CfgNodeValue<string, string>("Lon", entry.Longitude.ToString("R", CultureInfo.InvariantCulture)));
+                            anomNode.CreateValue(new CfgNodeValue<string, string>("Alt", entry.Altitude.ToString("R", CultureInfo.InvariantCulture)));
+                            listNode.AddNode(anomNode);
+                        }
+                        catch (Exception e)
+                        {
+                            LunaLog.Warning(
+                                $"[fix:S4-DMagic] DM_Anomaly splice skipped for agency {targetAgency.AgencyId:N} " +
+                                $"body={kv.Key} Name='{entry.Name}': {e.GetType().Name}: {e.Message}");
+                        }
+                    }
+                    anomaliesContainer.AddNode(listNode);
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Warning(
+                        $"[fix:S4-DMagic] DM_Anomaly_List wrapper splice skipped for agency {targetAgency.AgencyId:N} " +
+                        $"body={kv.Key}: {e.GetType().Name}: {e.Message}");
                 }
             }
 

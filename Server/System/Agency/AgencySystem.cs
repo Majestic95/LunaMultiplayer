@@ -202,6 +202,7 @@ namespace Server.System.Agency
                 WarnAboutSharedPlanetaryOnUpgrade();
                 WarnAboutSharedOrbitalOnUpgrade();
                 WarnAboutSharedSCANsatOnUpgrade();
+                WarnAboutSharedDMagicOnUpgrade();
                 RefuseStartupIfUpgradeHazardWithoutOverride();
                 return;
             }
@@ -334,6 +335,15 @@ namespace Server.System.Agency
             // agency starts at 0% coverage). Operator flipping the gate on an
             // existing universe with accumulated scan progress loses ALL of it.
             WarnAboutSharedSCANsatOnUpgrade();
+
+            // [Mod-compat S4] DMagic upgrade-lens diagnostic — same shape.
+            // The projector strips Asteroid_Science → DM_Science and
+            // Anomaly_Records → DM_Anomaly_List children from DMScienceScenario
+            // on first per-agency connect (each agency starts with empty
+            // asteroid-diminishing-returns log + empty discovered-anomaly
+            // record). Operator flipping the gate on an upgrade universe
+            // with accumulated DMagic state loses ALL of it.
+            WarnAboutSharedDMagicOnUpgrade();
 
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
@@ -520,6 +530,25 @@ namespace Server.System.Agency
                     {
                         var scan = scanScn.GetNode("Scanners")?.Value;
                         if (scan != null && scan.GetNodes("Vessel").Any()) hasHazard = true;
+                    }
+                }
+            }
+            // [Mod-compat S4] DMagic hazard predicate. Any shared DM_Science
+            // child under Asteroid_Science OR any DM_Anomaly_List wrapper under
+            // Anomaly_Records means the projector strips on first per-agency
+            // connect, deleting operator-visible asteroid science +
+            // anomaly records. DMagic absent from the modlist → no scenario
+            // entry → no hazard.
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("DMScienceScenario", out var dmScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("DMScienceScenario"))
+                {
+                    var asteroidNode = dmScn.GetNode("Asteroid_Science")?.Value;
+                    if (asteroidNode != null && asteroidNode.GetNodes("DM_Science").Any()) hasHazard = true;
+                    if (!hasHazard)
+                    {
+                        var anomalyNode = dmScn.GetNode("Anomaly_Records")?.Value;
+                        if (anomalyNode != null && anomalyNode.GetNodes("DM_Anomaly_List").Any()) hasHazard = true;
                     }
                 }
             }
@@ -1105,6 +1134,78 @@ namespace Server.System.Agency
                 "entry in Universe/LunaCompat/ModSettingsStructure.xml under gate=on, otherwise " +
                 "the fork's AgencyScanRouter and LunaCompat's plugin will double-process the " +
                 "scenario blob.");
+        }
+
+        /// <summary>
+        /// [Mod-compat S4 — DMagic Orbital Science] Upgrade-lens diagnostic
+        /// mirroring the SCANsat / kolony / planetary / orbital family. Pre-
+        /// existing <c>Asteroid_Science → DM_Science</c> children +
+        /// <c>Anomaly_Records → DM_Anomaly_List</c> wrappers in the shared
+        /// <c>DMScienceScenario</c> under gate=on are STRIPPED by
+        /// <see cref="AgencyScenarioProjector.SpliceDMagicScienceIntoScenario"/>
+        /// on first per-agency client connect. Each agency starts with empty
+        /// asteroid diminishing-returns log + empty discovered-anomaly record.
+        /// The accumulated state vanishes from every player's DMagic UI on
+        /// first connect.
+        ///
+        /// <para>DMagic absent from the modlist (no <c>DMScienceScenario</c>
+        /// scenario entry) → no warning. Pristine universe → no warning.
+        /// Any agency already minted → operator already chose this path →
+        /// no warning (Slice B/C/D + S2 precedent).</para>
+        ///
+        /// <para>Recovery options mirror the other upgrade-lens diagnostics:
+        /// (a) accept the loss + set
+        /// <c>AllowEnablePerAgencyOnExistingUniverse=true</c>; (b) fresh-start
+        /// workflow per spec §10; (c) stay on shared-agency mode.</para>
+        /// </summary>
+        private static void WarnAboutSharedDMagicOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint agency on a new universe is fine.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("DMScienceScenario", out var scenario))
+                return; // DMagic not in modlist or never persisted; no hazard.
+
+            int asteroidCount = 0;
+            int anomalyBodyCount = 0;
+            int anomalyTotalCount = 0;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("DMScienceScenario"))
+            {
+                var asteroidNode = scenario.GetNode("Asteroid_Science")?.Value;
+                if (asteroidNode != null)
+                    asteroidCount = asteroidNode.GetNodes("DM_Science").Count();
+                var anomalyNode = scenario.GetNode("Anomaly_Records")?.Value;
+                if (anomalyNode != null)
+                {
+                    foreach (var listEntry in anomalyNode.GetNodes("DM_Anomaly_List"))
+                    {
+                        anomalyBodyCount++;
+                        anomalyTotalCount += listEntry.Value.GetNodes("DM_Anomaly").Count();
+                    }
+                }
+            }
+
+            if (asteroidCount == 0 && anomalyTotalCount == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:S4-DMagic] PerAgencyCareer=true on an upgrade universe carries " +
+                $"shared-agency DMagic state: {asteroidCount} asteroid diminishing-returns " +
+                $"record(s) + {anomalyTotalCount} discovered-anomaly record(s) across " +
+                $"{anomalyBodyCount} celestial body wrapper(s) in the DMScienceScenario. " +
+                "The Mod-compat S4 projector strips ALL DM_Science children + ALL " +
+                "DM_Anomaly_List wrappers on first per-agency connect; accumulated " +
+                "asteroid diminishing-returns progress vanishes (agencies can re-milk " +
+                "previously-studied asteroids) and discovered-anomaly UI markers vanish " +
+                "(agencies re-discover anomalies independently). " +
+                "RECOVERY OPTIONS: " +
+                "(1) Accept the loss + set AllowEnablePerAgencyOnExistingUniverse=true in " +
+                "Settings/GameplaySettings.xml. Server boots, projector strips on first connect. " +
+                "(2) Fresh-start workflow (spec §10): stop the server, archive Universe/, " +
+                "restart. Each agency begins with empty DMagic state as designed. " +
+                "(3) Stay on shared-agency mode (PerAgencyCareer=false) — no DMagic data loss.");
         }
 
         /// <summary>

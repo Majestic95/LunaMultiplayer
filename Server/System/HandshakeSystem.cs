@@ -100,16 +100,20 @@ namespace Server.System
                         AgencySystemSender.SendOrbitalCatchupTo(client, assignedState);
                     }
 
-                    // [Mod-compat S2 / Path B D2 catch-up] Synchronous connect-
-                    // time projection for SCANsat. Without this, a reconnecting
-                    // owner sees the operator-seeded baseline SCANcontroller blob
-                    // for up to 30s (until the next SHA pass triggers a full
-                    // SendScenarioModules tick). SendScenariosToClient runs the
-                    // same per-agency projector splice that SendScenarioModules
-                    // does, but targeted at the requesting client only and only
-                    // for the named scenarios. Future S3 (FFT) + S4 (DMagic)
-                    // append their module names to the same call.
-                    ScenarioSystem.SendScenariosToClient(client, "SCANcontroller");
+                    // [Mod-compat / Path B D2 catch-up] Synchronous connect-
+                    // time projection for mod-compat per-agency scenarios.
+                    // Without this, a reconnecting owner sees the operator-
+                    // seeded baseline blob for up to 30s (until the next SHA
+                    // pass triggers a full SendScenarioModules tick).
+                    // SendScenariosToClient runs the same per-agency projector
+                    // splice that SendScenarioModules does, but targeted at
+                    // the requesting client only and only for the named
+                    // scenarios. (S3 / FarFutureTechnologyPersistence was
+                    // retired 2026-05-19 — orphan file not in compiled FFT.dll;
+                    // see docs/mod-compat/near-future-and-far-future.md.)
+                    ScenarioSystem.SendScenariosToClient(client,
+                        "SCANcontroller",       // S2
+                        "DMScienceScenario");   // S4
                 }
 
                 var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<PlayerConnectionJoinMsgData>();

@@ -239,6 +239,35 @@ namespace Server.System.Agency
             new Dictionary<Guid, AgencyScannerEntry>();
 
         /// <summary>
+        /// [Mod-compat S4 — DMagic Orbital Science] Per-agency per-asteroid
+        /// diminishing-returns science records. Keyed by <c>Title</c> string
+        /// (Ordinal — matches DMagic's <c>DMScienceScenario.recoveredDMScience</c>
+        /// dict-key convention at <c>Source/Scenario/DMScienceScenario.cs:49</c>).
+        /// Populated by <see cref="AgencyDMagicRouter"/> on inbound
+        /// <c>DMScienceScenario</c> blob ingress (Path B per implementation-spec
+        /// D1). Persisted under <c>DMAGIC_ASTEROID_SCIENCE</c> child node.
+        ///
+        /// **Concurrency contract**: same as <see cref="KolonyEntries"/>.
+        /// </summary>
+        public Dictionary<string, AgencyDMagicAsteroidEntry> DMagicAsteroidScience { get; } =
+            new Dictionary<string, AgencyDMagicAsteroidEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Mod-compat S4 — DMagic Orbital Science] Per-agency discovered
+        /// anomaly records. Keyed by composite <c>$"{BodyIndex}|{Name}"</c>
+        /// Ordinal string — flattens DMagic's 2-level nested
+        /// <c>DM_Anomaly_List → DM_Anomaly</c> wire shape (Decision §B) for
+        /// storage convenience. The projector splice reconstructs the
+        /// per-body grouping on emit. Populated by
+        /// <see cref="AgencyDMagicRouter"/> on inbound <c>DMScienceScenario</c>
+        /// blob ingress. Persisted under <c>DMAGIC_ANOMALIES</c> child node.
+        ///
+        /// **Concurrency contract**: same as <see cref="KolonyEntries"/>.
+        /// </summary>
+        public Dictionary<string, AgencyDMagicAnomalyEntry> DMagicAnomalies { get; } =
+            new Dictionary<string, AgencyDMagicAnomalyEntry>(StringComparer.Ordinal);
+
+        /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
         /// Created at server boot via <see cref="Server.Context.Universe.CheckUniverse"/>
         /// alongside the other Universe child folders, so <see cref="FileHandler.WriteAtomic"/>
@@ -581,6 +610,59 @@ namespace Server.System.Agency
             // node). Per-Vessel persistence emits the SENSOR list inline.
             // Sensor doubles round-trip via "R" + invariant culture per
             // Invariant 9.
+            // [Mod-compat S4 — DMagic Orbital Science] Per-asteroid science
+            // records. DMAGIC_ASTEROID_SCIENCE root holds ASTEROID child nodes
+            // mirroring DMagic's Asteroid_Science → DM_Science shape
+            // (Decision §A — fields are float, not double, verified at
+            // DMScienceData.cs:39-40). Disk side uses PascalCase per the
+            // S2 convention (fork-canonical for human grep); wire side at
+            // SpliceDMagicScienceIntoScenario uses DMagic-canonical
+            // lowercase (title/bsv/scv/sci/cap) for DMagic.OnLoad's parse
+            // contract.
+            if (DMagicAsteroidScience.Count > 0)
+            {
+                var asteroidRoot = new ConfigNode("") { Name = "DMAGIC_ASTEROID_SCIENCE" };
+                node.AddNode(asteroidRoot);
+                foreach (var entry in DMagicAsteroidScience.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.Title))
+                        continue;
+                    var aNode = new ConfigNode("") { Name = "ASTEROID" };
+                    aNode.CreateValue(new CfgNodeValue<string, string>("Title", entry.Title));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("BaseValue", entry.BaseValue.ToString("R", CultureInfo.InvariantCulture)));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("SciVal", entry.SciVal.ToString("R", CultureInfo.InvariantCulture)));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("Science", entry.Science.ToString("R", CultureInfo.InvariantCulture)));
+                    aNode.CreateValue(new CfgNodeValue<string, string>("Cap", entry.Cap.ToString("R", CultureInfo.InvariantCulture)));
+                    asteroidRoot.AddNode(aNode);
+                }
+            }
+
+            // [Mod-compat S4 — DMagic Orbital Science] Per-anomaly records.
+            // DMAGIC_ANOMALIES root holds ANOMALY child nodes (FLAT — disk-
+            // side storage convenience per Decision §B). The wire shape is
+            // 2-level nested (per-body wrapper containing per-anomaly
+            // children); the projector splice reconstructs that nesting on
+            // emit by grouping entries by BodyIndex. Lat/Lon/Alt round-trip
+            // via "R" + invariant culture per Invariant 9 (BUG-013 precedent;
+            // stock DMagic emits "N5" which is culture-sensitive).
+            if (DMagicAnomalies.Count > 0)
+            {
+                var anomaliesRoot = new ConfigNode("") { Name = "DMAGIC_ANOMALIES" };
+                node.AddNode(anomaliesRoot);
+                foreach (var entry in DMagicAnomalies.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.Name))
+                        continue;
+                    var anNode = new ConfigNode("") { Name = "ANOMALY" };
+                    anNode.CreateValue(new CfgNodeValue<string, string>("BodyIndex", entry.BodyIndex.ToString(CultureInfo.InvariantCulture)));
+                    anNode.CreateValue(new CfgNodeValue<string, string>("Name", entry.Name));
+                    anNode.CreateValue(new CfgNodeValue<string, string>("Latitude", entry.Latitude.ToString("R", CultureInfo.InvariantCulture)));
+                    anNode.CreateValue(new CfgNodeValue<string, string>("Longitude", entry.Longitude.ToString("R", CultureInfo.InvariantCulture)));
+                    anNode.CreateValue(new CfgNodeValue<string, string>("Altitude", entry.Altitude.ToString("R", CultureInfo.InvariantCulture)));
+                    anomaliesRoot.AddNode(anNode);
+                }
+            }
+
             if (Scanners.Count > 0)
             {
                 var scannersRoot = new ConfigNode("") { Name = "SCAN_SCANNERS" };
@@ -1147,6 +1229,70 @@ namespace Server.System.Agency
                     }
 
                     state.Scanners[vesselId] = entry;
+                }
+            }
+
+            // [Mod-compat S4 — DMagic Orbital Science] Per-asteroid science
+            // parse. Forward-compat: pre-S4 agency files have no
+            // DMAGIC_ASTEROID_SCIENCE node and skip cleanly to an empty dict.
+            // Per-entry isolation: missing/empty Title skips the slot with a
+            // [fix:S4-DMagic] Warning (Invariant 4 + BUG-013 precedent).
+            var asteroidRoot = node.GetNode("DMAGIC_ASTEROID_SCIENCE")?.Value;
+            if (asteroidRoot != null)
+            {
+                foreach (var aEntry in asteroidRoot.GetNodes("ASTEROID"))
+                {
+                    var entryNode = aEntry.Value;
+                    var title = entryNode.GetValue("Title")?.Value;
+                    if (string.IsNullOrEmpty(title))
+                    {
+                        LunaLog.Warning("[fix:S4-DMagic] ASTEROID entry skipped: missing Title");
+                        continue;
+                    }
+
+                    state.DMagicAsteroidScience[title] = new AgencyDMagicAsteroidEntry
+                    {
+                        Title = title,
+                        BaseValue = ParseFloatOrZero(entryNode.GetValue("BaseValue")?.Value),
+                        SciVal = ParseFloatOrZero(entryNode.GetValue("SciVal")?.Value),
+                        Science = ParseFloatOrZero(entryNode.GetValue("Science")?.Value),
+                        Cap = ParseFloatOrZero(entryNode.GetValue("Cap")?.Value),
+                    };
+                }
+            }
+
+            // [Mod-compat S4 — DMagic Orbital Science] Per-anomaly parse.
+            // Storage is flat (Decision §B); wire is 2-level nested. The disk
+            // file we're reading uses our own flat format (DMAGIC_ANOMALIES →
+            // ANOMALY children). Per-entry isolation: missing/empty Name OR
+            // unparseable BodyIndex skips the slot with a Warning.
+            var anomaliesRoot = node.GetNode("DMAGIC_ANOMALIES")?.Value;
+            if (anomaliesRoot != null)
+            {
+                foreach (var anEntry in anomaliesRoot.GetNodes("ANOMALY"))
+                {
+                    var entryNode = anEntry.Value;
+                    var name = entryNode.GetValue("Name")?.Value;
+                    if (string.IsNullOrEmpty(name))
+                    {
+                        LunaLog.Warning("[fix:S4-DMagic] ANOMALY entry skipped: missing Name");
+                        continue;
+                    }
+                    if (!int.TryParse(entryNode.GetValue("BodyIndex")?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var bodyIndex))
+                    {
+                        LunaLog.Warning($"[fix:S4-DMagic] ANOMALY entry skipped: unparseable BodyIndex (Name='{name}')");
+                        continue;
+                    }
+
+                    var key = $"{bodyIndex.ToString(CultureInfo.InvariantCulture)}|{name}";
+                    state.DMagicAnomalies[key] = new AgencyDMagicAnomalyEntry
+                    {
+                        BodyIndex = bodyIndex,
+                        Name = name,
+                        Latitude = ParseDoubleOrZero(entryNode.GetValue("Latitude")?.Value),
+                        Longitude = ParseDoubleOrZero(entryNode.GetValue("Longitude")?.Value),
+                        Altitude = ParseDoubleOrZero(entryNode.GetValue("Altitude")?.Value),
+                    };
                 }
             }
 

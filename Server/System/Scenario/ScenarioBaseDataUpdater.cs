@@ -59,9 +59,8 @@ namespace Server.System.Scenario
         /// Raw updates a scenario in the dictionary, stripping outer { } braces
         /// that KSP's ConfigNode serializer adds (same fix as ParseClientConfigNode).
         ///
-        /// <para>[Mod-compat S2] <paramref name="client"/> is threaded through so
-        /// Path B per-agency routers (currently <see cref="AgencyScanRouter"/>;
-        /// future S3 FFT / S4 DMagic will join) can derive sender authority from
+        /// <para>[Mod-compat] <paramref name="client"/> is threaded through so
+        /// Path B per-agency routers can derive sender authority from
         /// <c>AgencySystem.AgencyByPlayerName[client.PlayerName]</c>. When a router
         /// claims the inbound (<c>TryRoute</c> returns <c>true</c>) the shared-store
         /// AddOrUpdate is SUPPRESSED — per-agency state owns the authoritative
@@ -70,6 +69,15 @@ namespace Server.System.Scenario
         /// <c>null</c> for boot-time / non-client-driven scenario loads — the
         /// routers all short-circuit on a null client and fall through to the
         /// legacy AddOrUpdate.</para>
+        ///
+        /// <para><b>Currently dispatched:</b> <see cref="AgencyScanRouter"/> for
+        /// <c>SCANcontroller</c> (S2, commit <c>9fddb7fd</c>) and
+        /// <see cref="AgencyDMagicRouter"/> for <c>DMScienceScenario</c> (S4).
+        /// Future S5/S6 (Luna Compat sidecar Harmony) add their dispatch
+        /// alongside these — single extra `if (scenarioModule == "X" &amp;&amp;
+        /// AgencyXRouter.TryRoute(client, scenario)) return;` line per slice.
+        /// S3 (FFT) was retired 2026-05-19 (orphan source file not in compiled
+        /// FFT.dll; see commit <c>9404bfae</c>).</para>
         /// </summary>
         public static void RawConfigNodeInsertOrUpdate(ClientStructure client, string scenarioModule, string scenarioAsConfigNode)
         {
@@ -89,6 +97,16 @@ namespace Server.System.Scenario
                 // silence.
                 if (scenarioModule == "SCANcontroller" &&
                     AgencyScanRouter.TryRoute(client, scenario))
+                {
+                    return;
+                }
+
+                // [Mod-compat S4 Path B dispatch] Same shape for DMScienceScenario
+                // (DMagic asteroid science + anomaly records). Same suppression
+                // semantics as S2 — under gate=on the router upserts per-agency
+                // state and we skip the shared-store write.
+                if (scenarioModule == "DMScienceScenario" &&
+                    AgencyDMagicRouter.TryRoute(client, scenario))
                 {
                     return;
                 }
