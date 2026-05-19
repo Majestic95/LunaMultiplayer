@@ -462,12 +462,34 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
 
 **New files**
 
+> **Structural authority (2026-05-19 re-walk).** Entry shapes below were rewritten against the local DMagic clone at `F:/tmp/mks-external/DMagicOrbitalScience` SHA `a4e805b9`. The 2026-05-18 audit-derived shapes had three errors corrected in [dmagic-orbital-science.md](dmagic-orbital-science.md) Decisions §A/§B/§C/§D/§E: (a) asteroid-science fields are **float not double**; (b) anomaly wire is **2-level nested per-body**, not flat composite-key; (c) anomaly numerics use `"N5"` culture-sensitive format. Wire-format verified against `Source/Scenario/DMScienceScenario.cs:68-182` OnSave/OnLoad bodies.
+>
+> The csproj Compile-list orphan check (the trap that retired S3) passes — `DMScienceScenario.cs` is at line 129 of `Source/DMagicOrbital.csproj`.
+
 - `Server/System/Agency/AgencyDMagicAsteroidEntry.cs`
-  - Mirrors DMagic's `DMScienceData` shape: `string Title`, `double BaseValue`, `double ScientificValue`, `double Accumulated`, `double Cap`. Keyed by asteroid name (DMagic's identifier). Invariant-culture doubles.
+  - Mirrors DMagic's `DMScienceData` shape verbatim:
+    ```csharp
+    public string Title;          // -> "title" (dict key in DMagic's recoveredDMScience)
+    public float BaseValue;       // -> "bsv"  (float, NOT double — DMScienceData.cs:39-40)
+    public float SciVal;          // -> "scv"
+    public float Science;         // -> "sci"  (the running accumulator)
+    public float Cap;             // -> "cap"
+    ```
+    Keyed in `AgencyState.DMagicAsteroidScience` by `Title` (Ordinal — DMagic dict uses string-keyed lookup). Invariant-culture floats on serialize per **Invariant 9** (BUG-013 precedent).
 - `Server/System/Agency/AgencyDMagicAnomalyEntry.cs`
-  - Mirrors DMagic's `DMAnomalyObject` shape: `string Name`, `double Latitude`, `double Longitude`, `double Altitude`, `int BodyIndex`. Keyed by `BodyIndex + Name`. Invariant-culture doubles.
+  - Mirrors DMagic's `DMAnomalyObject` shape — but FLATTENED for storage convenience (the wire shape is 2-level nested per Decision §B):
+    ```csharp
+    public int BodyIndex;         // -> "Body" on the DM_Anomaly_List wrapper (flightGlobalsIndex)
+    public string Name;           // -> "Name" on the DM_Anomaly child
+    public double Latitude;       // -> "Lat"
+    public double Longitude;      // -> "Lon"
+    public double Altitude;       // -> "Alt"
+    ```
+    Keyed in `AgencyState.DMagicAnomalies` by composite `$"{BodyIndex}|{Name}"` (Ordinal). The projector reconstructs the nested wire shape on emit by grouping entries by BodyIndex into per-body `DM_Anomaly_List` wrappers. Invariant-culture doubles on serialize per Invariant 9.
 - `Server/System/Agency/AgencyDMagicRouter.cs`
-  - `TryRoute` — parses inbound `DMScienceScenario`; splits the two child collections into sender's `AgencyState.DMagicAsteroidScience` / `AgencyState.DMagicAnomalies`; suppresses shared-store write. Router shape mirrors `AgencyKolonyRouter.TryRoute`. Log convention: `[fix:S4-DMagic]`.
+  - `TryRoute(ClientStructure, ConfigNode)` — parses inbound `DMScienceScenario`; iterates `Asteroid_Science → DM_Science` children into `AgencyState.DMagicAsteroidScience` (Title-keyed); iterates `Anomaly_Records → DM_Anomaly_List → DM_Anomaly` nested children into `AgencyState.DMagicAnomalies` (BodyIndex+Name composite-keyed); suppresses shared-store write (Path B per D1). Router shape mirrors `AgencyKolonyRouter.TryRoute` + `AgencyScanRouter.TryRoute`. Log convention: `[fix:S4-DMagic]`. Per-entry isolation (Invariant 4) at both levels for anomaly (per-body wrapper + per-anomaly child).
+  - **No cross-agency rejection** — both asteroid science (Title-keyed) and anomaly records (Body+Name-keyed) are NOT vessel-keyed. There's no "agency owns this entry" concept at upsert time; latest-wins under the 1:1 player↔agency rule (Operating Rule). Same shape as AgencyKolonyRouter's body-keyed entries.
+  - **No transferagency migration** — entries are not vessel-keyed, so vessel A→B transfer doesn't move asteroid-science or anomaly records.
 
 **Existing files to modify**
 

@@ -20,26 +20,28 @@ Not listed in [Luna Compat](https://github.com/TheXankriegor/LunaCompat) ([overl
 
 ### `Source/Scenario/DMScienceScenario.cs` (`: ScenarioModule`)
 
-Class header:
+> **Re-walked 2026-05-19 against local clone at `F:/tmp/mks-external/DMagicOrbitalScience` SHA `a4e805b9` (current master tip).** csproj orphan check (the FFT-style trap that retired S3) passes — `DMScienceScenario.cs` IS in `Source/DMagicOrbital.csproj`'s `<Compile Include="..."/>` list (line 129). Exactly one ScenarioModule in the compiled set. Wire-format details below were verified verbatim against the actual OnSave/OnLoad bodies (`DMScienceScenario.cs:68-122` + `:124-182`); the original 2026-05-18 audit row had several field-type and shape errors corrected in the "Re-walked 2026-05-19" subsection at the bottom of this doc. **Verdict: S4 ships as planned, with the corrected entry shapes.**
+
+Class header (verbatim verified):
 
 ```csharp
-[KSPScenario(ScenarioCreationOptions.AddToAllGames, GameScenes.FLIGHT,
-GameScenes.SPACECENTER, GameScenes.TRACKSTATION, GameScenes.EDITOR)]
+[KSPScenario(ScenarioCreationOptions.AddToAllGames, GameScenes.FLIGHT, GameScenes.SPACECENTER, GameScenes.TRACKSTATION, GameScenes.EDITOR)]
 public class DMScienceScenario : ScenarioModule
 ```
 
-Persisted in OnLoad/OnSave:
+Persisted in OnLoad/OnSave (verbatim wire shape per re-walk):
 
-| Data | Shape |
+| Data | Wire shape |
 |------|-------|
-| **Asteroid science results** | Dictionary of `DMScienceData` (title, base value, scientific value, accumulated science, cap value). Tracks per-asteroid diminishing returns for repeat experiments. |
-| **Anomaly records** | Per-celestial-body indexed list of `DMAnomalyObject` (name, latitude, longitude, altitude). The "you've discovered the Mun monolith" log. |
+| **Asteroid science results** | `Asteroid_Science` parent container with `DM_Science` children. Each `DM_Science` child has flat fields: `title` (string — used as the dict key), `bsv` (float, "BaseValue"), `scv` (float, "SciVal"), `sci` (float, "Science"), `cap` (float, "Cap"). All four numeric fields are **float, not double** (corrects the 2026-05-18 audit). |
+| **Anomaly records** | `Anomaly_Records` parent container with `DM_Anomaly_List` per-body wrappers. Each `DM_Anomaly_List` has a `Body` field (int, `flightGlobalsIndex`) + nested `DM_Anomaly` children. Each `DM_Anomaly` child has flat fields: `Name` (string), `Lat` / `Lon` / `Alt` (doubles, serialized as `"N5"`-formatted strings with 5 decimal places). The wire is **2-level nested per-body** (corrects the 2026-05-18 audit's flat-composite-key assumption). |
 
 ### Other source surface
 
 | File | Role | Notes |
 |------|------|-------|
-| `Source/Scenario/DMScienceData.cs`, `DMAnomalyObject.cs` (under `Source/`) | Data classes | Used by the scenario above. |
+| `Source/Scenario/DMScienceData.cs` | Asteroid-science data class | Field types: `private string title; private float scival, science, cap, basevalue;`. Properties expose Title (read-only) + SciVal/Science (internal-set) + BaseValue/Cap (read-only). No Save/Load methods of its own — the parent ScenarioModule does the serialization. |
+| `Source/DMAnomalyObject.cs` (root of Source, NOT under Scenario/) | Anomaly data class | Field types include `private double lat, lon, alt;` + `private string name;` + `private CelestialBody body;`. Two constructors — one from KSP's `PQSSurfaceObject` (live discovery) + one from deserialization params (5-arg). Path corrected from 2026-05-18 audit's `Source/Scenario/` claim. |
 | `Source/Scenario/DMRecoveryWatcher.cs`, `DMTransmissionWatcher.cs` | KSP event listeners | Catch recover/transmit, update the scenario's asteroid science tracking. |
 | `Source/Part Modules/` (folder) | Custom PartModules for DMagic science parts | Standard vessel-side fields; ride PartModule sync. |
 | `Source/Contracts/` (folder) | Custom CC contracts | Ride `AgencyContractRouter` via Q6 (Offered shared, Active per-agency). |
@@ -178,10 +180,36 @@ If DMagic isn't a Phase-1 mod for the playtest, log the leak and re-evaluate whe
   3. **`DMScienceScenario` ships shared asteroid-science + anomaly records** — same architectural pattern as SCANsat coverage and FFT antimatter factory. Full implementation sketch above.
 - **Gaps still open (product calls):** all resolved 2026-05-18 — see below.
 
-### Decisions ratified — 2026-05-18
+### Decisions ratified — 2026-05-18 (extended 2026-05-19 re-walk)
 
 | Question | Answer |
 |----------|--------|
 | Should `DMScienceScenario` (asteroid science + anomaly records) be per-agency isolated? | **Yes — apply the SCANsat per-agency precedent.** Build the implementation sketch in the body of this doc as `Server/System/Agency/AgencyDMagicRouter.cs` + new `AgencyState.DMagicAsteroidScience` + new `AgencyState.DMagicAnomalies` + new projector entry for `DMScienceScenario`. Each agency starts with empty asteroid-science and empty anomaly records on first connect. |
+| §A Asteroid science field types (2026-05-19 re-walk) | **float, not double** for all four numeric fields (`bsv` / `scv` / `sci` / `cap`). Verified by direct read of `DMScienceData.cs:39-40` (`private float scival, science, cap, basevalue;`) + `DMScienceScenario.OnLoad:152-155` (`float bsv = scienceResults_node.parse("bsv", (float)1);`). |
+| §B Anomaly wire shape (2026-05-19 re-walk) | **2-level nested**, NOT flat composite-key. Per-body `DM_Anomaly_List` wrapper carries the `Body` flightGlobalsIndex; per-anomaly `DM_Anomaly` children carry Name + Lat/Lon/Alt. Verified by direct read of `DMScienceScenario.OnSave:92-119`. The agency-side AgencyState dict CAN still use a flat composite-key (e.g. `"$bodyIndex|$name"`) for storage simplicity — the projector reconstructs the nested wire shape on emit by grouping per-body. |
+| §C Anomaly numeric serialization format (2026-05-19 re-walk) | **`"N5"` format on serialize**, `parse(...(double)0)` on read. The "N5" specifier is **culture-sensitive** under stock KSP — under a comma-decimal server locale, `0.12345.ToString("N5")` produces `"0,12345"` which the projector splice MUST round-trip without corrupting. Per **Invariant 9** (BUG-013), the projector's emit MUST force `InvariantCulture` regardless of what stock DMagic does. |
+| §D `DMAnomalyObject.cs` location (2026-05-19 re-walk) | Lives at `Source/DMAnomalyObject.cs` (root of Source folder), NOT `Source/Scenario/DMAnomalyObject.cs` as the original audit claimed. Cosmetic correction — file is in the compiled csproj at line 101. |
+| §E Companion event-watcher safety (2026-05-19 re-walk) | `DMRecoveryWatcher` + `DMTransmissionWatcher` subscribe to `GameEvents.OnScienceRecieved`. Both call `DMScienceScenario.SciScenario.submitDMScience(...)` which mutates the asteroid-science dict. **Per-agency relevance**: the fork-side router intercepts the `RawConfigNodeInsertOrUpdate` ingress, NOT these client-side watchers; the watchers fire on the local client, mutate the local `DMScienceScenario`, and the next periodic SHA pass broadcasts the result. Under Path B suppression the server's shared scenario stays frozen at operator seed — the per-agency state catches the broadcast at router-ingress time. No additional fork-side hook required for the watchers. |
 
-Implementation slice: see [implementation-spec.md](implementation-spec.md) §DMagic.
+Implementation slice: see [implementation-spec.md](implementation-spec.md) §S4.
+
+### Re-walked 2026-05-19 — verified findings
+
+Walked branch `master` HEAD `a4e805b9f819692a1546b741683da64b783694fe` against local shallow clone at `F:/tmp/mks-external/DMagicOrbitalScience` per the [[reference-mks-external-clones]] precedent.
+
+**csproj Compile-list orphan check (PASS).** `Source/DMagicOrbital.csproj` enumerates 62 compiled source files. `DMScienceScenario.cs` is at line 129, `DMScienceData.cs` is at line 128, `DMAnomalyObject.cs` is at line 101. Grepping the compiled set for `: ScenarioModule` returns exactly ONE match — `DMScienceScenario : ScenarioModule` at `Source/Scenario/DMScienceScenario.cs:41`. **No FFT-style orphan.**
+
+**Singleton dependency check (PASS).** Unlike FFT's phantom `AntimatterFactory.Instance`, DMScienceScenario's persistence does NOT delegate to any class outside the compiled source tree. All referenced classes (`DMScienceData`, `DMAnomalyList`, `DMAnomalyStorage`, `DMAnomalyObject`) are defined in the same repo and in the csproj Compile list.
+
+**Verbatim OnSave/OnLoad shape** (file paths into the local clone):
+- `Source/Scenario/DMScienceScenario.cs:68-122` (OnSave) builds two top-level containers (`Asteroid_Science` + `Anomaly_Records`). Asteroid block iterates `recoveredDMScience.Values` and emits one `DM_Science` child per dict entry; anomaly block iterates `DMAnomalyList` storage and emits nested `DM_Anomaly_List`/`DM_Anomaly` children.
+- `Source/Scenario/DMScienceScenario.cs:124-182` (OnLoad) inverse — reads `Asteroid_Science → DM_Science` children + `Anomaly_Records → DM_Anomaly_List → DM_Anomaly` nested children.
+
+**Side-channel persistence search:**
+- `File.WriteAllText` / `File.WriteAllBytes` / `StreamWriter` / `FileStream`: zero matches.
+- `GameEvents.onGameStateSaved` subscriptions: zero matches.
+- Watcher classes (`DMRecoveryWatcher`, `DMTransmissionWatcher`) subscribe only to `GameEvents.OnScienceRecieved`; they mutate the scenario dict but never write to disk outside KSP's standard ScenarioModule.OnSave hook.
+
+**CC parameter inventory verification** (per the audit's 8-parameter list): all 8 verified in `Source/DMagicOrbital.csproj`'s Compile list. All extend `ContractParameter` (CC API base class) — audit was correct. No fork-side change needed — already routed by `AgencyContractRouter`.
+
+**PartModule inventory** (`Source/Part Modules/` folder + root-level part files): standard `[KSPField(isPersistant=true)]` annotations + a handful of custom OnSave/OnLoad overrides confined to `ScienceData` containers (per-vessel transient science). All vessel-proto-rideable under `lmpOwningAgency` from Stage 5.16b. No fork-side action.
