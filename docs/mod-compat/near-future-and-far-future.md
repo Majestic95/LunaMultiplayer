@@ -40,13 +40,15 @@ None of the suite is listed in [Luna Compat](https://github.com/TheXankriegor/Lu
 
 Other NF mods follow the same pattern: PartModule packs + ModuleManager configs + textures. No save-game-level scenario state.
 
-### Far Future Technologies (the outlier)
+### Far Future Technologies
+
+> **Re-walked 2026-05-19 against local clone at `F:/tmp/mks-external/FarFutureTechnologies` SHA `ad59fbb5` (current master tip, released 2024-10-18). Major finding:** the 2026-05-18 audit row marking `FarFutureTechnologyPersistence.cs` as a load-bearing ScenarioModule was wrong on a structural level. The file exists in the repo but is NOT in the `<Compile Include="..."/>` list of `Source/FarFutureTechnologies/FarFutureTechnologies.csproj` — it is an orphan dead source file. The compiled FFT.dll that operators ship contains NO ScenarioModule. The orphan also references two symbols that don't exist in the source tree (`FarFutureTechnologySettings.amFactoryConfigNodeName` and the entire `AntimatterFactory` class), so even reviving it would require operator hand-patching with hypothetical missing classes. See "Re-walked 2026-05-19" subsection below for verbatim verification. **Verdict overturn: FFT shipped today is in the "no work owed" category, joining KER / OPM / Trajectories / DPAI / TweakScale.**
 
 `Source/FarFutureTechnologies/`:
 
 | File | Inherits | Notes |
 |------|----------|-------|
-| **`FarFutureTechnologyPersistence.cs`** | **`ScenarioModule`** | `[KSPScenario(AddToAllGames, SPACECENTER, FLIGHT, TRACKSTATION, EDITOR)]`. Persists **global antimatter factory state** via `AntimatterFactory.Instance`: factory level, antimatter inventory amount, deferred antimatter consumption, first-load flag. ConfigNode-keyed `AMFactoryConfigNodeName`. |
+| ~~`FarFutureTechnologyPersistence.cs`~~ | ~~`ScenarioModule`~~ | **ORPHAN (re-walk 2026-05-19).** Not in csproj Compile list; not in shipped DLL. References `FarFutureTechnologySettings.amFactoryConfigNodeName` (undefined) + `AntimatterFactory` class (does not exist in source tree). The 2026-05-18 audit's central premise was that this file ships and persists global antimatter factory state — verified false. |
 | `Modules/ModuleAntimatterTank.cs` | `PartModule` | Three `[KSPField(isPersistant)]`: `bool ContainmentEnabled`, `bool DetonationOccuring`, `float ContainmentCostCurrent`. Per-vessel antimatter containment. |
 | `Modules/ModuleFusionEngine.cs`, `Modules/FusionReactor.cs`, `Modules/FusionReactorMode.cs` | `PartModule` | Fusion engine + reactor behaviour; persistent state via standard PartModule fields. |
 | `Modules/ModuleChargeableEngine.cs` | `PartModule` | Charge-then-fire engine cycle. |
@@ -161,11 +163,67 @@ If the project doesn't have an active FFT playtest planned, the leak is document
 - **Gaps still open (product calls):**
   - If the wider Near Future suite is expanded later to include System Heat or DynamicBatteryStorage as cross-vessel sims, those need separate audits.
 
-### Decisions ratified — 2026-05-18
+### Decisions ratified — 2026-05-18 (S3 OVERTURNED 2026-05-19 re-walk)
 
 | Question | Answer |
 |----------|--------|
-| Should FFT `FarFutureTechnologyPersistence` (antimatter factory) be per-agency isolated? | **Yes — apply the SCANsat per-agency precedent.** Build the implementation sketch in the body of this doc as `Server/System/Agency/AgencyFarFutureRouter.cs` + new `AgencyState.FarFutureFactory` + new projector entry for `FarFutureTechnologyPersistence`. Each agency starts with an empty factory on first connect (Level 0, 0 antimatter, 0 deferred consumption). |
+| ~~Should FFT `FarFutureTechnologyPersistence` (antimatter factory) be per-agency isolated?~~ | **OVERTURNED 2026-05-19**: the premise was structurally invalid. `FarFutureTechnologyPersistence.cs` is an orphan source file not compiled into FFT's DLL, and the supporting `AntimatterFactory` class + `amFactoryConfigNodeName` constant the orphan depends on don't exist in the source tree. Stock FFT therefore has no global antimatter factory state to partition. **Revised verdict: NO WORK OWED.** All real FFT state is per-PartModule (antimatter tank, fusion reactor, charge-up engine) which already rides vessel-proto sync correctly under `lmpOwningAgency`. |
 | Near Future suite (non-FFT) per-agency interaction? | **No work owed.** Confirmed by the audit — NF mods are PartModule-only and ride vessel proto sync correctly. |
 
-Implementation slice: see [implementation-spec.md](implementation-spec.md) §FFT antimatter factory.
+~~Implementation slice: see [implementation-spec.md](implementation-spec.md) §FFT antimatter factory.~~ — **No implementation slice owed; S3 retired.** See [implementation-spec.md](implementation-spec.md) §S3 for the retirement record.
+
+### Re-walked 2026-05-19 — verified findings
+
+Walked branch `master` HEAD `ad59fbb52a04db26732309ecf3941041f89001d0` (latest tagged release on FFT's public master, dated 2024-10-18). Local shallow clone at `F:/tmp/mks-external/FarFutureTechnologies` per the [[reference-mks-external-clones]] precedent.
+
+**Confirmed by direct grep of `Source/FarFutureTechnologies/FarFutureTechnologies.csproj`:**
+
+```xml
+<Compile Include="FarFutureTechnologySettings.cs" />
+<Compile Include="FarFutureTechnologyGameSettings.cs" />
+<Compile Include="Modules\FusionReactorMode.cs" />
+<Compile Include="Modules\FusionReactor.cs" />
+<Compile Include="Modules\ModuleAntimatterTank.cs" />
+<Compile Include="Modules\ModuleColorAnimator.cs" />
+<Compile Include="Modules\ModuleEngineExhaustDamage.cs" />
+<Compile Include="Modules\ModuleFusionEngine.cs" />
+<Compile Include="Modules\ModuleChargeableEngine.cs" />
+<Compile Include="Modules\PulseEngine\EnginePulseEffects.cs" />
+<Compile Include="Modules\PulseEngine\ModulePulseEngineAnimator.cs" />
+<Compile Include="Properties\AssemblyInfo.cs" />
+<Compile Include="UI\AntimatterManager.cs" />
+<Compile Include="UI\AntimatterWindow.cs" />
+<Compile Include="UI\UILoader.cs" />
+<Compile Include="Utils.cs" />
+```
+
+16 files compile into FFT.dll. `FarFutureTechnologyPersistence.cs` is absent from this list. Grepping the 16 compiled files for `: ScenarioModule` returns zero matches.
+
+**The orphan would not compile if added back to the list.** Two dangling references:
+
+1. `FarFutureTechnologySettings.amFactoryConfigNodeName` — the `FarFutureTechnologySettings` class (`FarFutureTechnologySettings.cs:21`) declares exactly five static fields (`DebugModules`, `MinimumExhaustBuildingDamagePerTick`, `MinimumPulseBuildingDamage`, `MinimumPulsePartsHeat`, `MinimumPulsePartsForce`). No `amFactoryConfigNodeName`. Not a `partial class`. Single definition in the entire repo.
+2. `AntimatterFactory` — grep for `class AntimatterFactory` returns zero matches across the entire repo. The class does not exist.
+
+Without these, even reviving the orphan into the csproj would produce build errors `CS0117: 'FarFutureTechnologySettings' does not contain a definition for 'amFactoryConfigNodeName'` + `CS0246: The type or namespace name 'AntimatterFactory' could not be found`.
+
+**What the audit missed.** The 2026-05-18 audit was WebFetch-based and saw the orphan's `[KSPScenario]` attribute + the OnSave/OnLoad shape, then ratified "yes, partition this" without inspecting the build manifest. The audit-via-prespec discipline applied to the S3 implementation pre-spec (this re-walk) caught it before any code shipped.
+
+**What FFT actually persists, by category:**
+
+| Surface | Compiled? | Persistence shape | Per-agency status |
+|---------|-----------|---------------------|---------------------|
+| `ModuleAntimatterTank` PartModule | ✅ | 3 `[KSPField(isPersistant)]`: `ContainmentEnabled`, `DetonationOccuring`, `ContainmentCostCurrent` | Per-vessel — already partitioned via `lmpOwningAgency` |
+| `FusionReactor` PartModule | ✅ | 6 `[KSPField(isPersistant)]`: `Enabled`, `CurrentModeID`, `Charged`, `Charging`, `CurrentCharge`, `ChargeRate` | Per-vessel — already partitioned |
+| `ModuleFusionEngine` (inherits FusionReactor) | ✅ | (inherits) | Per-vessel — already partitioned |
+| `ModuleChargeableEngine` PartModule | ✅ | 7 `[KSPField(isPersistant)]` (charge state, throttle bounds) | Per-vessel — already partitioned |
+| `AntimatterManager` UI singleton | ✅ | Runtime-only; no OnSave/OnLoad/ConfigNode/GameEvents-onGameStateSaved | Not persisted — no concern |
+| `FarFutureTechnologySettings` static class | ✅ | Loads from `GameData/FFT/FFTSETTINGS` config; not save-game state | Global config — not per-agency |
+| `FarFutureTechnologiesSettings_*` `GameParameters.CustomParameterNode` (4 classes) | ✅ | Difficulty / balance settings, persist via KSP's built-in GameParameters | Per-game preferences — not per-agency |
+| `FarFutureTechnologyPersistence` orphan + `AntimatterFactory` non-existent class | ❌ | (dead code) | N/A |
+
+**Side-channel persistence search:**
+- `File.WriteAllText` / `File.WriteAllBytes` / `StreamWriter` / `FileStream` across the compiled source: zero matches.
+- `GameEvents.onGameStateSaved` subscriptions: zero matches.
+- `GameEvents.OnVesselRollout` subscription in `ModuleAntimatterTank.cs:151` — transient UI handoff, no persistence.
+
+**Operator caveat (low-probability):** if a custom patch or fork of FFT writes the missing `AntimatterFactory` class + the `amFactoryConfigNodeName` constant and re-adds the orphan to the csproj, that variant would persist global antimatter factory state and would leak across agencies. No such patch is documented anywhere I could find; the orphan has been broken in FFT's master at least through 2024-10-18. If an operator reports cross-agency antimatter visibility, revisit and consider implementing S3 against the patch variant — but that would be operator-cohort-specific code.

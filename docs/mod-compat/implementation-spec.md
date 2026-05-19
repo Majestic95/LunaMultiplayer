@@ -4,6 +4,8 @@
 
 **S2 re-walked 2026-05-19** against SCANsat SHA `0d67371` (local clone at `F:/tmp/mks-external/SCANsat`). The S2 section's entry shapes, container layout, and field names were corrected to match verbatim source — see [SCANsat.md](SCANsat.md) "Re-walked 2026-05-19" subsection for the authoritative structural facts. Decisions §6 (SCANResources shared), §7 (root UI scalars shared), §8 (all Body fields per-agency), §9 (multi-Sensor-per-Vessel nested) extend the 2026-05-18 ratification.
 
+**S3 RETIRED 2026-05-19** against FFT SHA `ad59fbb5` (local clone at `F:/tmp/mks-external/FarFutureTechnologies`). The 2026-05-18 audit's central premise — that FFT ships a `FarFutureTechnologyPersistence` ScenarioModule — was structurally invalid: the orphan source file is not in FFT's csproj Compile list and references symbols that don't exist in the source tree. Stock FFT has no shared global state to partition; all real state is per-`PartModule` already partitioned via `lmpOwningAgency`. Full retirement record at §S3 + [near-future-and-far-future.md "Re-walked 2026-05-19"](near-future-and-far-future.md). FFT joins the "no work owed" list.
+
 All per-mod audits ([SCANsat](SCANsat.md), [MJ2](MechJeb2.md), [`[x]` Science](x-science-continued.md), [OPM](outer-planets-mod.md), [KER](kerbal-engineer-redux.md), [KAS](kerbal-attachment-system.md), [KIS](kerbal-inventory-system.md), [Trajectories](trajectories.md), [DPAI](docking-port-alignment-indicator.md), [TweakScale](tweakscale.md), [Near Future + FFT](near-future-and-far-future.md), [DMagic](dmagic-orbital-science.md)) are complete. All design questions are resolved. This document consolidates the resulting code slices in implementation order.
 
 **Operating context.** Branch `feature/per-agency`. All slices are gated behind `AgencySystem.PerAgencyEnabled` (the combined `PerAgencyCareer=true && GameMode==Career` check) and produce **zero observable behaviour change** when the gate is off, per the Stage 5 dual-mode contract.
@@ -35,12 +37,12 @@ All per-mod audits ([SCANsat](SCANsat.md), [MJ2](MechJeb2.md), [`[x]` Science](x
 |-------|-------|---------|------|------------|
 | **S1** | Merge-ownership reconciler | Core LMP fork | Server agency + vessel-message ingress | ~60 lines + ServerTest | — |
 | **S2** | SCANsat per-agency coverage | Core LMP fork | AgencyState + new router + projector entry + operator-policy doc | ~200 lines + ServerTest + LunaCompat config disable | S1 not required, but builds against the same patterns |
-| **S3** | FFT antimatter factory per-agency | Core LMP fork | AgencyState + new router + projector entry | ~140 lines + ServerTest | S2 (copy-paste pattern) |
+| ~~**S3**~~ | ~~FFT antimatter factory per-agency~~ | **RETIRED 2026-05-19** — orphan source file, not in compiled DLL; no shared global state in stock FFT. See §S3 below + [near-future-and-far-future.md "Re-walked 2026-05-19"](near-future-and-far-future.md). | (no work owed) | — |
 | **S4** | DMagic asteroid + anomaly per-agency | Core LMP fork | AgencyState + new router + projector entry (two child collections) | ~180 lines + ServerTest | S2 (copy-paste pattern) |
 | **S5** | `[x]` Science foreign-agency filter | Luna Compat / sidecar Harmony | `ScienceContext` vessel enumeration | ~15 lines Harmony postfix | None |
 | **S6** | KIS re-attach re-stamp | Luna Compat / sidecar Harmony | `KISAddonPickup` attach finalisation | ~10 lines Harmony postfix | None |
 
-**Mods with no work owed:** MechJeb2, Kerbal Engineer Redux, OPM (data-only), Trajectories, DPAI, TweakScale, Near Future suite (non-FFT). Documented in their respective audits.
+**Mods with no work owed:** MechJeb2, Kerbal Engineer Redux, OPM (data-only), Trajectories, DPAI, TweakScale, Near Future suite, **FFT** (S3 retired 2026-05-19 — orphan file not in compiled DLL; see §S3). Documented in their respective audits.
 
 **Open verification items (not new code, but two-client repros that confirm or unblock):**
 - KAS cross-agency couple ownership behaviour against the running fork (informs whether S1 needs to fire at all — but built proactively per the decision).
@@ -52,12 +54,13 @@ All per-mod audits ([SCANsat](SCANsat.md), [MJ2](MechJeb2.md), [`[x]` Science](x
 
 Suggested build sequence — but slices are independent enough to parallelise once the pattern is set:
 
-1. **S2 first** (SCANsat). Largest, sets the per-agency-ScenarioModule pattern at full complexity (per-body splice + scanner-node filter + LunaCompat coordination policy). Validates the architecture before replicating it.
-2. **S3 + S4 in parallel after S2 lands** (FFT + DMagic). Same pattern; smaller scope each; both copy from S2.
-3. **S1 in parallel** with any of the above (no dependency on the per-agency-ScenarioModule pattern; touches the docking-merge ingress instead).
-4. **S5 + S6 in parallel** with any core slice (sidecar Harmony work; independent of core LMP).
+1. **S2 first** (SCANsat) — shipped 2026-05-19 (commit `9fddb7fd`). Largest, set the per-agency-ScenarioModule pattern at full complexity.
+2. ~~**S3** (FFT)~~ — RETIRED 2026-05-19 as no-work-owed (audit-via-prespec re-walk caught the orphan-file premise). See §S3.
+3. **S4 next** (DMagic). Same Path B pattern as S2 but with two child collections under `DMScienceScenario`.
+4. **S1 in parallel** with S4 (no dependency on the per-agency-ScenarioModule pattern; touches the docking-merge ingress instead).
+5. **S5 + S6 in parallel** with any core slice (sidecar Harmony work; independent of core LMP).
 
-Estimated build sequence wall-clock if serialised: ~5 review-bounded slices' worth of work. Two of the six (S5, S6) belong in Luna Compat sidecar and can be assigned to whoever owns that adjunct.
+Estimated build sequence wall-clock if serialised: ~3 review-bounded slices' worth of work remaining after S2 + S3 retirement. Two of the original six (S5, S6) belong in Luna Compat sidecar and can be assigned to whoever owns that adjunct.
 
 ---
 
@@ -116,11 +119,12 @@ internal static void SendScenariosToClient(ClientStructure client, params string
 Call site:
 
 ```csharp
-// Server/System/HandshakeSystem.cs HandleHandshakeRequest, after the existing catch-up block:
+// Server/System/HandshakeSystem.cs HandleHandshakeRequest, after the existing catch-up block.
+// S3 was retired 2026-05-19 — FFT's FarFutureTechnologyPersistence scenario module does not
+// actually ship in the compiled FFT.dll (orphan source file). Only S2 + S4 will land:
 ScenarioSystem.SendScenariosToClient(client,
-    "SCANcontroller",                  // S2
-    "FarFutureTechnologyPersistence",  // S3
-    "DMScienceScenario");              // S4
+    "SCANcontroller",                  // S2 (shipped)
+    "DMScienceScenario");              // S4 (pending)
 ```
 
 **Gate behavior**: `SendScenariosToClient` is safe to call unconditionally. `AgencyScenarioProjector.ProjectForClient` early-returns under gate=off, so under gate=off the helper sends the unmodified shared scenario — the legitimate gate=off behavior anyway.
@@ -394,9 +398,24 @@ Establishes the canonical reference for future reviewers; ensures new routers ad
 
 ---
 
-## S3 — FFT antimatter factory per-agency
+## S3 — RETIRED 2026-05-19 (no work owed)
 
-**Goal.** Each agency owns its own Far Future Technologies antimatter factory state (level, antimatter inventory, deferred consumption). Each agency starts at level 0 with 0 antimatter on first connect.
+> **Retired** by the audit-via-prespec re-walk against `F:/tmp/mks-external/FarFutureTechnologies` SHA `ad59fbb5`. The 2026-05-18 audit's premise — that FFT ships a `FarFutureTechnologyPersistence` ScenarioModule serializing global antimatter factory state — was structurally invalid:
+>
+> 1. `FarFutureTechnologyPersistence.cs` is NOT in `Source/FarFutureTechnologies/FarFutureTechnologies.csproj`'s `<Compile Include="..."/>` list. The shipped FFT.dll contains no ScenarioModule.
+> 2. The orphan file references `FarFutureTechnologySettings.amFactoryConfigNodeName` (undefined; the settings class has 5 unrelated static fields) and the `AntimatterFactory` class (does not exist anywhere in the source tree). Even reviving the orphan in the csproj would produce two CS0117 / CS0246 build errors.
+>
+> **Stock FFT has no shared global state to partition.** All real FFT state is per-`PartModule` (antimatter tanks, fusion reactors, charge-up engines) which already rides vessel-proto sync correctly under `lmpOwningAgency` from Stage 5.16b. Antimatter "purchase at rollout" via the `AntimatterManager` UI singleton charges per-agency science (which Stage 5.17c projection + 5.17e-5 router already partitions) and produces antimatter into per-vessel tanks (already per-agency).
+>
+> **Verdict overturn**: FFT joins the existing "no work owed" list (KER, OPM, Trajectories, DPAI, TweakScale, Near Future non-FFT suite). Full retirement record + verbatim source citations in [near-future-and-far-future.md "Re-walked 2026-05-19"](near-future-and-far-future.md).
+>
+> **If a future custom-patch FFT** completes the orphan (writes the missing `AntimatterFactory` class + the `amFactoryConfigNodeName` constant + re-adds the orphan to the csproj), it would introduce global state and a cross-agency leak. No such patch is documented as of 2026-05-19; if an operator reports cross-agency antimatter visibility, revisit and consider implementing the original S3 sketch below against that variant. The sketch is retained for that contingency.
+>
+> The remaining S3 historical content (file additions + test sketch + acceptance criteria) stays below the rule. The Scope Summary table at the top of this document still lists S3 in case the contingency fires; the table's "Pending" status maps to the retirement state above.
+
+### Historical implementation sketch (kept for the operator-patch contingency above)
+
+**Goal (historical).** Each agency owns its own Far Future Technologies antimatter factory state (level, antimatter inventory, deferred consumption). Each agency starts at level 0 with 0 antimatter on first connect.
 
 **Architecture: Path B (per D1).** Same shape as S2.
 
@@ -579,6 +598,8 @@ In addition to per-slice ServerTests:
 | D3 (`transferagency` migrate-with-vessel for S2 Scanners) | ✅ ratified 2026-05-18, folded in 2026-05-19 |
 | M1–M11 (mechanical rebases — post-MKS-canonical references, find-or-create container, log tags, lock contract, invariant culture, empty-container handling, sync catch-up) | ✅ applied 2026-05-19 |
 | S2 entry shapes corrected against verified SCANsat source (`0d67371`) — multi-Sensor nested, SCANResources shared, all-Body-fields per-agency, root UI scalars shared | ✅ applied 2026-05-19 (Decisions §6/§7/§8/§9 in SCANsat.md) |
+| S2 implementation shipped (`feat(server,agency): Mod-compat S2 — SCANsat per-agency coverage + scanners` commit `9fddb7fd`) | ✅ 2026-05-19 |
+| S3 RETIRED against verified FFT source (`ad59fbb5`) — orphan ScenarioModule not in csproj Compile list; FFT joins no-work-owed list | ✅ retired 2026-05-19 |
 | Slices implemented | ⏳ pending |
 | Cross-cutting tests authored | ⏳ pending |
 | Operator policy doc update for LunaCompat coordination | ⏳ pending (folded into S2) |
