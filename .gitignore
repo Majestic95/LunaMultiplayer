@@ -37,3 +37,6 @@ Server/packages
 # Release script outputs (Scripts/build-release.ps1)
 FinalFiles/
 Releases/
+
+# Per-build release notes drafted in the repo root before posting to GitHub Releases
+release-notes-v*.md
