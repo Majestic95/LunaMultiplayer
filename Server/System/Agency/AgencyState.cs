@@ -205,6 +205,40 @@ namespace Server.System.Agency
             new Dictionary<Guid, AgencyOrbitalTransferEntry>();
 
         /// <summary>
+        /// [Mod-compat S2 — SCANsat] Per-agency, per-body coverage state. Keyed by
+        /// <c>CelestialBody.bodyName</c> (Ordinal compare — matches SCANsat's stock
+        /// convention; <c>SCANcontroller.OnLoad</c> looks up bodies via
+        /// <c>FlightGlobals.Bodies.FirstOrDefault(b =&gt; b.bodyName == body_name)</c>).
+        /// Carries the FULL SCANsat <c>Body</c> shape per Decision §8 (audit re-walk
+        /// 2026-05-19): not just the coverage <c>Map</c> blob but also per-body palette
+        /// + terrain-range UI preferences. See <see cref="AgencyCoverageBodyEntry"/>
+        /// XML for field mappings. Populated by <see cref="AgencyScanRouter"/> on
+        /// inbound <c>SCANcontroller</c> blob ingress (Path B per implementation-spec
+        /// D1). Persisted under <c>SCAN_COVERAGE</c> child node.
+        ///
+        /// **Concurrency contract**: same as <see cref="KolonyEntries"/>.
+        /// </summary>
+        public Dictionary<string, AgencyCoverageBodyEntry> Coverage { get; } =
+            new Dictionary<string, AgencyCoverageBodyEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Mod-compat S2 — SCANsat] Per-agency, per-vessel active-scanner records.
+        /// Keyed by vessel GUID. Each entry carries a nested
+        /// <see cref="AgencyScannerEntry.Sensors"/> list (Decision §9 audit re-walk
+        /// 2026-05-19) — a single vessel may run survey + altimetry + resource
+        /// sensors simultaneously, so the flat-fields shape the original 2026-05-18
+        /// audit assumed cannot represent the on-wire reality. Populated by
+        /// <see cref="AgencyScanRouter"/> on <c>SCANcontroller</c> blob ingress.
+        /// Migrates with vessel under <c>transferagency</c> via
+        /// <see cref="AgencyScanRouter.MigrateForVesselTransfer"/> (Decision §3).
+        /// Persisted under <c>SCAN_SCANNERS</c> child node.
+        ///
+        /// **Concurrency contract**: same as <see cref="KolonyEntries"/>.
+        /// </summary>
+        public Dictionary<Guid, AgencyScannerEntry> Scanners { get; } =
+            new Dictionary<Guid, AgencyScannerEntry>();
+
+        /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
         /// Created at server boot via <see cref="Server.Context.Universe.CheckUniverse"/>
         /// alongside the other Universe child folders, so <see cref="FileHandler.WriteAtomic"/>
@@ -492,6 +526,89 @@ namespace Server.System.Agency
                     var base64 = len > 0 ? Convert.ToBase64String(dataBytes, 0, len) : string.Empty;
                     oNode.CreateValue(new CfgNodeValue<string, string>("PayloadBytes", base64));
                     orbitalRoot.AddNode(oNode);
+                }
+            }
+
+            // [Mod-compat S2 — SCANsat] Per-body coverage state. SCAN_COVERAGE
+            // root holds BODY child nodes mirroring SCANsat's Progress→Body
+            // shape (decision §8 — all Body fields per-agency). Optional fields
+            // (ClampHeight, LandingTarget) are emitted only when non-null so a
+            // round-trip preserves null vs populated. Doubles + floats round-trip
+            // via "R" + invariant culture per Invariant 9 (BUG-013 precedent).
+            // The Map field is opaque (Base64-CLZF2-BinaryFormatter URL-safe per
+            // SCANcontroller.cs:1020-1028) — round-trip as a string only.
+            //
+            // Field naming asymmetry (consumer-lens SHOULD-FIX): disk-side uses
+            // PascalCase (BodyName, MinHeightRange, ClampHeight, ...) matching
+            // the C# property naming convention; the SCANsat-wire names
+            // (lowercase Name + lowercase-underscore Map / min_height_range
+            // analogs) live in AgencyScenarioProjector.SpliceSCANsatCoverageIntoScenario
+            // because the wire contract is with SCANsat's OnLoad parser. The
+            // disk format is fork-canonical; the wire format is SCANsat-canonical.
+            // S3 (FFT) / S4 (DMagic) authors copying this pattern should keep
+            // the same split — PascalCase on disk for human-grepability, mod-
+            // native names on wire for the mod's OnLoad to accept the splice.
+            if (Coverage.Count > 0)
+            {
+                var coverageRoot = new ConfigNode("") { Name = "SCAN_COVERAGE" };
+                node.AddNode(coverageRoot);
+                foreach (var entry in Coverage.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.BodyName))
+                        continue;
+                    var bNode = new ConfigNode("") { Name = "BODY" };
+                    bNode.CreateValue(new CfgNodeValue<string, string>("Name", entry.BodyName));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("Disabled", entry.Disabled.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("MinHeightRange", entry.MinHeightRange.ToString("R", CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("MaxHeightRange", entry.MaxHeightRange.ToString("R", CultureInfo.InvariantCulture)));
+                    if (entry.ClampHeight.HasValue)
+                        bNode.CreateValue(new CfgNodeValue<string, string>("ClampHeight", entry.ClampHeight.Value.ToString("R", CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteName", entry.PaletteName ?? string.Empty));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteSize", entry.PaletteSize.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteReverse", entry.PaletteReverse.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteDiscrete", entry.PaletteDiscrete.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("Map", entry.Map ?? string.Empty));
+                    if (!string.IsNullOrEmpty(entry.LandingTarget))
+                        bNode.CreateValue(new CfgNodeValue<string, string>("LandingTarget", entry.LandingTarget));
+                    coverageRoot.AddNode(bNode);
+                }
+            }
+
+            // [Mod-compat S2 — SCANsat] Per-vessel active-scanner records.
+            // SCAN_SCANNERS root holds VESSEL child nodes; each VESSEL contains
+            // 0-N SENSOR child nodes (Decision §9 multi-Sensor-per-Vessel —
+            // SCANcontroller.cs:797-806 nests sensors inside the parent Vessel
+            // node). Per-Vessel persistence emits the SENSOR list inline.
+            // Sensor doubles round-trip via "R" + invariant culture per
+            // Invariant 9.
+            if (Scanners.Count > 0)
+            {
+                var scannersRoot = new ConfigNode("") { Name = "SCAN_SCANNERS" };
+                node.AddNode(scannersRoot);
+                foreach (var entry in Scanners.Values)
+                {
+                    if (entry == null)
+                        continue;
+                    var vNode = new ConfigNode("") { Name = "VESSEL" };
+                    vNode.CreateValue(new CfgNodeValue<string, string>("VesselId", entry.VesselId.ToString("N", CultureInfo.InvariantCulture)));
+                    vNode.CreateValue(new CfgNodeValue<string, string>("VesselName", entry.VesselName ?? string.Empty));
+                    if (entry.Sensors != null)
+                    {
+                        foreach (var sensor in entry.Sensors)
+                        {
+                            if (sensor == null)
+                                continue;
+                            var sNode = new ConfigNode("") { Name = "SENSOR" };
+                            sNode.CreateValue(new CfgNodeValue<string, string>("SensorType", sensor.SensorType.ToString(CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("Fov", sensor.Fov.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("MinAlt", sensor.MinAlt.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("MaxAlt", sensor.MaxAlt.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("BestAlt", sensor.BestAlt.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("RequireLight", sensor.RequireLight.ToString(CultureInfo.InvariantCulture)));
+                            vNode.AddNode(sNode);
+                        }
+                    }
+                    scannersRoot.AddNode(vNode);
                 }
             }
 
@@ -934,6 +1051,105 @@ namespace Server.System.Agency
                 }
             }
 
+            // [Mod-compat S2 — SCANsat] Per-body coverage parse — SCAN_COVERAGE
+            // is an S2 addition. Forward-compat: agency files written by pre-S2
+            // servers have no SCAN_COVERAGE node and skip cleanly to an empty
+            // Coverage dict. Per-entry isolation: missing/empty BodyName skips
+            // the slot with a [fix:S2-SCANsat] LunaLog.Warning (Invariant 4 +
+            // BUG-013 precedent — operability over silent-drop). ClampHeight +
+            // LandingTarget yield null when absent (preserves Decision §8 round-
+            // trip for the optional fields).
+            var coverageRoot = node.GetNode("SCAN_COVERAGE")?.Value;
+            if (coverageRoot != null)
+            {
+                foreach (var bEntry in coverageRoot.GetNodes("BODY"))
+                {
+                    var entryNode = bEntry.Value;
+                    var bodyName = entryNode.GetValue("Name")?.Value;
+                    if (string.IsNullOrEmpty(bodyName))
+                    {
+                        LunaLog.Warning("[fix:S2-SCANsat] BODY entry skipped: missing Name");
+                        continue;
+                    }
+
+                    var entry = new AgencyCoverageBodyEntry
+                    {
+                        BodyName = bodyName,
+                        Disabled = ParseBoolOrFalse(entryNode.GetValue("Disabled")?.Value),
+                        MinHeightRange = ParseFloatOrZero(entryNode.GetValue("MinHeightRange")?.Value),
+                        MaxHeightRange = ParseFloatOrZero(entryNode.GetValue("MaxHeightRange")?.Value),
+                        ClampHeight = ParseNullableFloat(entryNode.GetValue("ClampHeight")?.Value),
+                        PaletteName = entryNode.GetValue("PaletteName")?.Value ?? string.Empty,
+                        PaletteSize = ParseIntOrZero(entryNode.GetValue("PaletteSize")?.Value),
+                        PaletteReverse = ParseBoolOrFalse(entryNode.GetValue("PaletteReverse")?.Value),
+                        PaletteDiscrete = ParseBoolOrFalse(entryNode.GetValue("PaletteDiscrete")?.Value),
+                        Map = entryNode.GetValue("Map")?.Value ?? string.Empty,
+                        LandingTarget = entryNode.GetValue("LandingTarget")?.Value, // null when absent — preserves Decision §8 optional-round-trip
+                    };
+
+                    // Duplicate body keys keep the LAST occurrence (Dictionary
+                    // indexer overwrites — operator hand-edit case, mirrors
+                    // KOLONY_ENTRIES rule).
+                    state.Coverage[bodyName] = entry;
+                }
+            }
+
+            // [Mod-compat S2 — SCANsat] Per-vessel scanner parse — SCAN_SCANNERS
+            // is an S2 addition. Forward-compat: pre-S2 agency files have no
+            // SCAN_SCANNERS node and skip to an empty Scanners dict. Per-entry
+            // isolation at TWO levels (Decision §9 nesting):
+            //   - per-Vessel: missing/unparseable VesselId skips the whole
+            //     vessel with a Warning;
+            //   - per-Sensor: missing/unparseable SensorType skips that
+            //     individual sensor with a Warning but other sensors on the
+            //     same vessel survive.
+            // The two-level isolation mirrors the kolony parse + the contract
+            // parse precedents.
+            var scannersRoot = node.GetNode("SCAN_SCANNERS")?.Value;
+            if (scannersRoot != null)
+            {
+                foreach (var vEntry in scannersRoot.GetNodes("VESSEL"))
+                {
+                    var entryNode = vEntry.Value;
+                    var rawVesselId = entryNode.GetValue("VesselId")?.Value;
+                    if (!Guid.TryParse(rawVesselId, out var vesselId))
+                    {
+                        LunaLog.Warning($"[fix:S2-SCANsat] VESSEL entry skipped: unparseable VesselId ({rawVesselId ?? "<null>"})");
+                        continue;
+                    }
+
+                    var entry = new AgencyScannerEntry
+                    {
+                        VesselId = vesselId,
+                        VesselName = entryNode.GetValue("VesselName")?.Value ?? string.Empty,
+                        Sensors = new List<AgencyScannerSensorRecord>(),
+                    };
+
+                    foreach (var sEntry in entryNode.GetNodes("SENSOR"))
+                    {
+                        var sensorNode = sEntry.Value;
+                        var rawType = sensorNode.GetValue("SensorType")?.Value;
+                        if (!int.TryParse(rawType, NumberStyles.Integer, CultureInfo.InvariantCulture, out var sensorType))
+                        {
+                            LunaLog.Warning($"[fix:S2-SCANsat] SENSOR entry skipped on vessel {vesselId:N}: unparseable SensorType ({rawType ?? "<null>"})");
+                            continue;
+                        }
+
+                        entry.Sensors.Add(new AgencyScannerSensorRecord
+                        {
+                            SensorType = sensorType,
+                            Fov = ParseDoubleOrZero(sensorNode.GetValue("Fov")?.Value),
+                            MinAlt = ParseDoubleOrZero(sensorNode.GetValue("MinAlt")?.Value),
+                            MaxAlt = ParseDoubleOrZero(sensorNode.GetValue("MaxAlt")?.Value),
+                            BestAlt = ParseDoubleOrZero(sensorNode.GetValue("BestAlt")?.Value),
+                            RequireLight = ParseBoolOrFalse(sensorNode.GetValue("RequireLight")?.Value),
+                        });
+                    }
+
+                    state.Scanners[vesselId] = entry;
+                }
+            }
+
             return state;
         }
 
@@ -944,11 +1160,32 @@ namespace Server.System.Agency
             return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : 0d;
         }
 
+        private static float ParseFloatOrZero(string raw)
+        {
+            if (string.IsNullOrEmpty(raw))
+                return 0f;
+            return float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : 0f;
+        }
+
+        private static float? ParseNullableFloat(string raw)
+        {
+            if (string.IsNullOrEmpty(raw))
+                return null;
+            return float.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : (float?)null;
+        }
+
         private static int ParseIntOrZero(string raw)
         {
             if (string.IsNullOrEmpty(raw))
                 return 0;
             return int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
+        }
+
+        private static bool ParseBoolOrFalse(string raw)
+        {
+            if (string.IsNullOrEmpty(raw))
+                return false;
+            return bool.TryParse(raw, out var value) && value;
         }
     }
 }

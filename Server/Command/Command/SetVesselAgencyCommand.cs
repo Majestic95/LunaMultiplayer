@@ -47,7 +47,7 @@ namespace Server.Command.Command
     ///         BEFORE calling migration helpers.</b> Post-migration the
     ///         5.17a cross-agency rejection treats destination as
     ///         authoritative immediately.</item>
-    ///   <item><b>Call the three per-router helpers</b> (skip when source
+    ///   <item><b>Call the four per-router helpers</b> (skip when source
     ///         is null — Unassigned-source has no per-router entries by
     ///         construction; the routers' first-served path puts entries
     ///         under the CURRENT writer's agency, never under an "Empty
@@ -55,7 +55,10 @@ namespace Server.Command.Command
     ///         <see cref="AgencyKolonyRouter.MigrateForVesselTransfer"/>,
     ///         <see cref="AgencyOrbitalRouter.MigrateForVesselTransfer"/>,
     ///         <see cref="AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer"/>
-    ///         (read-only, Q2 NO-MIGRATE).</item>
+    ///         (read-only, Q2 NO-MIGRATE),
+    ///         <see cref="AgencyScanRouter.MigrateForVesselTransfer"/>
+    ///         (Mod-compat S2 Decision §3 — vessel-keyed scanner records
+    ///         follow the vessel; per-body Coverage stays put).</item>
     ///   <item><b>Persist BOTH agencies</b> (only destination when source
     ///         is null/orphaned).
     ///         <see cref="AgencySystem.SaveAgency"/> before releasing the
@@ -261,6 +264,7 @@ namespace Server.Command.Command
             KolonyMigrationResult kolonyResult = null;
             OrbitalMigrationResult orbitalResult = null;
             PlanetaryInspectionResult planetaryResult = null;
+            ScanMigrationResult scanResult = null;
 
             // Track whether we actually performed a mutation under the lock.
             // The post-lock re-check (Round-1 integration-logic CONSIDER C1)
@@ -335,6 +339,12 @@ namespace Server.Command.Command
                     kolonyResult = AgencyKolonyRouter.MigrateForVesselTransfer(source, destination, movedVesselId);
                     orbitalResult = AgencyOrbitalRouter.MigrateForVesselTransfer(source, destination, movedVesselId);
                     planetaryResult = AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer(source, movedVesselId);
+                    // [Mod-compat S2 / Decision §3 + D3] Vessel-keyed scanner
+                    // records follow the vessel A→B; per-body Coverage stays
+                    // put (A's discoveries of Eve stay A's). Mirrors the
+                    // kolony migrate-with-vessel pattern; ScanMigrationResult
+                    // is single-entry (vessel-keyed, at most one record).
+                    scanResult = AgencyScanRouter.MigrateForVesselTransfer(source, destination, movedVesselId);
                 }
 
                 // Step 5: Persist BOTH agencies under the dual lock.
@@ -485,12 +495,18 @@ namespace Server.Command.Command
             var orbitalMoved = orbitalResult?.RemovedTransferGuids.Count ?? 0;
             var orbitalKept = orbitalResult?.OriginOnlyKeptGuids.Count ?? 0;
             var planetaryAffected = planetaryResult?.AffectedKeys.Count ?? 0;
+            // [Mod-compat S2] Scan migration is single-entry (vessel-keyed; at
+            // most one record moves per call). Non-Empty RemovedVesselId =
+            // entry moved; Empty = source had no scanner record (or the
+            // RemovedVesselId field defaults to Empty when the helper short-
+            // circuited).
+            var scanMoved = (scanResult != null && scanResult.RemovedVesselId != Guid.Empty) ? 1 : 0;
             LunaLog.Normal(
                 $"[fix:per-agency-career] setvesselagency {movedVesselId:N} result=transferred source={sourceLabel} " +
                 $"dest={destAgencyId:N} dest-owner='{destOwnerName}' kolony-moved={kolonyMoved} " +
                 $"orbital-moved={orbitalMoved} orbital-origin-kept={orbitalKept} " +
-                $"planetary-retained-in-source={planetaryAffected} third-agency-stranded={thirdAgencyOrphans} " +
-                $"released-locks={releasedCount}");
+                $"planetary-retained-in-source={planetaryAffected} scan-moved={scanMoved} " +
+                $"third-agency-stranded={thirdAgencyOrphans} released-locks={releasedCount}");
 
             // Per-guid audit lines for the orbital Origin-only KEEP set
             // (pre-spec §4.e operator info log — Q1 KEEP retains the launch

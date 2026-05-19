@@ -1,5 +1,7 @@
 using LunaConfigNode.CfgNode;
+using Server.Client;
 using Server.Log;
+using Server.System.Agency;
 using System;
 using System.Collections.Concurrent;
 using System.Text;
@@ -56,8 +58,20 @@ namespace Server.System.Scenario
         /// <summary>
         /// Raw updates a scenario in the dictionary, stripping outer { } braces
         /// that KSP's ConfigNode serializer adds (same fix as ParseClientConfigNode).
+        ///
+        /// <para>[Mod-compat S2] <paramref name="client"/> is threaded through so
+        /// Path B per-agency routers (currently <see cref="AgencyScanRouter"/>;
+        /// future S3 FFT / S4 DMagic will join) can derive sender authority from
+        /// <c>AgencySystem.AgencyByPlayerName[client.PlayerName]</c>. When a router
+        /// claims the inbound (<c>TryRoute</c> returns <c>true</c>) the shared-store
+        /// AddOrUpdate is SUPPRESSED — per-agency state owns the authoritative
+        /// copy and the projector splices it back into outbound scenario blobs at
+        /// <c>SendScenarioModules</c> time. Pass <paramref name="client"/> as
+        /// <c>null</c> for boot-time / non-client-driven scenario loads — the
+        /// routers all short-circuit on a null client and fall through to the
+        /// legacy AddOrUpdate.</para>
         /// </summary>
-        public static void RawConfigNodeInsertOrUpdate(string scenarioModule, string scenarioAsConfigNode)
+        public static void RawConfigNodeInsertOrUpdate(ClientStructure client, string scenarioModule, string scenarioAsConfigNode)
         {
             _ = Task.Run(() =>
             {
@@ -66,6 +80,19 @@ namespace Server.System.Scenario
                     trimmed = trimmed.Substring(1, trimmed.Length - 2);
 
                 var scenario = new ConfigNode(trimmed) { Name = scenarioModule };
+
+                // [Mod-compat S2 Path B dispatch] Route SCANcontroller through
+                // AgencyScanRouter under gate=on. TryRoute returns false when
+                // PerAgencyEnabled is false, when the client lacks an agency
+                // mapping, or when client is null — falls through to the
+                // shared-store AddOrUpdate in those cases, preserving dual-mode
+                // silence.
+                if (scenarioModule == "SCANcontroller" &&
+                    AgencyScanRouter.TryRoute(client, scenario))
+                {
+                    return;
+                }
+
                 lock (Semaphore.GetOrAdd(scenarioModule, new object()))
                 {
                     ScenarioStoreSystem.CurrentScenarios.AddOrUpdate(scenarioModule, scenario, (key, existingVal) => scenario);

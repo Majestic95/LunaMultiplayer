@@ -99,6 +99,17 @@ namespace Server.System
                         // owner-only transfer-snapshot under gate=on.
                         AgencySystemSender.SendOrbitalCatchupTo(client, assignedState);
                     }
+
+                    // [Mod-compat S2 / Path B D2 catch-up] Synchronous connect-
+                    // time projection for SCANsat. Without this, a reconnecting
+                    // owner sees the operator-seeded baseline SCANcontroller blob
+                    // for up to 30s (until the next SHA pass triggers a full
+                    // SendScenarioModules tick). SendScenariosToClient runs the
+                    // same per-agency projector splice that SendScenarioModules
+                    // does, but targeted at the requesting client only and only
+                    // for the named scenarios. Future S3 (FFT) + S4 (DMagic)
+                    // append their module names to the same call.
+                    ScenarioSystem.SendScenariosToClient(client, "SCANcontroller");
                 }
 
                 var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<PlayerConnectionJoinMsgData>();

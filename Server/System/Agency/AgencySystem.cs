@@ -201,6 +201,7 @@ namespace Server.System.Agency
                 WarnAboutSharedKolonyOnUpgrade();
                 WarnAboutSharedPlanetaryOnUpgrade();
                 WarnAboutSharedOrbitalOnUpgrade();
+                WarnAboutSharedSCANsatOnUpgrade();
                 RefuseStartupIfUpgradeHazardWithoutOverride();
                 return;
             }
@@ -326,6 +327,13 @@ namespace Server.System.Agency
             // §2.a vessel stamp; the warning text spells this out + offers
             // the cancel-before-upgrade operator workflow.
             WarnAboutSharedOrbitalOnUpgrade();
+
+            // [Mod-compat S2] SCANsat upgrade-lens diagnostic — under gate=on,
+            // the projector strips Progress/Body + Scanners/Vessel children from
+            // SCANcontroller on first per-agency connect (Decision §2 — each
+            // agency starts at 0% coverage). Operator flipping the gate on an
+            // existing universe with accumulated scan progress loses ALL of it.
+            WarnAboutSharedSCANsatOnUpgrade();
 
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
@@ -494,6 +502,25 @@ namespace Server.System.Agency
                 lock (Scenario.ScenarioDataUpdater.GetSemaphore("ScenarioOrbitalLogistics"))
                 {
                     if (orbitalScn.GetNodes("TRANSFER").Any()) hasHazard = true;
+                }
+            }
+            // [Mod-compat S2] SCANsat hazard predicate. Mirrors
+            // WarnAboutSharedSCANsatOnUpgrade — any shared Body / Vessel child
+            // under Progress / Scanners means the projector strips on first
+            // per-agency connect, deleting operator-visible scan coverage +
+            // scanner records. SCANsat absent from the modlist → no scenario
+            // entry → no hazard. Same fail-closed posture as the other slices.
+            if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("SCANcontroller", out var scanScn))
+            {
+                lock (Scenario.ScenarioDataUpdater.GetSemaphore("SCANcontroller"))
+                {
+                    var prog = scanScn.GetNode("Progress")?.Value;
+                    if (prog != null && prog.GetNodes("Body").Any()) hasHazard = true;
+                    if (!hasHazard)
+                    {
+                        var scan = scanScn.GetNode("Scanners")?.Value;
+                        if (scan != null && scan.GetNodes("Vessel").Any()) hasHazard = true;
+                    }
                 }
             }
             if (!hasHazard && ScenarioStoreSystem.CurrentScenarios.TryGetValue("ScenarioUpgradeableFacilities", out var facScn))
@@ -1009,6 +1036,75 @@ namespace Server.System.Agency
                 "(PerAgencyCareer=false) — no transfer data loss. Note: even under shared mode, the Slice " +
                 "D-2 Deliver-prefix (when shipped) closes the per-frame double-spend hazard that has " +
                 "existed pre-Phase-3 on master — strict improvement regardless of gate.");
+        }
+
+        /// <summary>
+        /// [Mod-compat S2 — SCANsat] Upgrade-lens diagnostic mirroring the
+        /// Phase 3 Slice B/C/D family. Pre-existing <c>Progress → Body</c>
+        /// children + <c>Scanners → Vessel</c> children in the shared
+        /// <c>SCANcontroller</c> scenario under gate=on are STRIPPED by
+        /// <see cref="AgencyScenarioProjector.SpliceSCANsatCoverageIntoScenario"/>
+        /// on first per-agency client connect (Decision §2 — each agency starts
+        /// at 0% coverage). The accumulated coverage bitmaps + active-scanner
+        /// records vanish from every player's SCANsat UI on first connect.
+        /// SCANResources + root UI scalars survive (Decisions §6 + §7); only
+        /// the player-progress containers are stripped.
+        ///
+        /// <para>SCANsat absent from the modlist (no <c>SCANcontroller</c>
+        /// scenario entry) → no warning. Pristine universe → no warning. Any
+        /// agency already minted → operator already chose this path → no
+        /// warning (Slice B/C/D precedent).</para>
+        ///
+        /// <para>Recovery options mirror the other upgrade-lens diagnostics in
+        /// this file: (a) accept the loss + set
+        /// <c>AllowEnablePerAgencyOnExistingUniverse=true</c>; (b) fresh-start
+        /// workflow per spec §10; (c) stay on shared-agency mode.</para>
+        /// </summary>
+        private static void WarnAboutSharedSCANsatOnUpgrade()
+        {
+            if (Agencies.Count > 0)
+                return; // Fresh-mint agency on a new universe is fine.
+            if (VesselStoreSystem.CurrentVessels.IsEmpty)
+                return; // Pristine universe — no upgrade hazard.
+
+            if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("SCANcontroller", out var scenario))
+                return; // SCANsat not in modlist or never persisted; no hazard.
+
+            int bodyCount = 0;
+            int vesselCount = 0;
+            lock (Scenario.ScenarioDataUpdater.GetSemaphore("SCANcontroller"))
+            {
+                var prog = scenario.GetNode("Progress")?.Value;
+                if (prog != null)
+                    bodyCount = prog.GetNodes("Body").Count();
+                var scan = scenario.GetNode("Scanners")?.Value;
+                if (scan != null)
+                    vesselCount = scan.GetNodes("Vessel").Count();
+            }
+
+            if (bodyCount == 0 && vesselCount == 0)
+                return;
+
+            LunaLog.Warning(
+                "[fix:S2-SCANsat] PerAgencyCareer=true on an upgrade universe carries " +
+                $"shared-agency SCANsat state: {bodyCount} per-body coverage record(s) + " +
+                $"{vesselCount} active-scanner vessel record(s) in the SCANcontroller " +
+                "scenario. The Mod-compat S2 projector strips ALL Body + Vessel children " +
+                "on first per-agency connect (Decision §2 — each agency starts at 0% " +
+                "coverage); accumulated scan progress and active-scanner registrations " +
+                "vanish from every player's SCANsat UI. SCANResources display config " +
+                "and root-level UI scalars (visibility, palette selection) survive — " +
+                "only player-progress is stripped. " +
+                "RECOVERY OPTIONS: " +
+                "(1) Accept the loss + set AllowEnablePerAgencyOnExistingUniverse=true in " +
+                "Settings/GameplaySettings.xml. Server boots, projector strips on first connect. " +
+                "(2) Fresh-start workflow (spec §10): stop the server, archive Universe/, " +
+                "restart. Each agency begins with empty Coverage / Scanners as designed. " +
+                "(3) Stay on shared-agency mode (PerAgencyCareer=false) — no SCANsat data loss. " +
+                "Note: Decision §5 also requires disabling LunaCompat's SCANsat server-plugin " +
+                "entry in Universe/LunaCompat/ModSettingsStructure.xml under gate=on, otherwise " +
+                "the fork's AgencyScanRouter and LunaCompat's plugin will double-process the " +
+                "scenario blob.");
         }
 
         /// <summary>

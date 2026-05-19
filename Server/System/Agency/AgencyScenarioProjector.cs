@@ -97,6 +97,19 @@ namespace Server.System.Agency
             // client-side Deliver-prefix closes it from the write side gate-
             // state-independent.
             "ScenarioOrbitalLogistics",
+            // [Mod-compat S2] SCANsat per-agency coverage projection. Strip-
+            // then-splice for Progress → Body (per-body coverage + UI prefs)
+            // and Scanners → Vessel → Sensor (multi-Sensor nested per Decision
+            // §9). SCANResources and ~30 root-level KSPField UI scalars pass
+            // through unchanged (Decisions §6 + §7 — shared, frozen at
+            // operator seed under gate=on). Each agency's projected scenario
+            // carries ONLY their own Body + Vessel records. Cross-agency
+            // isolation is enforced at INGRESS (AgencyScanRouter rejects
+            // cross-agency Vessel claims, see UpsertScannerEntries cross-
+            // agency check); the splice emits AgencyState.Scanners verbatim
+            // because the router has already filtered. No splice-time
+            // ownership re-check.
+            "SCANcontroller",
         };
 
         /// <summary>
@@ -222,6 +235,13 @@ namespace Server.System.Agency
                 // pending + recently-completed transfers — spec §10 Q1.
                 case "ScenarioOrbitalLogistics":
                     return SpliceAgencyOrbitalTransfers(serializedText, targetAgency);
+                // [Mod-compat S2] SCANsat scenario splice. Strip shared Progress
+                // → Body children + Scanners → Vessel children; splice in per-
+                // agency entries from AgencyState.Coverage + AgencyState.Scanners.
+                // SCANResources + root-level UI scalars are NOT touched (Decisions
+                // §6 + §7 — shared, frozen at operator seed under gate=on).
+                case "SCANcontroller":
+                    return SpliceSCANsatCoverageIntoScenario(serializedText, targetAgency);
                 default:
                     return serializedText;
             }
@@ -1169,6 +1189,204 @@ namespace Server.System.Agency
                     // limited; expected in normal operation only on
                     // operator hand-edit / MKS schema-drift cases.
                     LunaLog.Warning($"[fix:MKS-R2] orbital splice: dropped TRANSFER entry for agency {targetAgency.AgencyId:N} transfer {entry.TransferGuid:N}: {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            return node.ToString();
+        }
+
+        /// <summary>
+        /// [Mod-compat S2] Strip shared <c>Progress → Body</c> children + shared
+        /// <c>Scanners → Vessel</c> children, splice in per-agency entries from
+        /// <see cref="AgencyState.Coverage"/> + <see cref="AgencyState.Scanners"/>.
+        /// Both containers honor the find-or-create + strip-then-splice
+        /// canonical pattern (see <see cref="SpliceAgencyKolonyEntries"/>).
+        ///
+        /// <para>SCANcontroller shape (verified against
+        /// <c>F:/tmp/mks-external/SCANsat</c> SHA <c>0d67371</c>,
+        /// <c>SCANcontroller.cs:783-865</c>):</para>
+        /// <code>
+        /// SCANcontroller {
+        ///     [~30 root-level KSPField UI scalars — left alone per Decision §7]
+        ///     Scanners { Vessel { guid, name, Sensor { type, fov, min_alt, ... } ...N } ...M }
+        ///     Progress { Body { Name, Map, Disabled, MinHeightRange, ... } ...K }
+        ///     SCANResources { ResourceType { Resource, MinColor, MinMaxValues, ... } ... }  -- left alone per Decision §6
+        /// }
+        /// </code>
+        ///
+        /// <para><b>Decision §6 — `SCANResources` stays SHARED.</b> The
+        /// `MinMaxValues` field is body-resource display ranges (operator /
+        /// world config), not per-agency player-discovered amounts. Per
+        /// Color / Transparency are visualization. This splice does NOT touch
+        /// the SCANResources container — passes through unchanged.</para>
+        ///
+        /// <para><b>Decision §7 — root UI scalars stay SHARED.</b> The ~30
+        /// KSPField scalars (`mainMapVisible`, `bigMapColor`, etc.) persist at
+        /// the ScenarioModule root. Path B suppresses the shared-store WRITE
+        /// under gate=on, so each client's runtime UI tweaks accumulate
+        /// locally but the server's projection serves the operator-seeded
+        /// baseline. This splice does NOT touch root-level scalars — they
+        /// pass through unchanged from the inbound blob.</para>
+        ///
+        /// <para><b>Decision §3 — per-vessel scanner filter.</b> Under
+        /// uniform gate=on the suppressed-shared-write model means the
+        /// inbound <c>Scanners</c> children are typically EMPTY (operator-seed
+        /// baseline has no Vessel children). The per-agency state may contain
+        /// only the requesting agency's owned vessels (router rejects cross-
+        /// agency claims). However, the operator-seed baseline COULD contain
+        /// stale Vessel entries (pre-0.31 upgrade case); the splice always
+        /// strips them before splicing per-agency entries so each agency
+        /// sees ONLY their own vessels.</para>
+        ///
+        /// <para><b>Multi-Sensor nested round-trip (Decision §9).</b> Each
+        /// per-agency <see cref="AgencyScannerEntry"/> carries a nested
+        /// <see cref="AgencyScannerEntry.Sensors"/> list. The splice emits
+        /// one <c>Sensor</c> child per record inside the Vessel parent — order
+        /// is not load-bearing per SCANsat's set-semantics.</para>
+        ///
+        /// <para><b>Empty-container retention (M9)</b>. Strips shared children
+        /// then emits empty <c>Progress { }</c> / <c>Scanners { }</c> containers
+        /// when the agency has no entries — SCANsat's <c>OnLoad</c> guards on
+        /// container presence (<c>node.GetNode("Progress") != null</c>) rather
+        /// than child count, so empty containers are fine and missing
+        /// containers cause OnLoad to skip the whole load branch (which would
+        /// silently revert per-agency state to client-local SCANsat defaults).</para>
+        ///
+        /// <para><b>Whole-scenario parse fallback per Invariant 5.</b></para>
+        /// </summary>
+        private static string SpliceSCANsatCoverageIntoScenario(string scenarioText, AgencyState targetAgency)
+        {
+            if (string.IsNullOrEmpty(scenarioText))
+                return scenarioText;
+            ConfigNode node;
+            try { node = new ConfigNode(scenarioText) { Name = "SCANcontroller" }; }
+            catch (Exception e)
+            {
+                LunaLog.Error($"[fix:S2-SCANsat] SCANcontroller projection parse failed for agency {targetAgency.AgencyId:N}: {e.GetType().Name}: {e.Message}");
+                return scenarioText;
+            }
+
+            // Find or create Progress container, strip its Body children, splice
+            // in per-agency entries. Same shape as KOLONIZATION strip-and-splice
+            // (see SpliceAgencyKolonyEntries).
+            var progressContainer = node.GetNode("Progress")?.Value;
+            if (progressContainer == null)
+            {
+                progressContainer = new ConfigNode("") { Name = "Progress" };
+                node.AddNode(progressContainer);
+            }
+            else
+            {
+                foreach (var existing in progressContainer.GetNodes("Body").ToArray())
+                    progressContainer.RemoveNode(existing.Value);
+            }
+
+            // Find or create Scanners container, strip its Vessel children.
+            var scannersContainer = node.GetNode("Scanners")?.Value;
+            if (scannersContainer == null)
+            {
+                scannersContainer = new ConfigNode("") { Name = "Scanners" };
+                node.AddNode(scannersContainer);
+            }
+            else
+            {
+                foreach (var existing in scannersContainer.GetNodes("Vessel").ToArray())
+                    scannersContainer.RemoveNode(existing.Value);
+            }
+
+            // Snapshot both collections inside the per-agency lock — same
+            // pattern as kolony at SpliceAgencyKolonyEntries. Iteration of the
+            // snapshot happens outside the lock so slow per-entry ConfigNode
+            // construction doesn't extend the writer-blocking window.
+            AgencyCoverageBodyEntry[] coverageSnapshot;
+            AgencyScannerEntry[] scannersSnapshot;
+            lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
+            {
+                coverageSnapshot = targetAgency.Coverage.Values.ToArray();
+                scannersSnapshot = targetAgency.Scanners.Values.ToArray();
+            }
+
+            // Splice Body children. Field names match SCANsat OnLoad parse
+            // (SCANcontroller.cs:619-700) — Name / Disabled / Map /
+            // MinHeightRange / MaxHeightRange / ClampHeight (optional) /
+            // palette / LandingTarget (optional).
+            foreach (var entry in coverageSnapshot)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.BodyName))
+                    continue;
+                try
+                {
+                    var bNode = new ConfigNode("") { Name = "Body" };
+                    bNode.CreateValue(new CfgNodeValue<string, string>("Name", entry.BodyName));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("Disabled", entry.Disabled.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("MinHeightRange", entry.MinHeightRange.ToString("R", CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("MaxHeightRange", entry.MaxHeightRange.ToString("R", CultureInfo.InvariantCulture)));
+                    if (entry.ClampHeight.HasValue)
+                        bNode.CreateValue(new CfgNodeValue<string, string>("ClampHeight", entry.ClampHeight.Value.ToString("R", CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteName", entry.PaletteName ?? string.Empty));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteSize", entry.PaletteSize.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteReverse", entry.PaletteReverse.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("PaletteDiscrete", entry.PaletteDiscrete.ToString(CultureInfo.InvariantCulture)));
+                    bNode.CreateValue(new CfgNodeValue<string, string>("Map", entry.Map ?? string.Empty));
+                    if (!string.IsNullOrEmpty(entry.LandingTarget))
+                        bNode.CreateValue(new CfgNodeValue<string, string>("LandingTarget", entry.LandingTarget));
+                    progressContainer.AddNode(bNode);
+                }
+                catch (Exception e)
+                {
+                    // Per-entry isolation per Invariant 4 — drop this body,
+                    // keep others. Logged at Warning to match sibling splice
+                    // precedent (general-lens SHOULD-FIX: silent drops are
+                    // invisible to operators trying to diagnose missing per-
+                    // agency Body entries; the round-trip-from-typed-state
+                    // path should never fail, so a failure here is a real
+                    // signal worth surfacing).
+                    LunaLog.Warning(
+                        $"[fix:S2-SCANsat] Body splice skipped for agency {targetAgency.AgencyId:N} " +
+                        $"body='{entry.BodyName}': {e.GetType().Name}: {e.Message}");
+                }
+            }
+
+            // Splice Vessel children with nested Sensor children per Decision §9.
+            // Field names match SCANsat OnLoad parse (SCANcontroller.cs:610-630)
+            // — lowercase guid + name on Vessel; lowercase-underscore on Sensor
+            // (type / fov / min_alt / max_alt / best_alt / require_light).
+            foreach (var entry in scannersSnapshot)
+            {
+                if (entry == null)
+                    continue;
+                try
+                {
+                    var vNode = new ConfigNode("") { Name = "Vessel" };
+                    vNode.CreateValue(new CfgNodeValue<string, string>("guid", entry.VesselId.ToString("D", CultureInfo.InvariantCulture)));
+                    if (!string.IsNullOrEmpty(entry.VesselName))
+                        vNode.CreateValue(new CfgNodeValue<string, string>("name", entry.VesselName));
+                    if (entry.Sensors != null)
+                    {
+                        foreach (var sensor in entry.Sensors)
+                        {
+                            if (sensor == null)
+                                continue;
+                            var sNode = new ConfigNode("") { Name = "Sensor" };
+                            sNode.CreateValue(new CfgNodeValue<string, string>("type", sensor.SensorType.ToString(CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("fov", sensor.Fov.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("min_alt", sensor.MinAlt.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("max_alt", sensor.MaxAlt.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("best_alt", sensor.BestAlt.ToString("R", CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("require_light", sensor.RequireLight.ToString(CultureInfo.InvariantCulture)));
+                            vNode.AddNode(sNode);
+                        }
+                    }
+                    scannersContainer.AddNode(vNode);
+                }
+                catch (Exception e)
+                {
+                    // Per-entry isolation per Invariant 4 — drop this vessel,
+                    // keep others. Logged at Warning to match sibling splice
+                    // precedent (general-lens SHOULD-FIX).
+                    LunaLog.Warning(
+                        $"[fix:S2-SCANsat] Vessel splice skipped for agency {targetAgency.AgencyId:N} " +
+                        $"VesselId={entry.VesselId:N}: {e.GetType().Name}: {e.Message}");
                 }
             }
 

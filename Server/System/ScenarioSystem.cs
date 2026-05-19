@@ -9,6 +9,8 @@ using Server.Server;
 using Server.Settings.Structures;
 using Server.System.Agency;
 using Server.System.Scenario;
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -110,6 +112,76 @@ namespace Server.System
             MessageQueuer.SendToClient<ScenarioSrvMsg>(client, msgData);
         }
 
+        /// <summary>
+        /// [Mod-compat S2 / Path B D2] Send a targeted, projected snapshot of
+        /// specific scenario modules to a single client. Used at handshake
+        /// completion to deliver per-agency projected SCANcontroller (S2) +
+        /// FarFutureTechnologyPersistence (future S3) + DMScienceScenario
+        /// (future S4) blobs WITHOUT waiting up to 30s for the next
+        /// <see cref="SendScenarioModules"/> tick. Path B routers suppress the
+        /// shared-store write under gate=on, so an owner reconnecting would
+        /// otherwise see the operator-seeded baseline scenario until the next
+        /// SHA pass — this helper closes that window.
+        ///
+        /// <para>Each requested name is resolved via the same key-by-filename
+        /// pattern <see cref="SendScenarioModules"/> uses
+        /// (<see cref="ScenarioStoreSystem.CurrentScenarios"/> is keyed by file
+        /// path; module name is the <see cref="Path.GetFileNameWithoutExtension"/>
+        /// of the key). Missing scenarios are silently skipped — gate=on, fresh-
+        /// start universe, no SCANcontroller scenario on disk yet → no-op.
+        /// Resolved scenarios are projected through
+        /// <see cref="AgencyScenarioProjector.ProjectForClient"/> which early-
+        /// returns the input unchanged under gate=off, preserving dual-mode
+        /// silence — safe to call unconditionally.</para>
+        ///
+        /// <para>Single <see cref="ScenarioDataMsgData"/> envelope carries all
+        /// resolved names (matches SendScenarioModules' batch shape — one wire
+        /// message per call, not one per scenario).</para>
+        /// </summary>
+        public static void SendScenariosToClient(ClientStructure client, params string[] scenarioNames)
+        {
+            if (client == null || scenarioNames == null || scenarioNames.Length == 0)
+                return;
+
+            // Build a name -> key lookup over CurrentScenarios. Keys are file
+            // paths; module names are the basenames. Same per-Keys snapshot
+            // defensive pattern as SendScenarioModules.
+            var nameSet = new HashSet<string>(scenarioNames, StringComparer.Ordinal);
+            var scenarioDataArray = ScenarioStoreSystem.CurrentScenarios.Keys
+                .Select(s => new
+                {
+                    Key = s,
+                    Module = Path.GetFileNameWithoutExtension(s),
+                })
+                .Where(x => nameSet.Contains(x.Module))
+                .Select(x => new
+                {
+                    Module = x.Module,
+                    Text = ScenarioStoreSystem.GetScenarioInConfigNodeFormat(x.Key),
+                })
+                .Where(x => x.Text != null)
+                .Select(x =>
+                {
+                    var projected = AgencyScenarioProjector.ProjectForClient(x.Module, x.Text, client);
+                    var serializedData = Encoding.UTF8.GetBytes(projected);
+                    return new ScenarioInfo
+                    {
+                        Data = serializedData,
+                        NumBytes = serializedData.Length,
+                        Module = x.Module,
+                    };
+                }).ToArray();
+
+            if (scenarioDataArray.Length == 0)
+                return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<ScenarioDataMsgData>();
+            msgData.ScenariosData = scenarioDataArray;
+            msgData.ScenarioCount = scenarioDataArray.Length;
+
+            MessageQueuer.SendToClient<ScenarioSrvMsg>(client, msgData);
+        }
+
 
         public static void ParseReceivedScenarioData(ClientStructure client, ScenarioBaseMsgData messageData)
         {
@@ -118,7 +190,7 @@ namespace Server.System
             for (var i = 0; i < data.ScenarioCount; i++)
             {
                 var scenarioAsConfigNode = Encoding.UTF8.GetString(data.ScenariosData[i].Data, 0, data.ScenariosData[i].NumBytes);
-                ScenarioDataUpdater.RawConfigNodeInsertOrUpdate(data.ScenariosData[i].Module, scenarioAsConfigNode);
+                ScenarioDataUpdater.RawConfigNodeInsertOrUpdate(client, data.ScenariosData[i].Module, scenarioAsConfigNode);
             }
         }
     }
