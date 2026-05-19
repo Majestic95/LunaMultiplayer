@@ -283,7 +283,11 @@ namespace Server.System.Agency
         ///        OR non-Career game mode. Dual-mode silence preserved.</item>
         ///   <item>The owner client is null (call from a code path with no source
         ///        client — should not happen for the router, defensive).</item>
-        ///   <item>The batch is null or empty.</item>
+        ///   <item>BOTH <paramref name="entries"/> AND
+        ///        <paramref name="removedKeys"/> are null/empty — sending a fully
+        ///        empty payload is wasted wire traffic. The early-return preserves
+        ///        the pre-Slice-E-1 behaviour for the upsert-echo call sites that
+        ///        pass <c>entries</c> alone (removedKeys defaults to null).</item>
         /// </list>
         ///
         /// <para><b>Caller contract on <paramref name="entries"/>:</b> the sender
@@ -293,6 +297,17 @@ namespace Server.System.Agency
         /// callers passing pre-snapshotted lists from inside their per-agency lock
         /// critical section satisfy the non-null contract by construction, but the
         /// defensive filter here is the load-bearing line for ad-hoc callers.</para>
+        ///
+        /// <para><b>[Phase 3 Slice E-1] <paramref name="removedKeys"/></b> (default
+        /// null): optional list of <c>$"{vesselId:N}|{bodyIndex}"</c> dict-keys
+        /// the receiver should treat as removed from its in-memory mirror. Only
+        /// populated by the per-router migration helper
+        /// (<see cref="AgencyKolonyRouter.MigrateForVesselTransfer"/>'s
+        /// <c>RemovedKeys</c>) for the source agency's owner-only echo when a
+        /// vessel transfers out of the source agency. Null/empty for the
+        /// per-mutation upsert-echo call sites + catch-up. Null + empty-string
+        /// entries are filtered out before emit — same protective filter as
+        /// the entries list.</para>
         ///
         /// <para><b>Sender-naming convention</b> (consumer-lens Lens-2 SF1):
         /// Slice C's <c>AgencyPlanetarySender</c> and Slice D's
@@ -305,29 +320,66 @@ namespace Server.System.Agency
         /// methods directly here — one class, multiple <c>Send*StateToOwner</c>
         /// methods.</para>
         /// </summary>
-        public static void SendKolonyStateToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<AgencyKolonyEntry> entries)
+        public static void SendKolonyStateToOwner(
+            ClientStructure owner,
+            Guid agencyId,
+            IReadOnlyList<AgencyKolonyEntry> entries,
+            IReadOnlyList<string> removedKeys = null)
         {
             if (!AgencySystem.PerAgencyEnabled)
                 return;
-            if (owner == null || entries == null || entries.Count == 0)
+            if (owner == null)
+                return;
+
+            var entriesEmpty = entries == null || entries.Count == 0;
+            var removedEmpty = removedKeys == null || removedKeys.Count == 0;
+            if (entriesEmpty && removedEmpty)
                 return;
 
             // [Round-1 general-lens SHOULD-FIX S2] Filter nulls so EntryCount
             // matches the non-null slot count on the wire. The router's `accepted`
             // list is null-free in practice (line 105 skips nulls before append),
-            // but the public API contract must not trust the caller — a future
-            // Slice E migration caller could pass a list assembled with nulls.
-            var nonNull = new List<AgencyKolonyEntry>(entries.Count);
-            for (var i = 0; i < entries.Count; i++)
+            // but the public API contract must not trust the caller — Slice E-1
+            // migration callers pass pre-snapshotted lists from inside their
+            // per-agency lock critical section, so they satisfy the non-null
+            // contract by construction, but the defensive filter remains
+            // load-bearing for ad-hoc callers.
+            var nonNullEntries = entriesEmpty
+                ? null
+                : new List<AgencyKolonyEntry>(entries.Count);
+            if (!entriesEmpty)
             {
-                if (entries[i] != null) nonNull.Add(entries[i]);
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    if (entries[i] != null) nonNullEntries.Add(entries[i]);
+                }
             }
-            if (nonNull.Count == 0) return;
+
+            // [Phase 3 Slice E-1] Same protective filter for the removal-keys
+            // tail — skip nulls + empty strings so the wire RemovedKolonyKeyCount
+            // matches the populated slot count.
+            var nonNullRemoved = removedEmpty
+                ? null
+                : new List<string>(removedKeys.Count);
+            if (!removedEmpty)
+            {
+                for (var i = 0; i < removedKeys.Count; i++)
+                {
+                    if (!string.IsNullOrEmpty(removedKeys[i])) nonNullRemoved.Add(removedKeys[i]);
+                }
+            }
+
+            var emitEntries = nonNullEntries != null && nonNullEntries.Count > 0;
+            var emitRemoved = nonNullRemoved != null && nonNullRemoved.Count > 0;
+            if (!emitEntries && !emitRemoved)
+                return;
 
             var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyKolonyStateMsgData>();
             msgData.AgencyId = agencyId;
-            msgData.EntryCount = nonNull.Count;
-            msgData.Entries = nonNull.ToArray();
+            msgData.EntryCount = emitEntries ? nonNullEntries.Count : 0;
+            msgData.Entries = emitEntries ? nonNullEntries.ToArray() : new AgencyKolonyEntry[0];
+            msgData.RemovedKolonyKeyCount = emitRemoved ? nonNullRemoved.Count : 0;
+            msgData.RemovedKolonyKeys = emitRemoved ? nonNullRemoved.ToArray() : new string[0];
 
             MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
         }
@@ -416,26 +468,62 @@ namespace Server.System.Agency
         /// the non-null slot count. Same protective filter as
         /// <see cref="SendKolonyStateToOwner"/>.</para>
         /// </summary>
-        public static void SendPlanetaryStateToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<AgencyPlanetaryEntry> entries)
+        public static void SendPlanetaryStateToOwner(
+            ClientStructure owner,
+            Guid agencyId,
+            IReadOnlyList<AgencyPlanetaryEntry> entries,
+            IReadOnlyList<string> removedKeys = null)
         {
             if (!AgencySystem.PerAgencyEnabled)
                 return;
-            if (owner == null || entries == null || entries.Count == 0)
+            if (owner == null)
+                return;
+
+            var entriesEmpty = entries == null || entries.Count == 0;
+            var removedEmpty = removedKeys == null || removedKeys.Count == 0;
+            if (entriesEmpty && removedEmpty)
                 return;
 
             // Filter nulls so EntryCount matches the non-null slot count on the
             // wire. Mirrors SendKolonyStateToOwner's protective filter.
-            var nonNull = new List<AgencyPlanetaryEntry>(entries.Count);
-            for (var i = 0; i < entries.Count; i++)
+            var nonNullEntries = entriesEmpty
+                ? null
+                : new List<AgencyPlanetaryEntry>(entries.Count);
+            if (!entriesEmpty)
             {
-                if (entries[i] != null) nonNull.Add(entries[i]);
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    if (entries[i] != null) nonNullEntries.Add(entries[i]);
+                }
             }
-            if (nonNull.Count == 0) return;
+
+            // [Phase 3 Slice E-1] Removal-tail filter. No Slice E-1 producer
+            // emits to this path (Q2 NO-MIGRATE for planetary on
+            // transferagency); the parameter exists for the future
+            // cleanplanetaryentries admin command symmetry with the kolony +
+            // orbital siblings.
+            var nonNullRemoved = removedEmpty
+                ? null
+                : new List<string>(removedKeys.Count);
+            if (!removedEmpty)
+            {
+                for (var i = 0; i < removedKeys.Count; i++)
+                {
+                    if (!string.IsNullOrEmpty(removedKeys[i])) nonNullRemoved.Add(removedKeys[i]);
+                }
+            }
+
+            var emitEntries = nonNullEntries != null && nonNullEntries.Count > 0;
+            var emitRemoved = nonNullRemoved != null && nonNullRemoved.Count > 0;
+            if (!emitEntries && !emitRemoved)
+                return;
 
             var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyPlanetaryStateMsgData>();
             msgData.AgencyId = agencyId;
-            msgData.EntryCount = nonNull.Count;
-            msgData.Entries = nonNull.ToArray();
+            msgData.EntryCount = emitEntries ? nonNullEntries.Count : 0;
+            msgData.Entries = emitEntries ? nonNullEntries.ToArray() : new AgencyPlanetaryEntry[0];
+            msgData.RemovedPlanetaryKeyCount = emitRemoved ? nonNullRemoved.Count : 0;
+            msgData.RemovedPlanetaryKeys = emitRemoved ? nonNullRemoved.ToArray() : new string[0];
 
             MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
         }
@@ -526,26 +614,63 @@ namespace Server.System.Agency
         /// the per-agency lock that the router has already released by the
         /// time this method is called (post-Send-and-return path).</para>
         /// </summary>
-        public static void SendOrbitalStateToOwner(ClientStructure owner, Guid agencyId, IReadOnlyList<AgencyOrbitalTransferEntry> entries)
+        public static void SendOrbitalStateToOwner(
+            ClientStructure owner,
+            Guid agencyId,
+            IReadOnlyList<AgencyOrbitalTransferEntry> entries,
+            IReadOnlyList<Guid> removedTransferGuids = null)
         {
             if (!AgencySystem.PerAgencyEnabled)
                 return;
-            if (owner == null || entries == null || entries.Count == 0)
+            if (owner == null)
+                return;
+
+            var entriesEmpty = entries == null || entries.Count == 0;
+            var removedEmpty = removedTransferGuids == null || removedTransferGuids.Count == 0;
+            if (entriesEmpty && removedEmpty)
                 return;
 
             // Filter nulls so EntryCount matches the non-null slot count on the
             // wire. Mirrors SendKolonyStateToOwner / SendPlanetaryStateToOwner.
-            var nonNull = new List<AgencyOrbitalTransferEntry>(entries.Count);
-            for (var i = 0; i < entries.Count; i++)
+            var nonNullEntries = entriesEmpty
+                ? null
+                : new List<AgencyOrbitalTransferEntry>(entries.Count);
+            if (!entriesEmpty)
             {
-                if (entries[i] != null) nonNull.Add(entries[i]);
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    if (entries[i] != null) nonNullEntries.Add(entries[i]);
+                }
             }
-            if (nonNull.Count == 0) return;
+
+            // [Phase 3 Slice E-1] Removal-tail filter. Guid keys can't be
+            // "null", but Guid.Empty is the sentinel + would be undefined
+            // semantically (the dict is never keyed by Empty under normal
+            // operation). Skip Empty entries defensively — a caller that
+            // passes Empty has confused the transfer-guid with the
+            // Unassigned-vessel sentinel.
+            var nonNullRemoved = removedEmpty
+                ? null
+                : new List<Guid>(removedTransferGuids.Count);
+            if (!removedEmpty)
+            {
+                for (var i = 0; i < removedTransferGuids.Count; i++)
+                {
+                    if (removedTransferGuids[i] != Guid.Empty) nonNullRemoved.Add(removedTransferGuids[i]);
+                }
+            }
+
+            var emitEntries = nonNullEntries != null && nonNullEntries.Count > 0;
+            var emitRemoved = nonNullRemoved != null && nonNullRemoved.Count > 0;
+            if (!emitEntries && !emitRemoved)
+                return;
 
             var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyOrbitalStateMsgData>();
             msgData.AgencyId = agencyId;
-            msgData.EntryCount = nonNull.Count;
-            msgData.Entries = nonNull.ToArray();
+            msgData.EntryCount = emitEntries ? nonNullEntries.Count : 0;
+            msgData.Entries = emitEntries ? nonNullEntries.ToArray() : new AgencyOrbitalTransferEntry[0];
+            msgData.RemovedTransferCount = emitRemoved ? nonNullRemoved.Count : 0;
+            msgData.RemovedTransferGuids = emitRemoved ? nonNullRemoved.ToArray() : new Guid[0];
 
             MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
         }

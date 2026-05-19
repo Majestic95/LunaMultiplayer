@@ -138,31 +138,26 @@ namespace LmpCommon.Message.Data.Agency
     /// the sibling Slice B <see cref="AgencyKolonyStateMsgData"/> on the
     /// same channel.</para>
     ///
-    /// <para><b>Removal semantics — deferred to Slice E (MKS-aware
-    /// extension to the existing 5.18d deleteagency cascade).</b> Slice C
-    /// has no removal-echo wire because planetary entries do NOT migrate on
-    /// <c>transferagency</c> per pre-spec §4.e — the only removal-producing
-    /// path is the Slice E MKS-aware extension to the existing
-    /// <c>deleteagency</c> command (which today removes the entire
-    /// AgencyState file wholesale; the client mirror simply forgets the
-    /// AgencyId, no per-entry removal echo needed). If Slice E later wants
-    /// a partial-removal wire (e.g. <c>cleanplanetaryentries</c> admin
-    /// command), the options are: (1) append
-    /// <c>string[] RemovedKeys</c> at this MsgData's tail per the
-    /// forward-compat clause below, with the key format
-    /// <c>$"{bodyIndex}|{resourceName}"</c> — STRING-keyed for this slot
-    /// (distinct from Slice D orbital's removal tail, which would be
-    /// <c>Guid[] RemovedTransferGuids</c> per its Guid-keyed partition); or
-    /// (2) carve out an <c>AgencyPlanetaryRemovalMsgData</c> at a new wire
-    /// enum slot. The Slice E author SHOULD pick (1) — single class per
-    /// mutation-surface (pre-spec §2.e). Slice C intentionally does NOT
-    /// pre-define the field per the YAGNI rule from CLAUDE.md.
-    /// <b>Note for Slice E:</b> the per-router migration policy is
-    /// DIFFERENT here — planetary balances stay where they are when a
-    /// vessel transfers agency, so the removal-echo scenario is exclusively
-    /// admin-driven, NOT <c>transferagency</c> cascade. Slice B's kolony
-    /// removal-echo doc text included a vessel-keyed migration scenario
-    /// that does not apply here.</para>
+    /// <para><b>Removal tail (Phase 3 Slice E-1 — forward-compat only under
+    /// the Q2 NO-MIGRATE policy).</b> Mid-session per-entry removal pushes
+    /// ride a forward-compat tail appended after the <see cref="Entries"/>
+    /// array: <see cref="RemovedPlanetaryKeyCount"/> +
+    /// <see cref="RemovedPlanetaryKeys"/> (each key is a
+    /// <c>$"{bodyIndex}|{resourceName}"</c> string matching the server-side
+    /// <c>AgencyState.PlanetaryEntries</c> dict-key shape). The tail is read
+    /// under a <c>lidgrenMsg.Position &lt; lidgrenMsg.LengthBits</c> guard so
+    /// a pre-Slice-E-1 sender's tail-less message deserialises cleanly to an
+    /// empty removed-keys list. <b>No producer in Slice E-1 emits to this
+    /// tail.</b> Operator session 29 confirmed Q2 NO-MIGRATE per pre-spec
+    /// §4.e: a vessel's transferagency does NOT migrate planetary entries
+    /// (body-keyed entries are body-pool contributions, not vessel state),
+    /// so the per-router migration helper for planetary is a documented
+    /// no-op + info-log path, never an echo. The tail field exists strictly
+    /// for SYMMETRY with the Kolony + Orbital tails and to leave room for a
+    /// future <c>cleanplanetaryentries</c> admin command (out-of-scope for
+    /// Phase 3) without a second protocol bump. Tail bytes on the wire are
+    /// always 5 bytes (the VarInt-length-0 count) when the tail is present
+    /// but unused — negligible footprint.</para>
     ///
     /// <para><b>Forward-compatibility.</b> No room for new fields without a
     /// protocol bump — the trailing read is a count-driven array. Future
@@ -187,6 +182,31 @@ namespace LmpCommon.Message.Data.Agency
         public int EntryCount;
         public AgencyPlanetaryEntry[] Entries = new AgencyPlanetaryEntry[0];
 
+        /// <summary>
+        /// Phase 3 Slice E-1. Count of populated entries in
+        /// <see cref="RemovedPlanetaryKeys"/>. Forward-compat only under the
+        /// operator-confirmed Q2 NO-MIGRATE policy — see the type XML
+        /// "Removal tail" section. Mirrors the
+        /// <see cref="EntryCount"/> + <see cref="Entries"/> pairing on the
+        /// existing forward tail. Read under the
+        /// <c>lidgrenMsg.Position &lt; lidgrenMsg.LengthBits</c> guard, so a
+        /// pre-Slice-E-1 sender's tail-less message round-trips to 0.
+        /// </summary>
+        public int RemovedPlanetaryKeyCount;
+
+        /// <summary>
+        /// Phase 3 Slice E-1. Forward-compat tail appended after
+        /// <see cref="Entries"/>. Each key is the canonical
+        /// <c>$"{bodyIndex}|{resourceName}"</c> dict-key shape matching the
+        /// server-side <c>AgencyState.PlanetaryEntries</c> partition. No
+        /// producer in Slice E-1 emits to this tail (Q2 NO-MIGRATE keeps
+        /// planetary entries in their source agency on vessel transfer);
+        /// the field exists for symmetry with Kolony + Orbital tails and to
+        /// leave room for a future <c>cleanplanetaryentries</c> admin
+        /// command without a second protocol bump.
+        /// </summary>
+        public string[] RemovedPlanetaryKeys = new string[0];
+
         public override string ClassName { get; } = nameof(AgencyPlanetaryStateMsgData);
 
         /// <summary>
@@ -200,6 +220,15 @@ namespace LmpCommon.Message.Data.Agency
         /// and <see cref="AgencyContractMsgData.MaxContractCount"/>.
         /// </summary>
         internal const int MaxEntryCount = 4096;
+
+        /// <summary>
+        /// Phase 3 Slice E-1. Upper bound on
+        /// <see cref="RemovedPlanetaryKeyCount"/> on the wire. Mirrors
+        /// <see cref="MaxEntryCount"/> for cap-symmetry with the forward tail
+        /// (per [[feedback-wire-msgdata-chunking-caps]] — asymmetric caps
+        /// invite send-side bugs the receive side asymmetrically catches).
+        /// </summary>
+        internal const int MaxRemovedPlanetaryKeyCount = 4096;
 
         internal override void InternalSerialize(NetOutgoingMessage lidgrenMsg)
         {
@@ -234,6 +263,26 @@ namespace LmpCommon.Message.Data.Agency
             {
                 Entries[i].Serialize(lidgrenMsg);
             }
+
+            // [Phase 3 Slice E-1] Removal tail. Same shape as the kolony
+            // sibling. Emitted unconditionally — a pre-Slice-E-1 receiver
+            // discards trailing bytes per Lidgren's per-channel message-frame
+            // semantics. No producer emits a non-empty tail in Slice E-1
+            // (Q2 NO-MIGRATE), but the tail field exists for symmetry.
+            if (RemovedPlanetaryKeyCount < 0)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyPlanetaryState RemovedPlanetaryKeyCount must be non-negative: {RemovedPlanetaryKeyCount}");
+            if (RemovedPlanetaryKeys == null || RemovedPlanetaryKeys.Length < RemovedPlanetaryKeyCount)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyPlanetaryState RemovedPlanetaryKeyCount {RemovedPlanetaryKeyCount} exceeds RemovedPlanetaryKeys.Length {(RemovedPlanetaryKeys?.Length ?? 0)}");
+            if (RemovedPlanetaryKeyCount > MaxRemovedPlanetaryKeyCount)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyPlanetaryState RemovedPlanetaryKeyCount {RemovedPlanetaryKeyCount} exceeds MaxRemovedPlanetaryKeyCount {MaxRemovedPlanetaryKeyCount} — caller must chunk before send.");
+            lidgrenMsg.Write(RemovedPlanetaryKeyCount);
+            for (var i = 0; i < RemovedPlanetaryKeyCount; i++)
+            {
+                lidgrenMsg.Write(RemovedPlanetaryKeys[i] ?? string.Empty);
+            }
         }
 
         internal override void InternalDeserialize(NetIncomingMessage lidgrenMsg)
@@ -256,6 +305,28 @@ namespace LmpCommon.Message.Data.Agency
 
                 Entries[i].Deserialize(lidgrenMsg);
             }
+
+            // [Phase 3 Slice E-1] Forward-compat tail read. Pre-Slice-E-1
+            // senders end the message at the Entries loop; the Position guard
+            // catches that case and defaults RemovedPlanetaryKeys to empty.
+            if (lidgrenMsg.Position < lidgrenMsg.LengthBits)
+            {
+                RemovedPlanetaryKeyCount = lidgrenMsg.ReadInt32();
+                if (RemovedPlanetaryKeyCount < 0 || RemovedPlanetaryKeyCount > MaxRemovedPlanetaryKeyCount)
+                    throw new System.IO.InvalidDataException(
+                        $"AgencyPlanetaryState RemovedPlanetaryKeyCount out of range: {RemovedPlanetaryKeyCount} (allowed 0..{MaxRemovedPlanetaryKeyCount})");
+                if (RemovedPlanetaryKeys.Length < RemovedPlanetaryKeyCount)
+                    RemovedPlanetaryKeys = new string[RemovedPlanetaryKeyCount];
+                for (var i = 0; i < RemovedPlanetaryKeyCount; i++)
+                {
+                    RemovedPlanetaryKeys[i] = lidgrenMsg.ReadString();
+                }
+            }
+            else
+            {
+                RemovedPlanetaryKeyCount = 0;
+                RemovedPlanetaryKeys = new string[0];
+            }
         }
 
         internal override int InternalGetMessageSize()
@@ -276,7 +347,17 @@ namespace LmpCommon.Message.Data.Agency
                 arraySize += Entries[i].GetByteCount();
             }
 
-            return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize;
+            // [Phase 3 Slice E-1] Removal tail size. Mirrors the kolony
+            // sibling. The minimum overhead when the tail is empty is the
+            // VarInt-length-0 count (5-byte upper bound) — accepted as
+            // negligible.
+            var removedTailSize = sizeof(int);
+            for (var i = 0; i < RemovedPlanetaryKeyCount; i++)
+            {
+                removedTailSize += 5 + (RemovedPlanetaryKeys[i]?.Length ?? 0) * 4;
+            }
+
+            return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize + removedTailSize;
         }
     }
 }

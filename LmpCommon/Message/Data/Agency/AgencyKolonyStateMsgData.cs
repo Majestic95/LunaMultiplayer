@@ -121,24 +121,28 @@ namespace LmpCommon.Message.Data.Agency
     /// 5.18a contract (upsert-by-<c>ContractGuid</c>); the same shape, different
     /// key.</para>
     ///
-    /// <para><b>Removal semantics — deferred to Slice E (consumer-lens Lens-3
-    /// MF4).</b> Slice B has no removal-echo wire because the only routine that
-    /// produces removals is Stage 5.18d-MKS-aware <c>transferagency</c> (Slice E
-    /// scope). Pre-spec §4.e specifies the migration policy: vessel-keyed
-    /// <c>KolonyEntries</c> migrate A→B with the vessel; the wire echo to A is
-    /// a "removed-keys" signal, and the echo to B is an "added-entries"
-    /// signal. Slice E's options for the removal wire (in preference order):
-    /// (1) append <c>string[] RemovedKeys</c> at this MsgData's tail per the
-    /// forward-compat clause below (protocol-additive; no new slot needed); or
-    /// (2) carve out an <c>AgencyKolonyRemovalMsgData</c> at a new wire enum
-    /// slot. The Slice E author SHOULD pick (1) — single class per
-    /// mutation-surface (pre-spec §2.e). Slice B intentionally does NOT
-    /// pre-define the field — the YAGNI rule from CLAUDE.md applies (don't
-    /// design for hypothetical future requirements), and Slice E's migration
-    /// policy may surface a richer shape that we'd otherwise lock in
-    /// prematurely. Until Slice E ships, removals are NOT echoed; the only
-    /// state-clearing path is server boot + <c>WarnAboutSharedKolonyOnUpgrade</c>
-    /// + operator hand-edit, all out-of-band relative to this wire.</para>
+    /// <para><b>Removal tail (Phase 3 Slice E-1 — option (1) from Slice B's
+    /// deferred wire-shape note).</b> Mid-session per-entry removal pushes
+    /// ride a forward-compat tail appended after the <see cref="Entries"/>
+    /// array: <see cref="RemovedKolonyKeyCount"/> + <see cref="RemovedKolonyKeys"/>
+    /// (each key is a <c>$"{vesselId:N}|{bodyIndex}"</c> string matching the
+    /// server-side <c>AgencyState.KolonyEntries</c> dict-key shape). The tail
+    /// is read under a <c>lidgrenMsg.Position &lt; lidgrenMsg.LengthBits</c>
+    /// guard so a pre-Slice-E-1 sender's tail-less message deserialises
+    /// cleanly to an empty removed-keys list. The only producer in Slice E-1
+    /// is the per-router migration helper (<c>AgencyKolonyRouter.MigrateForVesselTransfer</c>);
+    /// the actual admin-cascade consumer (<c>setvesselagency</c>) lands in
+    /// Slice E-2. A single message MAY carry BOTH non-empty
+    /// <see cref="Entries"/> and non-empty <see cref="RemovedKolonyKeys"/> —
+    /// when the migration produces both an added-batch for the destination
+    /// agency AND a removed-batch for the source agency in two separate
+    /// owner-only sends, each side's send carries one of the two payloads
+    /// non-empty; combining them in a single message is permitted by the
+    /// wire but the typical caller emits them separately for per-owner
+    /// targeting. A pre-5.18-series client mirror (still deferred) MUST
+    /// apply removed-keys via dict-remove on the same
+    /// <c>$"{vesselId:N}|{bodyIndex}"</c> key the catch-up + echo paths
+    /// upsert by; the server-side router IS the canonical source.</para>
     ///
     /// <para><b>Forward-compatibility.</b> No room for new fields without a
     /// protocol bump — the trailing read is a count-driven array. Future
@@ -163,6 +167,29 @@ namespace LmpCommon.Message.Data.Agency
         public int EntryCount;
         public AgencyKolonyEntry[] Entries = new AgencyKolonyEntry[0];
 
+        /// <summary>
+        /// Phase 3 Slice E-1. Count of populated entries in
+        /// <see cref="RemovedKolonyKeys"/>. Mirrors the
+        /// <see cref="EntryCount"/> + <see cref="Entries"/> pairing on the
+        /// existing forward tail. Read under the
+        /// <c>lidgrenMsg.Position &lt; lidgrenMsg.LengthBits</c> guard, so a
+        /// pre-Slice-E-1 sender's tail-less message round-trips to 0.
+        /// </summary>
+        public int RemovedKolonyKeyCount;
+
+        /// <summary>
+        /// Phase 3 Slice E-1. Forward-compat tail appended after
+        /// <see cref="Entries"/>. Each key is the canonical
+        /// <c>$"{vesselId:N}|{bodyIndex}"</c> dict-key shape matching the
+        /// server-side <c>AgencyState.KolonyEntries</c> partition. Producers
+        /// today: per-router migration helper. Consumers today: the source
+        /// agency's owner-only echo path (so the future client mirror's
+        /// dict-remove apply lands on the same keys the catch-up populated).
+        /// Forward-compat with pre-Slice-E-1 senders: deserialise defaults
+        /// to empty.
+        /// </summary>
+        public string[] RemovedKolonyKeys = new string[0];
+
         public override string ClassName { get; } = nameof(AgencyKolonyStateMsgData);
 
         /// <summary>
@@ -175,6 +202,16 @@ namespace LmpCommon.Message.Data.Agency
         /// and <see cref="AgencyContractMsgData.MaxContractCount"/>.
         /// </summary>
         internal const int MaxEntryCount = 4096;
+
+        /// <summary>
+        /// Phase 3 Slice E-1. Upper bound on
+        /// <see cref="RemovedKolonyKeyCount"/> on the wire. Mirrors
+        /// <see cref="MaxEntryCount"/> — the migration call-site won't
+        /// realistically produce more removed-keys than the source agency's
+        /// total kolony-entry count, so a single cap covers both directions.
+        /// Same DoS-amplification class as the forward tail's cap.
+        /// </summary>
+        internal const int MaxRemovedKolonyKeyCount = 4096;
 
         internal override void InternalSerialize(NetOutgoingMessage lidgrenMsg)
         {
@@ -191,6 +228,27 @@ namespace LmpCommon.Message.Data.Agency
             for (var i = 0; i < EntryCount; i++)
             {
                 Entries[i].Serialize(lidgrenMsg);
+            }
+
+            // [Phase 3 Slice E-1] Removal tail. Emitted unconditionally; a
+            // pre-Slice-E-1 receiver simply discards trailing bytes per
+            // Lidgren's per-channel message-frame semantics. Send-side
+            // precondition guards mirror the orbital + planetary forward-tail
+            // pattern: a misconfigured caller fails fast on emit rather than
+            // corrupting bytes mid-serialize.
+            if (RemovedKolonyKeyCount < 0)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyKolonyState RemovedKolonyKeyCount must be non-negative: {RemovedKolonyKeyCount}");
+            if (RemovedKolonyKeys == null || RemovedKolonyKeys.Length < RemovedKolonyKeyCount)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyKolonyState RemovedKolonyKeyCount {RemovedKolonyKeyCount} exceeds RemovedKolonyKeys.Length {(RemovedKolonyKeys?.Length ?? 0)}");
+            if (RemovedKolonyKeyCount > MaxRemovedKolonyKeyCount)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyKolonyState RemovedKolonyKeyCount {RemovedKolonyKeyCount} exceeds MaxRemovedKolonyKeyCount {MaxRemovedKolonyKeyCount} — caller must chunk before send.");
+            lidgrenMsg.Write(RemovedKolonyKeyCount);
+            for (var i = 0; i < RemovedKolonyKeyCount; i++)
+            {
+                lidgrenMsg.Write(RemovedKolonyKeys[i] ?? string.Empty);
             }
         }
 
@@ -214,6 +272,28 @@ namespace LmpCommon.Message.Data.Agency
 
                 Entries[i].Deserialize(lidgrenMsg);
             }
+
+            // [Phase 3 Slice E-1] Forward-compat tail read. Pre-Slice-E-1
+            // senders end the message at the Entries loop; the Position guard
+            // catches that case and defaults RemovedKolonyKeys to empty.
+            if (lidgrenMsg.Position < lidgrenMsg.LengthBits)
+            {
+                RemovedKolonyKeyCount = lidgrenMsg.ReadInt32();
+                if (RemovedKolonyKeyCount < 0 || RemovedKolonyKeyCount > MaxRemovedKolonyKeyCount)
+                    throw new System.IO.InvalidDataException(
+                        $"AgencyKolonyState RemovedKolonyKeyCount out of range: {RemovedKolonyKeyCount} (allowed 0..{MaxRemovedKolonyKeyCount})");
+                if (RemovedKolonyKeys.Length < RemovedKolonyKeyCount)
+                    RemovedKolonyKeys = new string[RemovedKolonyKeyCount];
+                for (var i = 0; i < RemovedKolonyKeyCount; i++)
+                {
+                    RemovedKolonyKeys[i] = lidgrenMsg.ReadString();
+                }
+            }
+            else
+            {
+                RemovedKolonyKeyCount = 0;
+                RemovedKolonyKeys = new string[0];
+            }
         }
 
         internal override int InternalGetMessageSize()
@@ -225,7 +305,18 @@ namespace LmpCommon.Message.Data.Agency
                 arraySize += Entries[i].GetByteCount();
             }
 
-            return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize;
+            // [Phase 3 Slice E-1] Removal tail size — VarInt32 length-prefix
+            // (5-byte upper bound) + 4-bytes-per-char UTF-8 upper bound per
+            // key. Mirrors AgencyKolonyEntry.GetByteCount's VesselId sizing
+            // (the most common removed-key shape is the same 32-char Guid "N"
+            // prefix + "|N" suffix).
+            var removedTailSize = sizeof(int);
+            for (var i = 0; i < RemovedKolonyKeyCount; i++)
+            {
+                removedTailSize += 5 + (RemovedKolonyKeys[i]?.Length ?? 0) * 4;
+            }
+
+            return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize + removedTailSize;
         }
     }
 }

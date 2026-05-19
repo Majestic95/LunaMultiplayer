@@ -192,30 +192,41 @@ namespace LmpCommon.Message.Data.Agency
     ///        simply disappears from the next scene-load's projected
     ///        scenario. No wire echo needed for the read-side privacy
     ///        contract.</item>
-    ///   <item><b>Wire-side per-entry removal echo is deferred to Slice E
-    ///        — only needed for admin-cascade scenarios.</b> If Slice E
-    ///        ships a <c>deleteagency</c> cascade or
-    ///        <c>cleanorbitaltransfers</c> admin command that needs to
-    ///        push removals to a connected client's in-memory mirror MID-
-    ///        SESSION (before the next scene-load picks up the projector
-    ///        re-strip), a wire echo is needed. The recommended shape per
-    ///        pre-spec §2.e is appending <c>Guid[] RemovedTransferGuids</c>
-    ///        at this MsgData's tail with the forward-compat clause below
-    ///        — <b>Guid-keyed removal tail</b>, distinct from Slice B/C
-    ///        kolony's string-keyed precedent (which would be
-    ///        <c>$"{vesselId:N}|{bodyIndex}"</c>) and planetary's
-    ///        (<c>$"{bodyIndex}|{resourceName}"</c>). Slice D intentionally
-    ///        does NOT pre-define the field per the YAGNI rule from
-    ///        CLAUDE.md — wait for the actual Slice E consumer to define it.</item>
+    ///   <item><b>Wire-side per-entry removal echo (Phase 3 Slice E-1).</b>
+    ///        Mid-session per-transfer removal pushes ride a forward-compat
+    ///        tail appended after the <see cref="Entries"/> array:
+    ///        <see cref="RemovedTransferCount"/> +
+    ///        <see cref="RemovedTransferGuids"/>. <b>Guid-keyed</b> (distinct
+    ///        from Slice B/C kolony's string-keyed
+    ///        <c>$"{vesselId:N}|{bodyIndex}"</c> precedent and planetary's
+    ///        <c>$"{bodyIndex}|{resourceName}"</c>) — matches the
+    ///        <c>AgencyState.OrbitalTransfers</c> dict-key shape. The tail is
+    ///        read under a <c>lidgrenMsg.Position &lt; lidgrenMsg.LengthBits</c>
+    ///        guard so a pre-Slice-E-1 sender's tail-less message
+    ///        deserialises cleanly to an empty removed-transfers list. The
+    ///        only producer in Slice E-1 is the per-router migration helper
+    ///        (<c>AgencyOrbitalRouter.MigrateForVesselTransfer</c>) — both
+    ///        Destination-match (entry moves to destination agency) and
+    ///        Origin-match KEEP (operator session 29 Q1 confirmation: KEEP
+    ///        in source agency, no migration even when the moved vessel is
+    ///        the Origin). The actual admin-cascade consumer
+    ///        (<c>setvesselagency</c>) lands in Slice E-2. A single message
+    ///        MAY carry BOTH non-empty <see cref="Entries"/> and non-empty
+    ///        <see cref="RemovedTransferGuids"/>, though the typical caller
+    ///        emits them in separate per-owner sends.</item>
     /// </list>
     ///
-    /// <para><b>Note for Slice E migration:</b> the per-router transferagency
-    /// policy here is the most complex of the three — both move-and-keep
-    /// (Origin matches moved vessel → stay in source agency) and move-with-
+    /// <para><b>Per-router transferagency policy (Slice E-1 implemented;
+    /// Slice E-2 admin consumer pending):</b> the orbital migration
+    /// policy is the most complex of the three — both move-and-keep
+    /// (Origin matches moved vessel → KEEP in source agency, operator
+    /// session 29 Q1 confirmation of pre-spec §4.e default) and move-with-
     /// vessel (Destination matches moved vessel → migrate to destination
-    /// agency) cases apply per pre-spec §4.e. For self-transfer (both
-    /// Origin and Destination equal the moved vessel) prefer the
-    /// Destination-match path (deliverer authority).</para>
+    /// agency) cases apply. For self-transfer (both Origin and Destination
+    /// equal the moved vessel) the Destination-match path wins (deliverer
+    /// authority — pre-spec §4.e line 217-218). See
+    /// <see cref="Server.System.Agency.AgencyOrbitalRouter.MigrateForVesselTransfer"/>
+    /// for the implementation.</para>
     ///
     /// <para><b>Forward-compatibility.</b> No room for new fields without a
     /// protocol bump — the trailing read is a count-driven array. Future
@@ -240,6 +251,28 @@ namespace LmpCommon.Message.Data.Agency
         public int EntryCount;
         public AgencyOrbitalTransferEntry[] Entries = new AgencyOrbitalTransferEntry[0];
 
+        /// <summary>
+        /// Phase 3 Slice E-1. Count of populated entries in
+        /// <see cref="RemovedTransferGuids"/>. Mirrors the
+        /// <see cref="EntryCount"/> + <see cref="Entries"/> pairing on the
+        /// existing forward tail. Read under the
+        /// <c>lidgrenMsg.Position &lt; lidgrenMsg.LengthBits</c> guard, so a
+        /// pre-Slice-E-1 sender's tail-less message round-trips to 0.
+        /// </summary>
+        public int RemovedTransferCount;
+
+        /// <summary>
+        /// Phase 3 Slice E-1. Forward-compat tail appended after
+        /// <see cref="Entries"/>. Guid-keyed (matches
+        /// <c>AgencyState.OrbitalTransfers</c>'s
+        /// <c>Dictionary&lt;Guid, AgencyOrbitalTransferEntry&gt;</c>
+        /// partition). Producers today: per-router migration helper for the
+        /// source agency's owner-only echo on Destination-match moves.
+        /// Origin-match transfers KEEP in source per Q1 — they do NOT appear
+        /// in this list (only Destination-match removals are echoed).
+        /// </summary>
+        public Guid[] RemovedTransferGuids = new Guid[0];
+
         public override string ClassName { get; } = nameof(AgencyOrbitalStateMsgData);
 
         /// <summary>
@@ -254,6 +287,17 @@ namespace LmpCommon.Message.Data.Agency
         /// on <see cref="AgencyContractMsgData.MaxContractCount"/>.
         /// </summary>
         public const int MaxEntryCount = 1024;
+
+        /// <summary>
+        /// Phase 3 Slice E-1. Upper bound on
+        /// <see cref="RemovedTransferCount"/> on the wire. Matches
+        /// <see cref="MaxEntryCount"/> for cap-symmetry with the forward tail
+        /// (per [[feedback-wire-msgdata-chunking-caps]] — asymmetric caps
+        /// invite send-side bugs the receive side asymmetrically catches).
+        /// Guids are tiny (16 bytes each) so even at the cap the tail is
+        /// 16 KB — comfortable under any per-channel-message Lidgren limit.
+        /// </summary>
+        public const int MaxRemovedTransferCount = 1024;
 
         internal override void InternalSerialize(NetOutgoingMessage lidgrenMsg)
         {
@@ -295,6 +339,25 @@ namespace LmpCommon.Message.Data.Agency
             {
                 Entries[i].Serialize(lidgrenMsg);
             }
+
+            // [Phase 3 Slice E-1] Removal tail. Same shape as the kolony +
+            // planetary siblings; uses GuidUtil.Serialize for the Guid keys
+            // (16 bytes each, no length prefix, matches the AgencyId field
+            // shape).
+            if (RemovedTransferCount < 0)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyOrbitalState RemovedTransferCount must be non-negative: {RemovedTransferCount}");
+            if (RemovedTransferGuids == null || RemovedTransferGuids.Length < RemovedTransferCount)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyOrbitalState RemovedTransferCount {RemovedTransferCount} exceeds RemovedTransferGuids.Length {(RemovedTransferGuids?.Length ?? 0)}");
+            if (RemovedTransferCount > MaxRemovedTransferCount)
+                throw new System.IO.InvalidDataException(
+                    $"AgencyOrbitalState RemovedTransferCount {RemovedTransferCount} exceeds MaxRemovedTransferCount {MaxRemovedTransferCount} — caller must chunk before send.");
+            lidgrenMsg.Write(RemovedTransferCount);
+            for (var i = 0; i < RemovedTransferCount; i++)
+            {
+                GuidUtil.Serialize(RemovedTransferGuids[i], lidgrenMsg);
+            }
         }
 
         internal override void InternalDeserialize(NetIncomingMessage lidgrenMsg)
@@ -317,6 +380,28 @@ namespace LmpCommon.Message.Data.Agency
 
                 Entries[i].Deserialize(lidgrenMsg);
             }
+
+            // [Phase 3 Slice E-1] Forward-compat tail read. Pre-Slice-E-1
+            // senders end the message at the Entries loop; the Position guard
+            // catches that case and defaults RemovedTransferGuids to empty.
+            if (lidgrenMsg.Position < lidgrenMsg.LengthBits)
+            {
+                RemovedTransferCount = lidgrenMsg.ReadInt32();
+                if (RemovedTransferCount < 0 || RemovedTransferCount > MaxRemovedTransferCount)
+                    throw new System.IO.InvalidDataException(
+                        $"AgencyOrbitalState RemovedTransferCount out of range: {RemovedTransferCount} (allowed 0..{MaxRemovedTransferCount})");
+                if (RemovedTransferGuids.Length < RemovedTransferCount)
+                    RemovedTransferGuids = new Guid[RemovedTransferCount];
+                for (var i = 0; i < RemovedTransferCount; i++)
+                {
+                    RemovedTransferGuids[i] = GuidUtil.Deserialize(lidgrenMsg);
+                }
+            }
+            else
+            {
+                RemovedTransferCount = 0;
+                RemovedTransferGuids = new Guid[0];
+            }
         }
 
         internal override int InternalGetMessageSize()
@@ -333,7 +418,13 @@ namespace LmpCommon.Message.Data.Agency
                 arraySize += Entries[i].GetByteCount();
             }
 
-            return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize;
+            // [Phase 3 Slice E-1] Removal tail size — 4-byte fixed Int32
+            // count + 16-byte Guid per removed-transfer. The count is
+            // Lidgren's fixed-32 write, not a VarInt; the receive path
+            // (line 393) is the matching fixed-32 read.
+            var removedTailSize = sizeof(int) + (RemovedTransferCount * GuidUtil.ByteSize);
+
+            return base.InternalGetMessageSize() + GuidUtil.ByteSize + sizeof(int) + arraySize + removedTailSize;
         }
     }
 }

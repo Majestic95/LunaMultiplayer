@@ -346,5 +346,206 @@ namespace Server.System.Agency
 
             agency.OrbitalTransfers[entry.TransferGuid] = entry;
         }
+
+        /// <summary>
+        /// [Phase 3 Slice E-1] Vessel-as-Destination migration for the
+        /// per-router <see cref="AgencyState.OrbitalTransfers"/> partition.
+        /// Moves every transfer whose
+        /// <see cref="AgencyOrbitalTransferEntry.DestinationVesselId"/>
+        /// matches <paramref name="movedVesselId"/> from
+        /// <paramref name="source"/> to <paramref name="destination"/>.
+        /// Transfers where ONLY the
+        /// <see cref="AgencyOrbitalTransferEntry.OriginVesselId"/> matches
+        /// (operator session 29 Q1) KEEP in source — the launch obligation
+        /// was incurred in source's frame, source retains the "what did I
+        /// ship out" history, destination only inherits transfers whose
+        /// delivery authority follows the moved destination vessel.
+        ///
+        /// <para><b>Caller contract</b>: same dual-lock ordering as
+        /// <see cref="AgencyKolonyRouter.MigrateForVesselTransfer"/> — caller
+        /// holds both source + destination agency locks, acquired in
+        /// <see cref="Guid.CompareTo"/> order (lower-comparing AgencyId
+        /// first). See that helper's XML for the BUG-033 design template +
+        /// the lock-ordering rationale.</para>
+        ///
+        /// <para><b>Slice E-2 caller contract</b>: see
+        /// <see cref="AgencyKolonyRouter.MigrateForVesselTransfer"/>'s XML
+        /// for the full 9-step orchestration (same-stamp short-circuit →
+        /// dual-lock acquire → vessel.OwningAgencyId mutation → three
+        /// per-router helper calls → dual SaveAgency → BackupSystem.RunBackup
+        /// → stale-lock release → wire emit order → lock release). The
+        /// orbital helper sits at step 4 alongside the kolony + planetary
+        /// helpers; all three share the same caller orchestration. This
+        /// helper additionally produces <see cref="OrbitalMigrationResult.OriginOnlyKeptGuids"/>
+        /// for the per-spec §4.e operator-visible info-log emit.</para>
+        ///
+        /// <para><b>Origin-only retained transfers (Q1 KEEP) carry a
+        /// cross-agency reference after migration.</b> A transfer where V
+        /// is Origin-only keeps in source agency A, but its
+        /// <see cref="AgencyOrbitalTransferEntry.OriginVesselId"/> field
+        /// continues to point at V which now belongs to destination agency
+        /// B. The projector splice on <c>ScenarioOrbitalLogistics</c> still
+        /// projects this transfer to A's scenario; A's client UI may
+        /// render "Transfer from &lt;B's vessel&gt; to &lt;A's vessel&gt;" —
+        /// confusing but spec-correct (A retains the launch obligation;
+        /// the rendering of the origin vessel's owning-agency label is a
+        /// Slice 5.18c UI concern, not Phase 3 routing). Operator awareness
+        /// is the per-guid info log emitted from
+        /// <see cref="OrbitalMigrationResult.OriginOnlyKeptGuids"/>.</para>
+        ///
+        /// <para><b>Self-transfer edge case</b>: when the moved vessel is
+        /// BOTH the Origin AND the Destination of the same transfer (a
+        /// self-delivery — uncommon but valid in MKS for in-place resource
+        /// movement), the Destination-match path fires (transfer migrates).
+        /// Pre-spec §4.e line 217-218: "For self-transfer prefer the
+        /// Destination-match path (deliverer authority)." Implemented via
+        /// checking <c>DestinationVesselId == movedVesselId</c> first; if it
+        /// matches, the Origin-match check is unreachable for that entry.</para>
+        ///
+        /// <para><b>Defensive guards</b>: returns an empty result when
+        /// <paramref name="source"/> and <paramref name="destination"/> are
+        /// the same instance, and when <paramref name="movedVesselId"/> is
+        /// <see cref="Guid.Empty"/> (Unassigned sentinel — see kolony
+        /// sibling's rationale).</para>
+        ///
+        /// <para><b>Defensive copy</b>: entries in
+        /// <see cref="AgencyState.OrbitalTransfers"/> are the canonical
+        /// store; their <see cref="AgencyOrbitalTransferEntry.PayloadBytes"/>
+        /// have been defensively-copied by the original router
+        /// <see cref="TryRoute"/> at ingest. The migration only re-homes the
+        /// reference between dicts — no re-copy needed (the entry's bytes
+        /// were never aliased to a wire-buffer in the first place once
+        /// upserted).</para>
+        ///
+        /// <para><b>Internal visibility</b> matches <see cref="Upsert"/>.</para>
+        /// </summary>
+        internal static OrbitalMigrationResult MigrateForVesselTransfer(
+            AgencyState source, AgencyState destination, Guid movedVesselId)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (destination == null) throw new ArgumentNullException(nameof(destination));
+
+            var result = new OrbitalMigrationResult();
+            if (ReferenceEquals(source, destination)) return result;
+            if (movedVesselId == Guid.Empty) return result;
+
+            // Snapshot guids-to-move and origin-keep guids first. Mutating
+            // the dict during iteration is undefined. Capture origin-keeps
+            // by guid (not just count) so operator logs can list per-guid
+            // detail per spec §4.e — the Slice E-2 author calls
+            // `result.OriginOnlyKeptGuids.ForEach(log)` to emit one info
+            // line per kept obligation, plus uses `Count` for the summary.
+            List<Guid> guidsToMove = null;
+            foreach (var kvp in source.OrbitalTransfers)
+            {
+                var entry = kvp.Value;
+                if (entry == null) continue;
+                if (entry.DestinationVesselId == movedVesselId)
+                {
+                    if (guidsToMove == null) guidsToMove = new List<Guid>();
+                    guidsToMove.Add(kvp.Key);
+                }
+                else if (entry.OriginVesselId == movedVesselId)
+                {
+                    // Q1 KEEP — Origin-only match stays in source. No
+                    // mutation; recorded for caller diagnostic.
+                    result.OriginOnlyKeptGuids.Add(kvp.Key);
+                }
+            }
+
+            if (guidsToMove == null) return result;
+
+            foreach (var transferGuid in guidsToMove)
+            {
+                if (!source.OrbitalTransfers.TryGetValue(transferGuid, out var entry)) continue;
+                source.OrbitalTransfers.Remove(transferGuid);
+                // [Integration-logic review C1] Destination-collision
+                // warning. TransferGuid is a global Guid so collision is
+                // essentially impossible without operator hand-edit;
+                // emit a Warning for defensive symmetry with the kolony
+                // sibling so soak operators see a single grep pattern
+                // for migration-collision events.
+                if (destination.OrbitalTransfers.ContainsKey(transferGuid))
+                {
+                    LunaLog.Warning(
+                        $"[fix:MKS-R2] orbital migration collision: dest agency {destination.AgencyId:N} " +
+                        $"already had transfer {transferGuid:N}; source agency {source.AgencyId:N} value wins.");
+                }
+                destination.OrbitalTransfers[transferGuid] = entry;
+                result.RemovedTransferGuids.Add(transferGuid);
+                result.AddedEntries.Add(entry);
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// [Phase 3 Slice E-1] Result of
+    /// <see cref="AgencyOrbitalRouter.MigrateForVesselTransfer"/>. Wire-only
+    /// transient — neither <see cref="RemovedTransferGuids"/> nor
+    /// <see cref="AddedEntries"/> nor <see cref="OriginOnlyKeptGuids"/> is
+    /// persisted to disk; the migration helper already mutated the canonical
+    /// <c>AgencyState.OrbitalTransfers</c> dicts in-place (and left
+    /// <see cref="OriginOnlyKeptGuids"/> entries in source per Q1).
+    ///
+    /// <para><b>Caller emits TWO owner-only sends</b>:
+    /// <list type="bullet">
+    ///   <item><b>Source owner</b>:
+    ///         <c>AgencySystemSender.SendOrbitalStateToOwner(sourceOwner,
+    ///         sourceAgencyId, entries: null, removedTransferGuids: result.RemovedTransferGuids)</c></item>
+    ///   <item><b>Destination owner</b>:
+    ///         <c>AgencySystemSender.SendOrbitalStateToOwner(destOwner,
+    ///         destAgencyId, entries: result.AddedEntries)</c>
+    ///         (removedTransferGuids omitted, defaults null).</item>
+    /// </list>
+    /// Both echoes ride channel 22 in ReliableOrdered apply order behind the
+    /// 5.18d <see cref="LmpCommon.Message.Data.Agency.AgencyVisibilityMsgData"/>
+    /// vessel-ownership broadcast.</para>
+    ///
+    /// <para><b>Operator log emit pattern (pre-spec §4.e):</b> for each
+    /// guid in <see cref="OriginOnlyKeptGuids"/>, emit a
+    /// <c>[fix:MKS-R2] transferagency kept origin-transfer={guid:N}</c>
+    /// line so operators see which in-flight obligations source agency
+    /// retained. The Count alone gives the summary; the per-guid list
+    /// gives the audit trail.</para>
+    ///
+    /// <para><b>Chunking note for Slice E-2 author</b>: realistic per-vessel
+    /// migration produces small lists. A vessel that has been Destination
+    /// of more than <see cref="AgencyOrbitalStateMsgData.MaxEntryCount"/>
+    /// (1024) historical transfers would trip the sender's send-side
+    /// cap-throw — split into multiple sends per the
+    /// <c>SendOrbitalCatchupTo</c> chunking template.</para>
+    /// </summary>
+    internal class OrbitalMigrationResult
+    {
+        public List<Guid> RemovedTransferGuids { get; } = new List<Guid>();
+
+        /// <summary>
+        /// Entries the destination agency receives. Named "Added" rather
+        /// than "Moved" to mirror the destination-side wire field shape
+        /// (<see cref="AgencyOrbitalStateMsgData.Entries"/> is the
+        /// added-batch for the receiver). Same entry instances are
+        /// referenced by both the helper's source-removal and destination-
+        /// add operations.
+        /// </summary>
+        public List<AgencyOrbitalTransferEntry> AddedEntries { get; } = new List<AgencyOrbitalTransferEntry>();
+
+        /// <summary>
+        /// Transfer guids where the moved vessel was the Origin only
+        /// (NOT also the Destination). Per operator session 29 Q1, these
+        /// transfers KEEP in source — the launch obligation was incurred
+        /// in source's frame. Source agency continues to deliver to the
+        /// (unchanged) destination vessel; the moved vessel just stops
+        /// being attributed to source. The caller emits per-guid log lines
+        /// for the operator audit trail.
+        /// </summary>
+        public List<Guid> OriginOnlyKeptGuids { get; } = new List<Guid>();
+
+        /// <summary>
+        /// Convenience: <c>OriginOnlyKeptGuids.Count</c>. Operators reading
+        /// the one-line summary want the count; the full guid list is in
+        /// <see cref="OriginOnlyKeptGuids"/> for per-guid audit lines.
+        /// </summary>
+        public int OriginOnlyKeptCount => OriginOnlyKeptGuids.Count;
     }
 }

@@ -229,5 +229,241 @@ namespace Server.System.Agency
             var key = $"{entry.VesselId}|{entry.BodyIndex.ToString(CultureInfo.InvariantCulture)}";
             agency.KolonyEntries[key] = entry;
         }
+
+        /// <summary>
+        /// [Phase 3 Slice E-1] Vessel-keyed migration for the per-router
+        /// <see cref="AgencyState.KolonyEntries"/> partition. Moves every
+        /// entry whose dict-key prefix matches <paramref name="movedVesselId"/>
+        /// from <paramref name="source"/> to <paramref name="destination"/>.
+        ///
+        /// <para><b>Caller contract</b> (pre-spec §4.e dual-lock ordering):
+        /// caller MUST hold BOTH
+        /// <c>AgencySystem.GetAgencyLock(source.AgencyId)</c> AND
+        /// <c>AgencySystem.GetAgencyLock(destination.AgencyId)</c> for the
+        /// duration of this call. Acquire the locks in
+        /// <see cref="Guid.CompareTo"/> order — lower-comparing AgencyId
+        /// first, then higher-comparing. (String-form ordering would
+        /// disagree with byte-form ordering for some Guids; the .NET
+        /// <see cref="Guid.CompareTo"/> is the authoritative comparison.)
+        /// This prevents AB-BA deadlock against a concurrent reverse-
+        /// direction transfer. The
+        /// <see cref="ScenarioDataUpdater.GetSemaphore"/> BUG-033 precedent
+        /// is the design template.</para>
+        ///
+        /// <para><b>Slice E-2 caller contract (load-bearing for the
+        /// setvesselagency command author).</b> The full transfer
+        /// orchestration the migration helper expects:</para>
+        /// <list type="number">
+        ///   <item><b>Same-stamp short-circuit BEFORE acquiring locks.</b>
+        ///         If <c>vessel.OwningAgencyId == destination.AgencyId</c>,
+        ///         return success-no-op WITHOUT calling this helper,
+        ///         WITHOUT broadcasting <see cref="LmpCommon.Message.Data.Agency.AgencyVisibilityMsgData"/>,
+        ///         and WITHOUT calling <c>SaveAgency</c>. The helper's
+        ///         <c>ReferenceEquals(source, destination)</c> guard is a
+        ///         defense-in-depth backstop — DO NOT rely on it for the
+        ///         user-visible no-op log line.</item>
+        ///   <item><b>Acquire dual locks in <see cref="Guid.CompareTo"/>
+        ///         order</b> (lower-comparing AgencyId first). Same rule as
+        ///         <see cref="ScenarioDataUpdater.GetSemaphore"/> BUG-033
+        ///         precedent.</item>
+        ///   <item><b>Mutate <c>vessel.OwningAgencyId = destination.AgencyId</c>
+        ///         BEFORE calling the migration helpers</b> so the post-
+        ///         migration cross-agency-rejection path (5.17a) treats
+        ///         destination as the authoritative owner immediately.</item>
+        ///   <item><b>Call all three per-router helpers</b>:
+        ///         <c>AgencyKolonyRouter.MigrateForVesselTransfer</c>,
+        ///         <c>AgencyOrbitalRouter.MigrateForVesselTransfer</c>,
+        ///         <c>AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer</c>
+        ///         (read-only, Q2 NO-MIGRATE).</item>
+        ///   <item><b>Persist BOTH agencies</b> —
+        ///         <c>AgencySystem.SaveAgency(source.AgencyId)</c> AND
+        ///         <c>AgencySystem.SaveAgency(destination.AgencyId)</c>
+        ///         before releasing the agency locks. Without this pair,
+        ///         a crash before the next periodic
+        ///         <c>BackupSystem.RunBackup</c> silently loses the
+        ///         migration (both agencies re-load pre-migration state).
+        ///         Pre-spec §4.e line 567 invariant.</item>
+        ///   <item><b>Call <c>BackupSystem.RunBackup()</c> AFTER the
+        ///         SaveAgency pair</b> to flush
+        ///         <c>vessel.OwningAgencyId</c> to disk. Without this, the
+        ///         vessel.cfg keeps the OLD agency stamp until the next
+        ///         periodic backup — a crash in that window leaves
+        ///         vessel.cfg disagreeing with AgencyState.txt, producing
+        ///         a cross-agency-reject loop on reconnect. Mirrors
+        ///         <c>DeleteAgencyCommand.cs:178-191</c>.</item>
+        ///   <item><b>Release the source owner's stale vessel-scoped locks</b>
+        ///         on the moved vessel (Control / Update / UnloadedUpdate).
+        ///         The 5.17a cross-agency guard rejects NEW acquires from
+        ///         the source owner, but EXISTING held locks remain — the
+        ///         source owner's KSP keeps emitting vessel messages that
+        ///         the 5.17a soak Finding-2 write-path guard silently drops.
+        ///         Visible result: source owner's vessel freezes from her
+        ///         perspective. Mirror
+        ///         <c>DeleteAgencyCommand.cs:241-269 ReleaseOldOwnerLocksOnDemotedVessels</c>
+        ///         filtered by <c>lock.VesselId == movedVesselId</c> rather
+        ///         than the demoted-vessel set.</item>
+        ///   <item><b>Emit wire messages in ORDER</b>: (a)
+        ///         <c>AgencySystemSender.BroadcastVisibilityChange</c> with
+        ///         the V→Bob entry FIRST, then (b) source-owner removal
+        ///         echo, (c) destination-owner add echo. Channel 22 is
+        ///         ReliableOrdered per-recipient, so the emit order = apply
+        ///         order on the client side. Pre-Visibility echoes briefly
+        ///         render "I still own V but its entries are gone" on the
+        ///         source owner's client.</item>
+        ///   <item><b>Release the dual lock.</b></item>
+        /// </list>
+        ///
+        /// <para><b>Disk-flush cost under dual-lock critical section.</b>
+        /// Both <c>SaveAgency</c> calls perform a <c>FileHandler.WriteAtomic</c>
+        /// (full disk flush) under their respective agency lock acquires.
+        /// If E-2 holds the dual lock across both SaveAgency calls,
+        /// concurrent postfix mutations from players in EITHER source or
+        /// destination agency block for two serial disk flushes. Latency
+        /// hit, not a correctness bug — acceptable for an admin operation
+        /// that typically fires once per session.</para>
+        ///
+        /// <para><b>Partition strategy</b>: prefix-scan
+        /// <see cref="AgencyState.KolonyEntries"/> keys for
+        /// <c>{movedVesselId:N}|*</c> — the dict-key shape established by
+        /// <see cref="Upsert"/> is <c>$"{vesselId:N}|{bodyIndex}"</c>, so any
+        /// entry contributed by the moved vessel (across any body index)
+        /// matches. The body-index suffix is intentionally arbitrary —
+        /// a vessel can have kolony entries on multiple bodies (a hopper
+        /// touring Mun + Minmus + Eve), and all of them migrate together.</para>
+        ///
+        /// <para><b>Destination-collision policy</b>: in normal operation a
+        /// vessel only belongs to one agency at a time so destination
+        /// cannot already hold a key the source had. Defensively, this
+        /// helper PREFERS source's entry on collision (more recent, since
+        /// source held the vessel until now) — a destination collision
+        /// implies operator hand-editing or a prior failed migration.
+        /// The behavior is documented for symmetry with the orbital sibling
+        /// (which has the same convention).</para>
+        ///
+        /// <para><b>Defensive guards</b>: returns an empty result without
+        /// mutation when <paramref name="source"/> and
+        /// <paramref name="destination"/> are the same instance (same-agency
+        /// no-op; the Slice E-2 caller short-circuits this earlier with a
+        /// same-stamp check, but the helper must not corrupt its own state
+        /// if invoked defensively), and when <paramref name="movedVesselId"/>
+        /// is <see cref="Guid.Empty"/> (the Unassigned sentinel never has
+        /// agency-attributed entries by construction — entries land via the
+        /// router's <see cref="TryRoute"/> first-served bypass into the
+        /// CURRENT writer's agency, never into an "Empty-vessel agency"; a
+        /// caller that passes Empty has confused the vessel id with the
+        /// agency id).</para>
+        ///
+        /// <para><b>Internal visibility</b> matches <see cref="Upsert"/> —
+        /// ServerTest reaches in to pin migration semantics directly without
+        /// bringing up the full <see cref="TryRoute"/> path; cross-router
+        /// MockClientTest scenarios (Slice E-2) cover the wire-level
+        /// integration including the dual-lock acquire ordering.</para>
+        /// </summary>
+        internal static KolonyMigrationResult MigrateForVesselTransfer(
+            AgencyState source, AgencyState destination, Guid movedVesselId)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+            if (destination == null) throw new ArgumentNullException(nameof(destination));
+
+            var result = new KolonyMigrationResult();
+            if (ReferenceEquals(source, destination)) return result;
+            if (movedVesselId == Guid.Empty) return result;
+
+            // Snapshot keys-to-move first — mutating the dict while iterating
+            // it is undefined. The prefix matches the Upsert key construction
+            // at line 229: $"{vesselId:N}|{bodyIndex}". StringComparison.Ordinal
+            // is correct because both the prefix and the dict keys are
+            // canonical hex Guid "N" form (no culture-sensitive variation).
+            var prefix = $"{movedVesselId:N}|";
+            List<string> keysToMove = null;
+            foreach (var kvp in source.KolonyEntries)
+            {
+                if (kvp.Key != null && kvp.Key.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    if (keysToMove == null) keysToMove = new List<string>();
+                    keysToMove.Add(kvp.Key);
+                }
+            }
+            if (keysToMove == null) return result;
+
+            foreach (var key in keysToMove)
+            {
+                if (!source.KolonyEntries.TryGetValue(key, out var entry)) continue;
+                source.KolonyEntries.Remove(key);
+                // [Integration-logic review C1] Destination-collision
+                // warning. By construction a vessel only belongs to one
+                // agency, so dest cannot legitimately hold the same key.
+                // Operator hand-edits or a prior failed migration could
+                // produce a collision; source-wins is documented in the
+                // class XML, but the operator gets a grep target via this
+                // Warning so "my MKS pool numbers don't match" soak
+                // reports can be traced.
+                if (destination.KolonyEntries.ContainsKey(key))
+                {
+                    LunaLog.Warning(
+                        $"[fix:MKS-R2] kolony migration collision: dest agency {destination.AgencyId:N} " +
+                        $"already had key {key}; source agency {source.AgencyId:N} value wins per pre-spec §4.e.");
+                }
+                destination.KolonyEntries[key] = entry;
+                result.RemovedKeys.Add(key);
+                result.AddedEntries.Add(entry);
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// [Phase 3 Slice E-1] Result of
+    /// <see cref="AgencyKolonyRouter.MigrateForVesselTransfer"/>. Wire-only
+    /// transient — neither <see cref="RemovedKeys"/> nor
+    /// <see cref="AddedEntries"/> is persisted to disk; the migration helper
+    /// already mutated the canonical <c>AgencyState.KolonyEntries</c> dicts
+    /// in-place, and these lists exist solely to drive the post-migration
+    /// owner-only echo sends. Caller emits TWO sends:
+    /// <list type="bullet">
+    ///   <item><b>Source owner</b>:
+    ///         <c>AgencySystemSender.SendKolonyStateToOwner(sourceOwner,
+    ///         sourceAgencyId, entries: null, removedKeys: result.RemovedKeys)</c>
+    ///         so the future client mirror's dict-remove apply clears its
+    ///         source-agency cache. The named-arg <c>removedKeys:</c> shape
+    ///         is the load-bearing call form — passing <c>entries: null</c>
+    ///         is supported by the sender's optional-parameter contract.</item>
+    ///   <item><b>Destination owner</b>:
+    ///         <c>AgencySystemSender.SendKolonyStateToOwner(destOwner,
+    ///         destAgencyId, entries: result.AddedEntries)</c>
+    ///         (removedKeys omitted, defaults null) so the future client
+    ///         mirror upserts the entries into its destination-agency
+    ///         cache.</item>
+    /// </list>
+    /// Both echoes ride the same channel-22 wire and are guaranteed to arrive
+    /// after the Slice 5.18d <c>AgencyVisibilityMsgData</c> broadcast of the
+    /// vessel-ownership change (single channel = ReliableOrdered apply order).
+    ///
+    /// <para><b>Chunking note for Slice E-2 author</b>: realistic per-vessel
+    /// migration produces small lists (capped by KSP body count, ~50). If a
+    /// future cohort accumulates more entries than
+    /// <see cref="AgencyKolonyStateMsgData.MaxEntryCount"/> or
+    /// <see cref="AgencyKolonyStateMsgData.MaxRemovedKolonyKeyCount"/>, the
+    /// sender's send-side cap-throw will fire (asymmetric-cap protection
+    /// per [[feedback-wire-msgdata-chunking-caps]]). E-2 callers handling
+    /// large migrations must split into multiple sends — model on
+    /// <c>SendOrbitalCatchupTo</c>'s chunking loop.</para>
+    /// </summary>
+    internal class KolonyMigrationResult
+    {
+        public List<string> RemovedKeys { get; } = new List<string>();
+
+        /// <summary>
+        /// Entries the destination agency receives. Named "Added" rather
+        /// than "Moved" to mirror the destination-side wire field shape
+        /// (<see cref="AgencyKolonyStateMsgData.Entries"/> is the
+        /// added-batch for the receiver). The same entry instances are
+        /// referenced by both the helper's source-removal and destination-
+        /// add operations; the caller pairs <see cref="RemovedKeys"/> with
+        /// the source-owner echo and <see cref="AddedEntries"/> with the
+        /// destination-owner echo (NOT one wire message carrying both —
+        /// each agency owner only sees their own side).
+        /// </summary>
+        public List<AgencyKolonyEntry> AddedEntries { get; } = new List<AgencyKolonyEntry>();
     }
 }

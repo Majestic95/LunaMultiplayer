@@ -239,6 +239,250 @@ namespace ServerTest
         }
 
         // -------------------------------------------------------------------
+        // [Phase 3 Slice E-1] MigrateForVesselTransfer — prefix-scan migration
+        // helper for the upcoming setvesselagency admin command (E-2).
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Migrate_SourceEmpty_ReturnsEmptyResult()
+        {
+            // Defensive: a vessel transfer where source agency has zero
+            // kolony entries (the vessel never contributed) must not throw
+            // or fabricate fake removals.
+            var dest = NewSecondaryAgency("KolonyBob");
+            var vesselId = Guid.NewGuid();
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, vesselId);
+
+            Assert.AreEqual(0, result.RemovedKeys.Count);
+            Assert.AreEqual(0, result.AddedEntries.Count);
+            Assert.AreEqual(0, _agency.KolonyEntries.Count);
+            Assert.AreEqual(0, dest.KolonyEntries.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_VesselWithMultipleBodyEntries_MovesAllToDestination()
+        {
+            // A vessel touring Mun + Minmus + Duna has three (vesselId, body)
+            // entries. All three migrate together — the body-index suffix
+            // is arbitrary, the prefix scan catches every match.
+            var movedVesselId = Guid.NewGuid();
+            var vesselIdN = movedVesselId.ToString("N");
+            _agency.KolonyEntries[$"{vesselIdN}|2"] = NewEntry(vesselIdN, 2, 100.0);
+            _agency.KolonyEntries[$"{vesselIdN}|5"] = NewEntry(vesselIdN, 5, 200.0);
+            _agency.KolonyEntries[$"{vesselIdN}|7"] = NewEntry(vesselIdN, 7, 300.0);
+
+            var dest = NewSecondaryAgency("KolonyBob");
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(3, result.RemovedKeys.Count);
+            Assert.AreEqual(3, result.AddedEntries.Count);
+            Assert.AreEqual(0, _agency.KolonyEntries.Count, "Source must be empty post-migration.");
+            Assert.AreEqual(3, dest.KolonyEntries.Count, "Destination must hold all moved entries.");
+            Assert.IsTrue(dest.KolonyEntries.ContainsKey($"{vesselIdN}|2"));
+            Assert.IsTrue(dest.KolonyEntries.ContainsKey($"{vesselIdN}|5"));
+            Assert.IsTrue(dest.KolonyEntries.ContainsKey($"{vesselIdN}|7"));
+        }
+
+        [TestMethod]
+        public void Migrate_VesselWithEntries_LeavesOtherVesselsEntriesAlone()
+        {
+            // Source has entries for two different vessels. Migrating one
+            // vessel must NOT touch the other vessel's entries.
+            var movedVesselId = Guid.NewGuid();
+            var otherVesselId = Guid.NewGuid();
+            var movedN = movedVesselId.ToString("N");
+            var otherN = otherVesselId.ToString("N");
+            _agency.KolonyEntries[$"{movedN}|2"] = NewEntry(movedN, 2, 100.0);
+            _agency.KolonyEntries[$"{otherN}|2"] = NewEntry(otherN, 2, 500.0);
+            _agency.KolonyEntries[$"{otherN}|5"] = NewEntry(otherN, 5, 600.0);
+
+            var dest = NewSecondaryAgency("KolonyBob");
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(1, result.RemovedKeys.Count, "Only the moved vessel's entry migrates.");
+            Assert.AreEqual(2, _agency.KolonyEntries.Count, "Other vessel's entries stay in source.");
+            Assert.IsTrue(_agency.KolonyEntries.ContainsKey($"{otherN}|2"));
+            Assert.IsTrue(_agency.KolonyEntries.ContainsKey($"{otherN}|5"));
+            Assert.AreEqual(1, dest.KolonyEntries.Count);
+            Assert.IsTrue(dest.KolonyEntries.ContainsKey($"{movedN}|2"));
+        }
+
+        [TestMethod]
+        public void Migrate_VesselNotInSource_ReturnsEmpty()
+        {
+            // Source has entries for vessel X; the operator transfers vessel
+            // Y (which has no kolony state in this agency). No-op.
+            var presentVesselId = Guid.NewGuid().ToString("N");
+            _agency.KolonyEntries[$"{presentVesselId}|2"] = NewEntry(presentVesselId, 2, 100.0);
+            var dest = NewSecondaryAgency("KolonyBob");
+
+            var movedVesselId = Guid.NewGuid();  // never contributed
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(0, result.RemovedKeys.Count);
+            Assert.AreEqual(1, _agency.KolonyEntries.Count);
+            Assert.AreEqual(0, dest.KolonyEntries.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_SameAgencyInstance_ReturnsEmptyWithoutMutation()
+        {
+            // Defensive: same-source-same-dest is a logical no-op. The E-2
+            // command's same-stamp short-circuit catches this earlier, but
+            // a buggy caller bypassing that check must not corrupt the
+            // agency's own state.
+            var vesselN = Guid.NewGuid().ToString("N");
+            _agency.KolonyEntries[$"{vesselN}|2"] = NewEntry(vesselN, 2, 100.0);
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, _agency, Guid.Parse(vesselN));
+
+            Assert.AreEqual(0, result.RemovedKeys.Count);
+            Assert.AreEqual(1, _agency.KolonyEntries.Count, "Same-agency call must leave the entry in place.");
+        }
+
+        [TestMethod]
+        public void Migrate_MovedVesselIdEmpty_ReturnsEmpty()
+        {
+            // Defensive: Guid.Empty is the Unassigned-vessel sentinel
+            // (spec §10 Q3). A caller passing Empty has confused vessel-id
+            // with agency-id. No-op + no mutation.
+            var vesselN = Guid.NewGuid().ToString("N");
+            _agency.KolonyEntries[$"{vesselN}|2"] = NewEntry(vesselN, 2, 100.0);
+            var dest = NewSecondaryAgency("KolonyBob");
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, Guid.Empty);
+
+            Assert.AreEqual(0, result.RemovedKeys.Count);
+            Assert.AreEqual(1, _agency.KolonyEntries.Count);
+            Assert.AreEqual(0, dest.KolonyEntries.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_NullSource_ThrowsArgumentNull()
+        {
+            var dest = NewSecondaryAgency("KolonyBob");
+            Assert.ThrowsException<ArgumentNullException>(() =>
+                AgencyKolonyRouter.MigrateForVesselTransfer(null, dest, Guid.NewGuid()));
+        }
+
+        [TestMethod]
+        public void Migrate_NullDestination_ThrowsArgumentNull()
+        {
+            Assert.ThrowsException<ArgumentNullException>(() =>
+                AgencyKolonyRouter.MigrateForVesselTransfer(_agency, null, Guid.NewGuid()));
+        }
+
+        [TestMethod]
+        public void Migrate_DestinationCollisionAtSameKey_SourceEntryOverwritesDestination()
+        {
+            // Defensive: by construction a vessel only belongs to one
+            // agency at a time so destination CANNOT legitimately have the
+            // same {vesselId|body} key as source. If a collision somehow
+            // exists (operator hand-edit, prior failed migration), the
+            // helper's documented preference (XML lines 290-293) is source-
+            // wins — source held the vessel until now so its entry is more
+            // recent.
+            var movedVesselId = Guid.NewGuid();
+            var movedN = movedVesselId.ToString("N");
+            var sourceEntry = NewEntry(movedN, 5, 999.0);
+            var destStaleEntry = NewEntry(movedN, 5, 1.0);
+            _agency.KolonyEntries[$"{movedN}|5"] = sourceEntry;
+            var dest = NewSecondaryAgency("KolonyBob");
+            dest.KolonyEntries[$"{movedN}|5"] = destStaleEntry;
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(1, result.RemovedKeys.Count);
+            Assert.AreEqual(1, dest.KolonyEntries.Count);
+            Assert.AreSame(sourceEntry, dest.KolonyEntries[$"{movedN}|5"],
+                "Source's entry must replace destination's stale entry on collision.");
+            Assert.AreEqual(999.0, dest.KolonyEntries[$"{movedN}|5"].GeologyResearch);
+        }
+
+        [TestMethod]
+        public void Migrate_VesselIdFormMismatch_DirectlyUpsertedDFormEntry_DoesNotMatch()
+        {
+            // Contract sharp-edge: the router's TryRoute normalizes wire
+            // VesselId to "N" form before Upsert (router.cs:126), so live
+            // wire entries always use 32-hex-no-hyphens. But a future
+            // direct caller (Slice E-2 admin, operator script,
+            // ServerTest helper) bypassing TryRoute could call Upsert
+            // directly with a hyphenated "D" form. Migration uses
+            // StartsWith(StringComparison.Ordinal) — a "D" form ("N" with
+            // 4 hyphens inserted) would NOT match an "N"-form
+            // movedVesselId prefix, so the entry would NOT migrate.
+            // This is a documented sharp-edge — the live wire path is
+            // safe by ingest normalization, but the Slice E-2 author MUST
+            // use the same "N" form convention if they call Upsert
+            // directly. This test pins the asymmetry.
+            var movedVesselId = Guid.NewGuid();
+            var movedN = movedVesselId.ToString("N");
+            var movedD = movedVesselId.ToString("D");  // hyphenated 36-char form
+            // Hand-insert a D-form entry — bypass Upsert's $"{VesselId}|{bodyIndex}"
+            // composition by writing directly to the dict with a D-form key.
+            _agency.KolonyEntries[$"{movedD}|5"] = NewEntry(movedD, 5, 100.0);
+            var dest = NewSecondaryAgency("KolonyBob");
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(0, result.RemovedKeys.Count,
+                "D-form key (with hyphens) does NOT match N-form prefix — direct-Upsert callers must use N form.");
+            Assert.AreEqual(1, _agency.KolonyEntries.Count, "Mismatched-form entry stays in source.");
+            Assert.AreEqual(0, dest.KolonyEntries.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_PrefixCollision_PipeSeparatorPreventsSubstringFalseMatch()
+        {
+            // Regression guard: the prefix-scan uses "{vesselId:N}|" — the
+            // trailing "|" is load-bearing. Without it, a vessel whose Guid
+            // is a PREFIX of another vessel's Guid (extremely unlikely with
+            // random Guids, but constructible) would false-positive. Test
+            // that the "|" separator is part of the prefix by constructing
+            // two synthetic vessel-id strings where one is a prefix of the
+            // other and a body-index suffix completes the longer key.
+            // The dict key shape forces the "|" separator immediately after
+            // the 32-char vesselId, so prefix-scanning "{shorter}|" can
+            // never match "{shorter}AB|N" — but the regression bait would
+            // be a typo'd scan that strips the "|".
+            var movedVesselId = Guid.NewGuid();
+            var movedN = movedVesselId.ToString("N");
+            // Construct a key that BEGINS with movedN but is NOT a valid
+            // body-index match — this synthesises the "vessel-id-as-prefix"
+            // hazard. The exact-match prefix "{movedN}|" must catch only the
+            // legitimate entry.
+            _agency.KolonyEntries[$"{movedN}|3"] = NewEntry(movedN, 3, 100.0);
+            // A nonsense key with movedN as a non-pipe-bounded prefix —
+            // this can't legitimately exist (Upsert always emits "{vesselId}|"),
+            // but the test pins the prefix scan's exactness for future safety.
+            _agency.KolonyEntries[$"{movedN}EXTRA|9"] = NewEntry($"{movedN}EXTRA", 9, 200.0);
+            var dest = NewSecondaryAgency("KolonyBob");
+
+            var result = AgencyKolonyRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(1, result.RemovedKeys.Count, "Only the legitimate {vesselId}|N key migrates.");
+            Assert.AreEqual($"{movedN}|3", result.RemovedKeys[0]);
+            Assert.AreEqual(1, _agency.KolonyEntries.Count, "Synthetic prefix-collision entry stays in source.");
+            Assert.IsTrue(_agency.KolonyEntries.ContainsKey($"{movedN}EXTRA|9"));
+        }
+
+        private static AgencyState NewSecondaryAgency(string ownerName)
+        {
+            var dest = new AgencyState
+            {
+                AgencyId = Guid.NewGuid(),
+                OwningPlayerName = ownerName,
+                DisplayName = ownerName + " Co",
+            };
+            AgencySystem.Agencies[dest.AgencyId] = dest;
+            AgencySystem.AgencyByPlayerName[dest.OwningPlayerName] = dest.AgencyId;
+            return dest;
+        }
+
+        // -------------------------------------------------------------------
         // Helpers
         // -------------------------------------------------------------------
 

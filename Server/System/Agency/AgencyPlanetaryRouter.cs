@@ -286,5 +286,105 @@ namespace Server.System.Agency
             var key = $"{entry.BodyIndex.ToString(CultureInfo.InvariantCulture)}|{entry.ResourceName}";
             agency.PlanetaryEntries[key] = entry;
         }
+
+        /// <summary>
+        /// [Phase 3 Slice E-1] Read-only inspection for the per-router
+        /// <see cref="AgencyState.PlanetaryEntries"/> partition when a vessel
+        /// transfers agency. <b>Returns affected-entry diagnostics WITHOUT
+        /// mutating <paramref name="source"/>.</b> Operator session 29 Q2
+        /// confirmed pre-spec §4.e default: planetary entries do NOT migrate
+        /// on a vessel transfer because the dict-key partition is
+        /// body-and-resource (not vessel-keyed) and a transferred vessel's
+        /// prior contributions represent the body's logistics pool state,
+        /// not the vessel's state. See pre-spec §4.e line 556 + the
+        /// distinct sibling-router naming
+        /// (<see cref="AgencyKolonyRouter.MigrateForVesselTransfer"/> +
+        /// <see cref="AgencyOrbitalRouter.MigrateForVesselTransfer"/>): the
+        /// Migrate verb signals mutation; this Inspect verb signals no
+        /// mutation, just diagnostic enumeration.
+        ///
+        /// <para><b>Caller contract</b>: caller holds
+        /// <c>AgencySystem.GetAgencyLock(source.AgencyId)</c> for read
+        /// stability. Destination lock not required for this helper's
+        /// own correctness (no mutation on destination) — but acquiring
+        /// it is HARMLESS. The Slice E-2 caller will typically hold BOTH
+        /// agency locks across the broader transfer operation (the kolony
+        /// + orbital migration helpers DO require both); this planetary
+        /// helper is happy to run under that same dual-lock critical
+        /// section without interfering.</para>
+        ///
+        /// <para><b>Inspection strategy</b>: value-field-scan against
+        /// <see cref="AgencyPlanetaryEntry.OwningVesselId"/> (NOT key-prefix
+        /// — the key is body-and-resource, not vessel-keyed). Each affected
+        /// entry's dict-key is returned so the caller can format the
+        /// per-spec §4.e info log
+        /// (<c>"[fix:MKS-R2] transferagency moved vessel V from A to B;
+        /// A's planetary logistics pool on body X retains historical
+        /// contributions from V"</c>) — the BodyIndex slice of the key
+        /// suffices to identify body X.</para>
+        ///
+        /// <para><b>Defensive guards</b>: returns empty result when
+        /// <paramref name="source"/> is null (defensive ArgumentNullException),
+        /// or when <paramref name="movedVesselId"/> is
+        /// <see cref="Guid.Empty"/> (Unassigned-sentinel never has agency-
+        /// attributed entries by construction).</para>
+        ///
+        /// <para><b>Future <c>cleanplanetaryentries</c> admin command</b>
+        /// (deferred, out of Phase 3 scope): if operators want bulk removal
+        /// of body-pool contributions, that's a separate admin surface
+        /// distinct from transferagency. The
+        /// <see cref="AgencyPlanetaryStateMsgData.RemovedPlanetaryKeys"/>
+        /// wire tail exists for that future consumer; this helper is the
+        /// transferagency-path only.</para>
+        ///
+        /// <para><b>Internal visibility</b> matches <see cref="Upsert"/>.</para>
+        /// </summary>
+        internal static PlanetaryInspectionResult InspectAffectedEntriesForVesselTransfer(
+            AgencyState source, Guid movedVesselId)
+        {
+            if (source == null) throw new ArgumentNullException(nameof(source));
+
+            var result = new PlanetaryInspectionResult();
+            if (movedVesselId == Guid.Empty) return result;
+
+            foreach (var kvp in source.PlanetaryEntries)
+            {
+                var entry = kvp.Value;
+                if (entry == null) continue;
+                if (entry.OwningVesselId == movedVesselId)
+                {
+                    result.AffectedKeys.Add(kvp.Key);
+                }
+            }
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// [Phase 3 Slice E-1] Result of
+    /// <see cref="AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer"/>.
+    /// Wire-only / log-only transient — nothing is persisted; the helper
+    /// did not mutate source's <c>PlanetaryEntries</c> dict (Q2 NO-MIGRATE).
+    /// Carries the dict-keys of planetary entries the source agency retains
+    /// for the operator-visible info log. <b>NOT a migration result — no
+    /// mutation occurred.</b> The list MAY be empty (the moved vessel never
+    /// contributed to planetary state); the caller gates its log emit on
+    /// <c>AffectedKeys.Count &gt; 0</c>.
+    ///
+    /// <para><b>Operator log emit pattern (pre-spec §4.e):</b> for each
+    /// key in <see cref="AffectedKeys"/>, emit one
+    /// <c>[fix:MKS-R2] transferagency planetary-retained-in-source body={bodyIndex} resource={resourceName}</c>
+    /// info line. The key is <c>$"{bodyIndex}|{resourceName}"</c> — split
+    /// on "|" to recover the per-line tokens.</para>
+    ///
+    /// <para>Slice E-2's <c>setvesselagency</c> does NOT call
+    /// <c>AgencySystemSender.SendPlanetaryStateToOwner</c> with
+    /// <see cref="AffectedKeys"/> as a removed-tail — those entries STAY
+    /// in source. The sender's removed-keys overload exists for a future
+    /// <c>cleanplanetaryentries</c> admin command (out of Phase 3 scope).</para>
+    /// </summary>
+    internal class PlanetaryInspectionResult
+    {
+        public List<string> AffectedKeys { get; } = new List<string>();
     }
 }

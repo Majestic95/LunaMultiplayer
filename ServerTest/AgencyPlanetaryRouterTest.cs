@@ -249,6 +249,85 @@ namespace ServerTest
         }
 
         // -------------------------------------------------------------------
+        // [Phase 3 Slice E-1] InspectAffectedEntriesForVesselTransfer —
+        // read-only inspection (Q2 NO-MIGRATE per operator session 29).
+        // Reports affected entry keys for the operator info log but does
+        // not mutate.
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Inspect_VesselWithContributions_ReturnsKeysWithoutMutating()
+        {
+            var movedVesselId = Guid.NewGuid();
+            var otherVesselId = Guid.NewGuid();
+            _agency.PlanetaryEntries["5|Hydrates"] = NewEntry(movedVesselId, 5, "Hydrates", 100.0);
+            _agency.PlanetaryEntries["8|Karbonite"] = NewEntry(movedVesselId, 8, "Karbonite", 200.0);
+            _agency.PlanetaryEntries["5|MetallicOre"] = NewEntry(otherVesselId, 5, "MetallicOre", 300.0);
+
+            var result = AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer(_agency, movedVesselId);
+
+            Assert.AreEqual(2, result.AffectedKeys.Count, "Both moved-vessel contributions surface for the operator log.");
+            CollectionAssert.Contains(result.AffectedKeys, "5|Hydrates");
+            CollectionAssert.Contains(result.AffectedKeys, "8|Karbonite");
+            Assert.AreEqual(3, _agency.PlanetaryEntries.Count,
+                "Q2 NO-MIGRATE — all three entries stay in source agency unchanged.");
+        }
+
+        [TestMethod]
+        public void Inspect_VesselWithoutContributions_ReturnsEmpty()
+        {
+            // Source has planetary entries from other vessels; the moved
+            // vessel has never contributed. No-op + empty result.
+            var otherVesselId = Guid.NewGuid();
+            _agency.PlanetaryEntries["5|Hydrates"] = NewEntry(otherVesselId, 5, "Hydrates", 100.0);
+
+            var movedVesselId = Guid.NewGuid();
+            var result = AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer(_agency, movedVesselId);
+
+            Assert.AreEqual(0, result.AffectedKeys.Count);
+            Assert.AreEqual(1, _agency.PlanetaryEntries.Count);
+        }
+
+        [TestMethod]
+        public void Inspect_MovedVesselIdEmpty_ReturnsEmpty()
+        {
+            _agency.PlanetaryEntries["5|Hydrates"] = NewEntry(Guid.NewGuid(), 5, "Hydrates", 100.0);
+
+            var result = AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer(_agency, Guid.Empty);
+
+            Assert.AreEqual(0, result.AffectedKeys.Count,
+                "Guid.Empty (Unassigned sentinel) must not match any OwningVesselId.");
+            Assert.AreEqual(1, _agency.PlanetaryEntries.Count);
+        }
+
+        [TestMethod]
+        public void Inspect_NullSource_ThrowsArgumentNull()
+        {
+            Assert.ThrowsException<ArgumentNullException>(() =>
+                AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer(null, Guid.NewGuid()));
+        }
+
+        [TestMethod]
+        public void Inspect_MultipleVesselsSameBody_OnlyMovedVesselReturned()
+        {
+            // Two vessels of the agency contribute to the same body's
+            // Hydrates pool — but the dict is body-and-resource-keyed so
+            // only ONE entry exists (most-recent OwningVesselId wins per
+            // Upsert). The inspect helper reports whichever vessel's
+            // OwningVesselId is currently stored.
+            var movedVesselId = Guid.NewGuid();
+            var laterVesselId = Guid.NewGuid();
+            // Upsert moves the OwningVesselId to laterVesselId — the entry
+            // is no longer attributed to movedVesselId on inspection.
+            _agency.PlanetaryEntries["5|Hydrates"] = NewEntry(laterVesselId, 5, "Hydrates", 100.0);
+
+            var result = AgencyPlanetaryRouter.InspectAffectedEntriesForVesselTransfer(_agency, movedVesselId);
+
+            Assert.AreEqual(0, result.AffectedKeys.Count,
+                "Body-pool entries are NOT vessel-keyed; only the OwningVesselId field reflects who contributed last.");
+        }
+
+        // -------------------------------------------------------------------
         // Helpers
         // -------------------------------------------------------------------
 

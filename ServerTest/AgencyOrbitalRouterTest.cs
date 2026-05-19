@@ -312,6 +312,203 @@ namespace ServerTest
         }
 
         // -------------------------------------------------------------------
+        // [Phase 3 Slice E-1] MigrateForVesselTransfer — value-field-scan
+        // migration for the upcoming setvesselagency admin command (E-2).
+        // Q1 KEEP: Origin-only matches stay in source agency; only
+        // Destination matches migrate.
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Migrate_SourceEmpty_ReturnsEmptyResult()
+        {
+            var dest = NewSecondaryAgency("OrbitalBob");
+
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, dest, Guid.NewGuid());
+
+            Assert.AreEqual(0, result.RemovedTransferGuids.Count);
+            Assert.AreEqual(0, result.AddedEntries.Count);
+            Assert.AreEqual(0, result.OriginOnlyKeptCount);
+        }
+
+        [TestMethod]
+        public void Migrate_DestinationMatch_MovesTransferToDestinationAgency()
+        {
+            var movedVesselId = Guid.NewGuid();
+            var originVesselId = Guid.NewGuid();
+            var transferGuid = Guid.NewGuid();
+            _agency.OrbitalTransfers[transferGuid] = NewEntry(
+                transferGuid, originVesselId, movedVesselId,
+                AgencyOrbitalTransferEntry.StatusLaunched, 100.0, 200.0);
+            var dest = NewSecondaryAgency("OrbitalBob");
+
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(1, result.RemovedTransferGuids.Count);
+            Assert.AreEqual(transferGuid, result.RemovedTransferGuids[0]);
+            Assert.AreEqual(1, result.AddedEntries.Count);
+            Assert.AreEqual(0, result.OriginOnlyKeptCount);
+            Assert.AreEqual(0, _agency.OrbitalTransfers.Count);
+            Assert.AreEqual(1, dest.OrbitalTransfers.Count);
+            Assert.IsTrue(dest.OrbitalTransfers.ContainsKey(transferGuid));
+        }
+
+        [TestMethod]
+        public void Migrate_OriginOnlyMatch_KeepsInSource_ReportsCountForLog()
+        {
+            // Q1 KEEP per operator session 29: Origin-only match (vessel is
+            // the source of a shipped-out transfer) stays in source agency.
+            // Source loses the vessel but retains the launch obligation.
+            var movedVesselId = Guid.NewGuid();
+            var destinationVesselId = Guid.NewGuid();
+            var transferGuid = Guid.NewGuid();
+            _agency.OrbitalTransfers[transferGuid] = NewEntry(
+                transferGuid, movedVesselId, destinationVesselId,
+                AgencyOrbitalTransferEntry.StatusLaunched, 100.0, 200.0);
+            var dest = NewSecondaryAgency("OrbitalBob");
+
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(0, result.RemovedTransferGuids.Count, "Origin-only match must NOT migrate (Q1 KEEP).");
+            Assert.AreEqual(0, result.AddedEntries.Count);
+            Assert.AreEqual(1, result.OriginOnlyKeptCount, "Caller diagnostic counts the Origin-only kept transfers for the operator log.");
+            Assert.AreEqual(1, result.OriginOnlyKeptGuids.Count,
+                "Per-guid list mirrors the count — operator log emits one line per kept obligation.");
+            Assert.AreEqual(transferGuid, result.OriginOnlyKeptGuids[0],
+                "OriginOnlyKeptGuids carries the actual transfer-guids for the operator audit trail.");
+            Assert.AreEqual(1, _agency.OrbitalTransfers.Count, "Source agency keeps the in-flight obligation.");
+            Assert.AreEqual(0, dest.OrbitalTransfers.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_NeitherOriginNorDestination_NoAction()
+        {
+            // Source has a transfer between two other vessels; the moved
+            // vessel touches neither.
+            var unrelatedOrigin = Guid.NewGuid();
+            var unrelatedDest = Guid.NewGuid();
+            var transferGuid = Guid.NewGuid();
+            _agency.OrbitalTransfers[transferGuid] = NewEntry(
+                transferGuid, unrelatedOrigin, unrelatedDest,
+                AgencyOrbitalTransferEntry.StatusLaunched, 100.0, 200.0);
+            var dest = NewSecondaryAgency("OrbitalBob");
+
+            var movedVesselId = Guid.NewGuid();
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(0, result.RemovedTransferGuids.Count);
+            Assert.AreEqual(0, result.OriginOnlyKeptCount);
+            Assert.AreEqual(1, _agency.OrbitalTransfers.Count);
+            Assert.AreEqual(0, dest.OrbitalTransfers.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_SelfTransfer_OriginEqualsDestination_MovesViaDestinationPath()
+        {
+            // Self-delivery: a single vessel is both Origin AND Destination
+            // (rare in MKS but valid for in-place resource flow). Per
+            // pre-spec §4.e line 217-218, "prefer the Destination-match path
+            // (deliverer authority)." The migration must MOVE (not double-
+            // count or keep both branches).
+            var movedVesselId = Guid.NewGuid();
+            var transferGuid = Guid.NewGuid();
+            _agency.OrbitalTransfers[transferGuid] = NewEntry(
+                transferGuid, movedVesselId, movedVesselId,
+                AgencyOrbitalTransferEntry.StatusLaunched, 100.0, 200.0);
+            var dest = NewSecondaryAgency("OrbitalBob");
+
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(1, result.RemovedTransferGuids.Count, "Self-transfer migrates via Destination-match path.");
+            Assert.AreEqual(0, result.OriginOnlyKeptCount, "Self-transfer must NOT also be counted as Origin-keep.");
+            Assert.AreEqual(0, _agency.OrbitalTransfers.Count);
+            Assert.AreEqual(1, dest.OrbitalTransfers.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_MixedTransfers_OnlyDestinationMatchesMigrate()
+        {
+            // Realistic scenario: source has three transfers — one where the
+            // moved vessel is Destination (migrates), one where it's Origin
+            // only (keeps), one unrelated (untouched).
+            var movedVesselId = Guid.NewGuid();
+            var t1 = Guid.NewGuid();  // moved-vessel is Destination → migrate
+            var t2 = Guid.NewGuid();  // moved-vessel is Origin-only → keep
+            var t3 = Guid.NewGuid();  // unrelated → untouched
+            _agency.OrbitalTransfers[t1] = NewEntry(t1, Guid.NewGuid(), movedVesselId,
+                AgencyOrbitalTransferEntry.StatusLaunched, 0, 0);
+            _agency.OrbitalTransfers[t2] = NewEntry(t2, movedVesselId, Guid.NewGuid(),
+                AgencyOrbitalTransferEntry.StatusLaunched, 0, 0);
+            _agency.OrbitalTransfers[t3] = NewEntry(t3, Guid.NewGuid(), Guid.NewGuid(),
+                AgencyOrbitalTransferEntry.StatusLaunched, 0, 0);
+            var dest = NewSecondaryAgency("OrbitalBob");
+
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, dest, movedVesselId);
+
+            Assert.AreEqual(1, result.RemovedTransferGuids.Count);
+            Assert.AreEqual(t1, result.RemovedTransferGuids[0]);
+            Assert.AreEqual(1, result.OriginOnlyKeptCount);
+            Assert.AreEqual(2, _agency.OrbitalTransfers.Count, "Origin-keep + unrelated stay in source.");
+            Assert.IsTrue(_agency.OrbitalTransfers.ContainsKey(t2));
+            Assert.IsTrue(_agency.OrbitalTransfers.ContainsKey(t3));
+            Assert.AreEqual(1, dest.OrbitalTransfers.Count);
+            Assert.IsTrue(dest.OrbitalTransfers.ContainsKey(t1));
+        }
+
+        [TestMethod]
+        public void Migrate_MovedVesselIdEmpty_ReturnsEmpty()
+        {
+            var transferGuid = Guid.NewGuid();
+            _agency.OrbitalTransfers[transferGuid] = NewEntry(
+                transferGuid, Guid.NewGuid(), Guid.NewGuid(),
+                AgencyOrbitalTransferEntry.StatusLaunched, 0, 0);
+            var dest = NewSecondaryAgency("OrbitalBob");
+
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, dest, Guid.Empty);
+
+            Assert.AreEqual(0, result.RemovedTransferGuids.Count);
+            Assert.AreEqual(0, result.OriginOnlyKeptCount);
+            Assert.AreEqual(1, _agency.OrbitalTransfers.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_SameAgencyInstance_ReturnsEmptyWithoutMutation()
+        {
+            var transferGuid = Guid.NewGuid();
+            var movedVesselId = Guid.NewGuid();
+            _agency.OrbitalTransfers[transferGuid] = NewEntry(
+                transferGuid, Guid.NewGuid(), movedVesselId,
+                AgencyOrbitalTransferEntry.StatusLaunched, 0, 0);
+
+            var result = AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, _agency, movedVesselId);
+
+            Assert.AreEqual(0, result.RemovedTransferGuids.Count);
+            Assert.AreEqual(1, _agency.OrbitalTransfers.Count);
+        }
+
+        [TestMethod]
+        public void Migrate_NullSourceOrDestination_ThrowsArgumentNull()
+        {
+            var dest = NewSecondaryAgency("OrbitalBob");
+            Assert.ThrowsException<ArgumentNullException>(() =>
+                AgencyOrbitalRouter.MigrateForVesselTransfer(null, dest, Guid.NewGuid()));
+            Assert.ThrowsException<ArgumentNullException>(() =>
+                AgencyOrbitalRouter.MigrateForVesselTransfer(_agency, null, Guid.NewGuid()));
+        }
+
+        private static AgencyState NewSecondaryAgency(string ownerName)
+        {
+            var dest = new AgencyState
+            {
+                AgencyId = Guid.NewGuid(),
+                OwningPlayerName = ownerName,
+                DisplayName = ownerName + " Co",
+            };
+            AgencySystem.Agencies[dest.AgencyId] = dest;
+            AgencySystem.AgencyByPlayerName[dest.OwningPlayerName] = dest.AgencyId;
+            return dest;
+        }
+
+        // -------------------------------------------------------------------
         // Helpers
         // -------------------------------------------------------------------
 
