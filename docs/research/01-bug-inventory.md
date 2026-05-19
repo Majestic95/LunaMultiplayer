@@ -320,7 +320,7 @@ I have grouped the inventory by the subsystem most likely to own the root cause.
 
 #### [BUG-037] Server console mangles backspaces and interleaves output with messages
 - **Severity:** Medium (operator UX)
-- **Status:** Open
+- **Status:** 🟡 Partial fix on fork (2026-05-19). Colour-bleed between concurrent log lines closed: `BaseLogger.Emit` now acquires a private static `ConsoleLock` around the `ForegroundColor` / `BackgroundColor` / `WriteLine` / `ResetColor` trio so each log line's colour state is atomic; the trio used to be three separate Console operations, so two threads racing produced wrong-coloured / half-coloured lines. `AfterPrint` (file append + ring buffer) runs outside the lock so disk latency doesn't extend the contention window. **Residual symptom still open:** the "operator's in-progress input gets visually overwritten" / "backspace-mangling" half of the bug needs a `Console.ReadLine` replacement / line-editor with terminal-emulator-aware re-emit (clear current line via `\r` + spaces, write the log, re-print the prompt + buffer). Out of scope for this commit because that surface is platform-specific (cmd.exe / PowerShell / Windows Terminal / WSL handle backspace + cursor sequences differently); a future phase-2 design pass should map the required behaviour against the supported terminal cohort.
 - **Sources:** [#597](https://github.com/LunaMultiplayer/LunaMultiplayer/issues/597)
 
 #### [BUG-038] XML prologue encoding is declared wrong in server config files
