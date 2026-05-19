@@ -186,6 +186,12 @@ namespace MockClientTest.Harness
             // (Sandbox) so an agency test leaving GameMode=Career can't accidentally
             // activate per-agency code paths in a follow-on non-agency test.
             AgencySystem.Reset();
+            // [Stage 5.18g] Clear the per-ContractGuid claim map between tests. Without
+            // this reset a prior test's Accepted contracts would block a follow-on test
+            // from re-Accepting the same guid (the test fixtures reuse guids across
+            // cases). AgencySystem.Reset clears Agencies + AgencyByPlayerName but the
+            // claim map is independent state.
+            AgencyContractRouter.ResetClaimedContracts();
             GameplaySettings.SettingsStore.PerAgencyCareer = false;
             GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
             // [Stage 5.16 round-2 review] Drop the locks Bug010PinnedBroadcastTest plants

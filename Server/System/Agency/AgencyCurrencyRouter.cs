@@ -90,6 +90,9 @@ namespace Server.System.Agency
             if (!TryResolveAgency(client, msg, out var agency))
                 return false;
 
+            if (RejectIfNonFinite(client, agency, "Funds", msg.Funds))
+                return true;
+
             // [Round-1 review] SendStateTo is INSIDE the lock so the snapshot it
             // builds (a re-read of agency.Funds/Science/Reputation) cannot race a
             // concurrent router invocation for the same agency. Both reviewers
@@ -113,6 +116,9 @@ namespace Server.System.Agency
             if (!TryResolveAgency(client, msg, out var agency))
                 return false;
 
+            if (RejectIfNonFinite(client, agency, "Science", msg.Science))
+                return true;
+
             lock (AgencySystem.GetAgencyLock(agency.AgencyId))
             {
                 agency.Science = msg.Science;
@@ -131,6 +137,9 @@ namespace Server.System.Agency
             if (!TryResolveAgency(client, msg, out var agency))
                 return false;
 
+            if (RejectIfNonFinite(client, agency, "Reputation", msg.Reputation))
+                return true;
+
             lock (AgencySystem.GetAgencyLock(agency.AgencyId))
             {
                 agency.Reputation = msg.Reputation;
@@ -141,6 +150,57 @@ namespace Server.System.Agency
             LunaLog.Debug($"[fix:per-agency-career] Routed Reputation={msg.Reputation} (reason={msg.Reason}) to agency {agency.AgencyId:N} for {client.PlayerName}");
             return true;
         }
+
+        /// <summary>
+        /// Stage 5.18g — defends per-agency persisted scalars (Funds / Science /
+        /// Reputation) against wire corruption + cheat clients that send NaN or
+        /// ±Infinity. Returns <c>true</c> when the value is non-finite — caller
+        /// should return <c>true</c> from <c>TryRoute*</c> so the legacy
+        /// shared-agency path doesn't run (otherwise the same NaN flows to
+        /// <c>Funding.Instance</c> et al). The unchanged authoritative state is
+        /// echoed back to the sender via <see cref="AgencySystemSender.SendStateTo"/>
+        /// so their local <c>Funding.Instance</c> snaps back on receipt — the
+        /// 5.18a client handler applies the echo with the
+        /// <c>StartIgnoringEvents</c> bracket so no feedback loop fires.
+        ///
+        /// <para><b>Minimum-scope policy (operator-confirmed 2026-05-19).</b>
+        /// Finite values pass through unchanged. KSP careers + CC + KCT can
+        /// legitimately mutate scalars in wide ranges (vessel-recovery bounties,
+        /// large CC rewards, strategy commits), so no upper cap is applied —
+        /// <c>double.MaxValue</c> is a known limitation. A future hardening slice
+        /// could add a configurable <c>MaxAbsAgencyValue</c> setting; not in 5.18g.</para>
+        ///
+        /// <para><b>Per-agency design.</b> Runs only inside the
+        /// <see cref="AgencySystem.PerAgencyEnabled"/>-gated path
+        /// (<see cref="TryResolveAgency"/> returns false otherwise). Under gate=off
+        /// the legacy shared-agency path is untouched — no observable behaviour
+        /// change.</para>
+        /// </summary>
+        private static bool RejectIfNonFinite(ClientStructure client, AgencyState agency, string fieldName, double value)
+        {
+            if (!IsNonFinite(value))
+                return false;
+
+            LunaLog.Warning(
+                $"[fix:per-agency-career] Rejected non-finite {fieldName}={value} from {client.PlayerName} (agency {agency.AgencyId:N}); echoing authoritative state");
+            lock (AgencySystem.GetAgencyLock(agency.AgencyId))
+            {
+                AgencySystemSender.SendStateTo(client, agency);
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Stage 5.18g — pure check exposing the NaN/±Infinity decision. Returns
+        /// <c>true</c> iff <paramref name="value"/> is <see cref="double.IsNaN"/> or
+        /// <see cref="double.IsInfinity"/>. Internal — exposed to <c>ServerTest</c>
+        /// via <c>InternalsVisibleTo</c> so the validation surface can be pinned
+        /// without bringing up the wire harness. <c>double.MaxValue</c>,
+        /// <c>double.MinValue</c>, and finite negative values all return
+        /// <c>false</c> (no upper cap per the minimum-scope policy).
+        /// </summary>
+        internal static bool IsNonFinite(double value) =>
+            double.IsNaN(value) || double.IsInfinity(value);
 
         /// <summary>
         /// Common entry-validation for all three routers. Returns <c>true</c> with

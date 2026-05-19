@@ -1,4 +1,5 @@
-﻿using LmpClient.Systems.Chat;
+﻿using LmpClient.Systems.Agency;
+using LmpClient.Systems.Chat;
 using LmpClient.Systems.CraftLibrary;
 using LmpClient.Systems.PlayerColorSys;
 using LmpClient.Systems.Screenshot;
@@ -70,8 +71,21 @@ namespace LmpClient.Windows.Status
             // gate the button appears, the player clicks it, and absolutely
             // nothing visible happens because the window's Display getter
             // refuses to render under non-Career — UX-hostile dead button.
+            //
+            // [Stage 5.18g] Also gate on AgencySystem.LocalAgencyId being set AND
+            // HighLogic.LoadedScene >= SPACECENTER — mirrors AgencyWindow.Display's
+            // full predicate stack so the toggle can never render in a state where
+            // the window refuses to open. SettingsReply (ch 2) and AgencyHandshake
+            // (ch 22) arrive on different Lidgren channels with undefined relative
+            // order; without LocalAgencyId, the button can render before the
+            // handshake lands (v1 soak Finding 1). Without the SPACECENTER scene
+            // check, the brief window between handshake-complete and SPACECENTER-
+            // load could surface a dead-button (integration-lens Scenario 6 SHOULD
+            // FIX).
             if (SettingsSystem.ServerSettings.PerAgencyCareerEnabled
-                && HighLogic.CurrentGame?.Mode == Game.Modes.CAREER)
+                && HighLogic.CurrentGame?.Mode == Game.Modes.CAREER
+                && AgencySystem.Singleton.LocalAgencyId != System.Guid.Empty
+                && HighLogic.LoadedScene >= GameScenes.SPACECENTER)
             {
                 AgencyWindow.Singleton.Display = GUILayout.Toggle(AgencyWindow.Singleton.Display, "Agency", ToggleButtonStyle);
             }

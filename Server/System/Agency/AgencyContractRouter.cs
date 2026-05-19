@@ -8,6 +8,7 @@ using Server.Server;
 using Server.Settings.Structures;
 using Server.System.Scenario;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text;
 
@@ -73,6 +74,52 @@ namespace Server.System.Agency
             "Offered",
             "Generated",
         };
+
+        /// <summary>
+        /// Stage 5.18g — per-<see cref="ContractInfo.ContractGuid"/> claim map. Closes
+        /// the simultaneous-Accept race exposed by the v3 hotfix (<c>042d2cb5</c>),
+        /// which made shared Offered/Generated contracts visible to peer agencies in
+        /// real time. Without this guard, two agencies receiving the same Offered
+        /// contract could both click Accept inside one server tick, both promote it
+        /// to a per-agency Active record, and both collect the reward on completion.
+        ///
+        /// <para><b>Semantics.</b> First Accept wins via
+        /// <see cref="ConcurrentDictionary{TKey, TValue}.GetOrAdd(TKey, TValue)"/>'s
+        /// atomic insert. Subsequent <see cref="ApplyPerAgencyBatch"/> entries for the
+        /// same guid see the stored claimant != the current agency and silently drop
+        /// the contract from the batch (Warning log). Same-agency re-Accept is
+        /// idempotent (claim already held by the same agency → proceed with Upsert).</para>
+        ///
+        /// <para><b>Lifetime.</b> Entries persist for the server process lifetime;
+        /// no eviction in 5.18g (operator-confirmed minimum scope). Memory cost ~32
+        /// bytes per Accepted contract guid; bounded by total Accepts across the
+        /// universe. For long-running servers with heavy CC grinding, consider
+        /// eviction on Completed/Failed/Cancelled — deferred to a future hardening
+        /// slice, mirroring the BUG-025 v2 tech-purchase claim's same shape.</para>
+        ///
+        /// <para><b>Persistence.</b> The map is in-memory only. After a server restart,
+        /// <see cref="PreSeedClaimsFromAgencyState"/> is called once per loaded
+        /// <see cref="AgencyState"/> from <see cref="AgencySystem.LoadExistingAgencies"/>,
+        /// rebuilding the claim set from the persisted per-agency
+        /// <see cref="AgencyState.Contracts"/> list. This closes the post-restart
+        /// double-claim window where Agency A's claim is on disk but Agency B
+        /// connects first and could Accept the same guid before A reconnects.</para>
+        ///
+        /// <para><b>Per-agency design.</b> Only populated by the gated per-agency
+        /// path (<see cref="TryRoute"/> guards on
+        /// <see cref="AgencySystem.PerAgencyEnabled"/>). Under gate=off the
+        /// dictionary stays empty and the legacy shared-agency path is untouched —
+        /// no observable behaviour change in dual-mode-off (Stage 5 spec §11).</para>
+        ///
+        /// <para><b>Mod-compat impact.</b> Contract Configurator's
+        /// <c>ContractPreLoader</c> drives the Offered/Generated pool and that path
+        /// runs through <see cref="ApplySharedBatch"/> unchanged — CC's preloader is
+        /// not touched by the claim guard. The guard intervenes only when a contract
+        /// crosses from Offered/Generated to a post-Accept state (Active / Completed /
+        /// Failed / Cancelled / DeadlineExpired / Withdrawn).</para>
+        /// </summary>
+        private static readonly ConcurrentDictionary<Guid, Guid> _claimedContracts =
+            new ConcurrentDictionary<Guid, Guid>();
 
         /// <summary>
         /// Attempts to route the inbound contracts batch through the per-agency path.
@@ -148,6 +195,18 @@ namespace Server.System.Agency
             {
                 foreach (var contract in entries)
                 {
+                    // Stage 5.18g — claim guard. See TryClaimContract XML for the
+                    // atomic-first-wins contract. Cross-agency collision drops the
+                    // contract from the batch (no Upsert, no echo, no shared-pool
+                    // removal). Same-agency re-Accept stays idempotent.
+                    var claimant = TryClaimContract(contract.ContractGuid, agencyId);
+                    if (claimant != agencyId)
+                    {
+                        LunaLog.Warning(
+                            $"[fix:per-agency-career] Dropped duplicate Accept for contract {contract.ContractGuid:N} from agency {agencyId:N} (player {client.PlayerName}); already claimed by agency {claimant:N}");
+                        continue;
+                    }
+
                     try
                     {
                         Upsert(agency, contract);
@@ -299,6 +358,123 @@ namespace Server.System.Agency
 
             var node = new ConfigNode(raw) { Name = "CONTRACT" };
             return node.GetValue("state")?.Value ?? string.Empty;
+        }
+
+        /// <summary>
+        /// Stage 5.18g — atomic claim-guard primitive. Returns the agency id that holds
+        /// the claim for the given <paramref name="contractGuid"/> after this call. If
+        /// no prior claimant exists, <paramref name="agencyId"/> is recorded and
+        /// returned (first-wins). If a different agency already holds the claim, that
+        /// agency's id is returned and the caller drops the contract. Same-agency
+        /// repeat returns <paramref name="agencyId"/> idempotently (legitimate re-
+        /// Accept after a state-machine update on the owning client).
+        ///
+        /// <para>Internal — exposed to <c>ServerTest</c> via <c>InternalsVisibleTo</c>
+        /// so the claim guard's atomic semantics can be pinned at unit level without
+        /// bringing up a wire harness.</para>
+        /// </summary>
+        internal static Guid TryClaimContract(Guid contractGuid, Guid agencyId)
+        {
+            return _claimedContracts.GetOrAdd(contractGuid, agencyId);
+        }
+
+        /// <summary>
+        /// Stage 5.18g — read-only probe for tests + future admin tooling. Returns
+        /// <c>true</c> with <paramref name="claimant"/> set when the contract guid has
+        /// a recorded claim; <c>false</c> otherwise.
+        /// </summary>
+        internal static bool TryGetContractClaimant(Guid contractGuid, out Guid claimant)
+        {
+            return _claimedContracts.TryGetValue(contractGuid, out claimant);
+        }
+
+        /// <summary>
+        /// Stage 5.18g — count of recorded claims. For tests that need to verify the
+        /// pre-seed populated N entries, or that <see cref="ResetClaimedContracts"/>
+        /// emptied the map. Not for production use.
+        /// </summary>
+        internal static int ClaimedContractsCount => _claimedContracts.Count;
+
+        /// <summary>
+        /// Stage 5.18g — boot-time pre-seed of <see cref="_claimedContracts"/> from the
+        /// persisted per-agency Contracts list. Called once per loaded
+        /// <see cref="AgencyState"/> from <see cref="AgencySystem.LoadExistingAgencies"/>.
+        /// Closes the post-restart double-claim window: Agency A persisted a claim before
+        /// the restart; Agency B is the first to reconnect after the restart; without
+        /// pre-seed, B could Accept the same guid and win the in-memory race despite A's
+        /// disk-persisted claim. Uses <see cref="ConcurrentDictionary{TKey,TValue}.TryAdd"/>
+        /// — if the same guid somehow appears across two agencies' persisted state (an
+        /// already-broken pre-5.18g universe), the first call wins and subsequent calls
+        /// silently fail, leaving the data on disk untouched. Operator must clean up
+        /// duplicated guids via <c>setvesselagency</c> / <c>transferagency</c>; this method
+        /// preserves the pre-5.18g state rather than overwriting it.
+        /// </summary>
+        internal static void PreSeedClaimsFromAgencyState(Guid agencyId, AgencyState agency)
+        {
+            if (agency?.Contracts == null) return;
+            foreach (var contract in agency.Contracts)
+            {
+                if (contract == null) continue;
+                if (!_claimedContracts.TryAdd(contract.ContractGuid, agencyId)
+                    && _claimedContracts.TryGetValue(contract.ContractGuid, out var existing)
+                    && existing != agencyId)
+                {
+                    // [Stage 5.18g upgrade-lens follow-up] Operator-visible diagnostic
+                    // for a pre-broken (pre-5.18g) universe where the same contract
+                    // guid persisted under two different agencies. We preserve the
+                    // first-seed (prior loop iteration on a different agency); the
+                    // duplicate Contracts entry on the second agency's disk is now a
+                    // zombie that can never re-Accept/complete. Recovery is operator
+                    // hand-edit of Universe/Agencies/{guid}.txt — no admin command
+                    // currently expunges per-agency contract entries.
+                    LunaLog.Warning(
+                        $"[fix:per-agency-career] Pre-seed collision on contract {contract.ContractGuid:N}: agency {existing:N} already claims it but agency {agencyId:N} also has it persisted. First-wins kept agency {existing:N}; the duplicate entry in agency {agencyId:N}'s state is now a zombie. Operator may need to hand-edit Universe/Agencies/{agencyId:N}.txt to remove the duplicate CONTRACT child.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Stage 5.18g — clears the claim map. Intended for test isolation in
+        /// <c>ServerHarness.ResetPerTestState</c> (matches the existing
+        /// <c>ScenarioStoreSystem.CurrentScenarios.Clear()</c> precedent). Not for
+        /// production use — clearing during normal server operation re-opens the
+        /// simultaneous-Accept race.
+        /// </summary>
+        internal static void ResetClaimedContracts()
+        {
+            _claimedContracts.Clear();
+        }
+
+        /// <summary>
+        /// Stage 5.18g multi-lens review follow-up — evicts every claim keyed by the
+        /// supplied <paramref name="agencyId"/>. Called from
+        /// <c>DeleteAgencyCommand</c> after <see cref="AgencySystem.Agencies"/> removal:
+        /// without this, the deleted agency's id continues to "win" every contract
+        /// guid it once held. The original owner reconnecting + minting a fresh
+        /// agency would then see silent drops with a Warning naming a guid that no
+        /// longer exists in the registry.
+        ///
+        /// <para><b>Race-free.</b> Iterates a snapshot of <see cref="_claimedContracts"/>
+        /// (Keys enumeration is concurrent-safe) and uses
+        /// <see cref="ConcurrentDictionary{TKey,TValue}.TryRemove(TKey, out TValue)"/>
+        /// per entry. A concurrent ApplyPerAgencyBatch on a different agency cannot
+        /// be affected (foreign keys aren't touched). A concurrent ApplyPerAgencyBatch
+        /// from the deleted agency's old player is structurally impossible — by the
+        /// time this method runs, <c>AgencyByPlayerName</c> no longer maps to the
+        /// deleted agency and any in-flight Share* message will fall through to the
+        /// legacy path because <see cref="AgencyCurrencyRouter.TryResolveAgency"/>
+        /// returns false.</para>
+        /// </summary>
+        /// <returns>The number of claims evicted.</returns>
+        internal static int EvictClaimsForAgency(Guid agencyId)
+        {
+            var evicted = 0;
+            foreach (var kvp in _claimedContracts)
+            {
+                if (kvp.Value == agencyId && _claimedContracts.TryRemove(kvp.Key, out _))
+                    evicted++;
+            }
+            return evicted;
         }
     }
 }

@@ -223,6 +223,13 @@ namespace Server.System.Agency
                     {
                         if (!string.IsNullOrEmpty(state.OwningPlayerName))
                             AgencyByPlayerName[state.OwningPlayerName] = state.AgencyId;
+                        // Stage 5.18g — rebuild the per-ContractGuid claim map from the
+                        // persisted per-agency Contracts list. Closes the post-restart
+                        // double-claim window where Agency A's claim is on disk but
+                        // Agency B reconnects first and could otherwise win the in-
+                        // memory race despite A's persisted claim. See
+                        // AgencyContractRouter._claimedContracts XML for the contract.
+                        AgencyContractRouter.PreSeedClaimsFromAgencyState(state.AgencyId, state);
                         loadedCount++;
                     }
                 }
@@ -233,6 +240,14 @@ namespace Server.System.Agency
             }
 
             LunaLog.Normal($"[fix:per-agency-career] Loaded {loadedCount} per-agency career state(s) from disk");
+
+            // [Stage 5.18g multi-lens follow-up] Report the pre-seeded contract claim
+            // count so operators restarting mid-playtest can correlate any
+            // subsequent "Dropped duplicate Accept" Warning with the boot-time
+            // claim inventory. Quiet when zero — fresh universes don't need the noise.
+            var claimCount = AgencyContractRouter.ClaimedContractsCount;
+            if (claimCount > 0)
+                LunaLog.Normal($"[fix:per-agency-career] Pre-seeded {claimCount} contract claim(s) from persisted per-agency state");
 
             // [Stage 5.17a round-1 upgrade-lens review] Per-orphan-agency vessel warning.
             // If a vessel's lmpOwningAgency points at an agency-id that didn't load (file
@@ -1604,8 +1619,16 @@ namespace Server.System.Agency
             if (state == null)
                 return null;
 
-            if (Agencies.TryAdd(state.AgencyId, state) && !string.IsNullOrEmpty(state.OwningPlayerName))
-                AgencyByPlayerName[state.OwningPlayerName] = state.AgencyId;
+            if (Agencies.TryAdd(state.AgencyId, state))
+            {
+                if (!string.IsNullOrEmpty(state.OwningPlayerName))
+                    AgencyByPlayerName[state.OwningPlayerName] = state.AgencyId;
+                // Stage 5.18g — mirror the boot-path pre-seed for runtime disk-load
+                // fallback paths (heal-on-bak recovery, admin disk-edit-then-reload).
+                // If this method is hit, the registry didn't already contain the
+                // agency; the persisted Contracts list now must seed the claim map.
+                AgencyContractRouter.PreSeedClaimsFromAgencyState(state.AgencyId, state);
+            }
 
             return state;
         }
@@ -1870,6 +1893,18 @@ namespace Server.System.Agency
                     // that does will receive a fresh uncontended lock from
                     // GetAgencyLock on next call, which is safe.
                     AgencyLocks.TryRemove(agencyId, out _);
+
+                    // [Stage 5.18g multi-lens follow-up] Evict the deleted agency's
+                    // contract claims. Without this, the in-memory claim map at
+                    // AgencyContractRouter._claimedContracts retains entries pointing
+                    // at this now-deleted agency id forever, blocking any future
+                    // re-Accept of those contract guids by a fresh agency under the
+                    // same player. Evict outside the registry-update step but inside
+                    // the same caller lock so the deletion-claim-eviction sequence
+                    // appears atomic to concurrent ApplyPerAgencyBatch readers.
+                    var evictedClaims = AgencyContractRouter.EvictClaimsForAgency(agencyId);
+                    if (evictedClaims > 0)
+                        LunaLog.Normal($"[fix:per-agency-career] Evicted {evictedClaims} contract claim(s) for deleted agency {agencyId:N}");
                 }
             }
 
