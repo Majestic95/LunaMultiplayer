@@ -118,8 +118,28 @@ namespace MockClientTest
         public void ExistingOwner_NotOverwritten_OnProtoFromDifferentAgency()
         {
             // First-owner-wins: once a vessel has an lmpOwningAgency, a re-proto from a player
-            // in a DIFFERENT agency must preserve the original owner (the only legitimate
+            // in a DIFFERENT agency must NOT change the original owner (the only legitimate
             // ownership mutation is the admin transferagency command — Stage 5.18d).
+            //
+            // [v4-proto-write-guard, commit 68c22c5c, session 39] The mechanism has CHANGED.
+            // Pre-v4: Bob's proto was ACCEPTED at the server; ingest ran; the 5.16b stamp
+            //   "existing-wins" branch preserved Alice's OwningAgencyId on the new Vessel
+            //   instance. AuthSubspace flipped to Bob's (2). OwningAgencyId stayed Alice's.
+            // v4+: Bob's proto is REJECTED at the receive thread by RejectIfCrossAgencyWrite
+            //   before RawConfigNodeInsertOrUpdate runs. The existing Vessel object in
+            //   CurrentVessels is UNCHANGED (same reference; AuthSubspace stays at Alice's 1;
+            //   OwningAgencyId stays at Alice's). The 5.16b "existing-wins" branch is no
+            //   longer structurally reachable for the cross-agency case — it's redundant
+            //   with the proto-guard for that branch. (Still load-bearing for same-agency
+            //   re-proto + Unassigned-sentinel re-proto cases — both bypass the guard and
+            //   exercise the stamp logic normally.)
+            //
+            // The test's spirit ("cross-agency cannot change the owner") is preserved; the
+            // mechanism is stronger (rejection vs preservation). Assertions updated to
+            // verify the unchanged-vessel behavior rather than the now-unreachable stamp
+            // branch. Sibling regression-pin lives at
+            // MockClientTest/ProtoCrossAgencyRejectionTest (the dedicated v4 proto-guard
+            // wire-level coverage).
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
             GeneralSettings.SettingsStore.GameMode = GameMode.Career;
 
@@ -148,16 +168,30 @@ namespace MockClientTest
                 Assert.AreNotEqual(agencyA, agencyB, "Players must have distinct agencies for this test to be meaningful.");
                 SetClientSubspace(playerB, 2);
 
-                // Same vessel id, valid bytes, sent from player B. WarpSystem.IsStrictlyPast(2, 1)
-                // is false (subspace 2 is future of subspace 1), so the proto is accepted —
-                // ingest runs and the OwningAgency preserve-existing branch fires.
+                // Capture the pre-attack Vessel reference so the post-attack assertion can
+                // prove the dict entry was NOT replaced (object identity preserved == proto
+                // rejected before RawConfigNodeInsertOrUpdate's AddOrUpdate fired).
+                Assert.IsTrue(VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var originalVesselRef));
+
+                // Bob (different agency) crafts a proto for Alice's vessel-id.
+                // [v4-proto-write-guard] HandleVesselProto's RejectIfCrossAgencyWrite returns
+                // true on this cross-agency send; the proto is silently dropped; no relay
+                // happens; the in-store Vessel reference is unchanged.
                 SendProto(clientB, vesselId, SampleVesselText.Value);
 
-                var afterB = WaitForVesselAuthStamp(vesselId, expectedAuthSubspace: 2,
-                    TimeSpan.FromSeconds(3));
-                Assert.IsNotNull(afterB, "Player B's proto was never processed (AuthSubspace did not flip to 2).");
+                // Allow time for any incorrect processing to settle. If the proto were
+                // accepted, RawConfigNodeInsertOrUpdate's Task.Run would have replaced the
+                // vessel reference + flipped AuthSubspace to 2 within this window.
+                System.Threading.Thread.Sleep(500);
+
+                Assert.IsTrue(VesselStoreSystem.CurrentVessels.TryGetValue(vesselId, out var afterB),
+                    "Vessel must still be in the store after Bob's rejected proto.");
+                Assert.AreSame(originalVesselRef, afterB,
+                    "Vessel reference in CurrentVessels changed — Bob's cross-agency proto was persisted.");
+                Assert.AreEqual(1, afterB.AuthoritativeSubspaceId,
+                    "AuthSubspace flipped to Bob's (2) — proto-guard failed to reject the cross-agency send.");
                 Assert.AreEqual(agencyA, afterB.OwningAgencyId,
-                    "Subsequent proto from a different agency must NOT overwrite the original owner.");
+                    "OwningAgencyId changed — first-owner-wins invariant broken.");
                 Assert.AreNotEqual(agencyB, afterB.OwningAgencyId,
                     "Sender's agency (B) leaked onto an already-owned vessel.");
             }
