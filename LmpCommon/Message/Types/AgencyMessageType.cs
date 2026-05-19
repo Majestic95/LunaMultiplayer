@@ -38,5 +38,21 @@ namespace LmpCommon.Message.Types
         // GATE-STATE-INDEPENDENT (runs under both PerAgencyCareer=true and
         // PerAgencyCareer=false — strict improvement under gate=off).
         OrbitalState = 8,
+        // [Phase 4 Slice A] WOLF per-agency partition. 5 slots — one per WOLF
+        // entity type in ScenarioPersister (depot / route / hopper / terminal /
+        // crew route). Same trust posture + dual-direction usage as the Phase 3
+        // routers. Slice A ships the wire shape + enum slots + AgencyState dicts;
+        // Slices B-E add per-router dispatch + client-side postfixes + projector
+        // splice on WOLF_ScenarioModule. Cross-agency CrewRoute kerbal authority
+        // gate (Slice E) is the distinctive Phase 4 surface — uses vessel-proxy
+        // authority via KerbalAgencyResolver (mirrors the K1 grief guard pattern
+        // from Stage 5.17e-8). v5 release with this surface requires a protocol
+        // bump (0.31.0 → 0.32.0) to force a clean cohort split — see Phase 4
+        // pre-spec §12 + LmpVersioning.cs cross-compat check.
+        WolfDepotState = 9,
+        WolfRouteState = 10,
+        WolfHopperState = 11,
+        WolfTerminalState = 12,
+        WolfCrewRouteState = 13,
     }
 }

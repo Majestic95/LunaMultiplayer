@@ -54,6 +54,14 @@ namespace LmpCommon.Message.Server
             [(ushort)AgencyMessageType.PlanetaryState] = typeof(AgencyPlanetaryStateMsgData),
             // [Phase 3 Slice D] MUST stay in lockstep with AgencyCliMsg.cs — BUG-010 wire-symmetry rule.
             [(ushort)AgencyMessageType.OrbitalState] = typeof(AgencyOrbitalStateMsgData),
+            // [Phase 4 Slice A] WOLF per-agency partition. 5 slots — wire shape only;
+            // Slices B-E add the router dispatch in AgencyMsgReader + senders + projector.
+            // MUST stay in lockstep with AgencyCliMsg.cs — BUG-010 wire-symmetry rule.
+            [(ushort)AgencyMessageType.WolfDepotState] = typeof(AgencyWolfDepotStateMsgData),
+            [(ushort)AgencyMessageType.WolfRouteState] = typeof(AgencyWolfRouteStateMsgData),
+            [(ushort)AgencyMessageType.WolfHopperState] = typeof(AgencyWolfHopperStateMsgData),
+            [(ushort)AgencyMessageType.WolfTerminalState] = typeof(AgencyWolfTerminalStateMsgData),
+            [(ushort)AgencyMessageType.WolfCrewRouteState] = typeof(AgencyWolfCrewRouteStateMsgData),
         };
 
         public override ServerMessageType MessageType => ServerMessageType.Agency;

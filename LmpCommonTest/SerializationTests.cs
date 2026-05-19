@@ -700,6 +700,185 @@ namespace LmpCommonTest
             Assert.AreEqual(0, deserialised.RemovedPlanetaryKeys.Length);
         }
 
+        // -----------------------------------------------------------------------
+        // [Phase 4 Slice A — WOLF] Wire round-trip pinning for the 5 new
+        // MsgData types. Mirrors the Phase 3 KolonyState / PlanetaryState /
+        // OrbitalState shape — one populated-batch test per type covers
+        // wire-protocol + nested-list preservation. Forward-compat tails +
+        // empty-batch + Cli-direction symmetry are implicitly covered by the
+        // shared helpers (RoundTripServer / RoundTripClient) — if any of the
+        // 5 SubTypeDictionary appends desyncs, the round-trip would throw.
+        // -----------------------------------------------------------------------
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyWolfDepotStateMsg()
+        {
+            var msgData = Factory.CreateNewMessageData<AgencyWolfDepotStateMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.EntryCount = 1;
+            msgData.Entries = new[]
+            {
+                new AgencyWolfDepotEntry
+                {
+                    Body = "Duna",
+                    Biome = "Lowlands",
+                    IsEstablished = true,
+                    IsSurveyed = true,
+                    ResourceStreams = new System.Collections.Generic.List<AgencyWolfResourceStreamEntry>
+                    {
+                        new AgencyWolfResourceStreamEntry { ResourceName = "Hydrates", Incoming = 1000, Outgoing = 250 },
+                    },
+                },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyWolfDepotStateMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual(1, roundTripped.EntryCount);
+            Assert.AreEqual("Duna", roundTripped.Entries[0].Body);
+            Assert.AreEqual("Lowlands", roundTripped.Entries[0].Biome);
+            Assert.IsTrue(roundTripped.Entries[0].IsEstablished);
+            Assert.IsTrue(roundTripped.Entries[0].IsSurveyed);
+            Assert.AreEqual(1, roundTripped.Entries[0].ResourceStreams.Count);
+            Assert.AreEqual("Hydrates", roundTripped.Entries[0].ResourceStreams[0].ResourceName);
+            Assert.AreEqual(1000, roundTripped.Entries[0].ResourceStreams[0].Incoming);
+            Assert.AreEqual(250, roundTripped.Entries[0].ResourceStreams[0].Outgoing);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyWolfRouteStateMsg()
+        {
+            var msgData = Factory.CreateNewMessageData<AgencyWolfRouteStateMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.EntryCount = 1;
+            msgData.Entries = new[]
+            {
+                new AgencyWolfRouteEntry
+                {
+                    OriginBody = "Duna",
+                    OriginBiome = "Lowlands",
+                    DestinationBody = "Ike",
+                    DestinationBiome = "Highlands",
+                    Payload = 5000,
+                    Resources = new System.Collections.Generic.List<AgencyWolfRouteResourceEntry>
+                    {
+                        new AgencyWolfRouteResourceEntry { ResourceName = "Fuel", Quantity = 2000 },
+                    },
+                },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyWolfRouteStateMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual("Duna", roundTripped.Entries[0].OriginBody);
+            Assert.AreEqual("Ike", roundTripped.Entries[0].DestinationBody);
+            Assert.AreEqual(5000, roundTripped.Entries[0].Payload);
+            Assert.AreEqual(1, roundTripped.Entries[0].Resources.Count);
+            Assert.AreEqual("Fuel", roundTripped.Entries[0].Resources[0].ResourceName);
+            Assert.AreEqual(2000, roundTripped.Entries[0].Resources[0].Quantity);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyWolfHopperStateMsg()
+        {
+            var msgData = Factory.CreateNewMessageData<AgencyWolfHopperStateMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.EntryCount = 1;
+            msgData.Entries = new[]
+            {
+                new AgencyWolfHopperEntry
+                {
+                    Id = "550e8400-e29b-41d4-a716-446655440000",   // Guid WITH hyphens (WOLF source convention)
+                    Body = "Mun",
+                    Biome = "Highlands",
+                    Recipe = "Hydrates,100,MetallicOre,50",
+                },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyWolfHopperStateMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual("550e8400-e29b-41d4-a716-446655440000", roundTripped.Entries[0].Id,
+                "Hopper Id must preserve hyphens on wire round-trip");
+            Assert.AreEqual("Mun", roundTripped.Entries[0].Body);
+            Assert.AreEqual("Hydrates,100,MetallicOre,50", roundTripped.Entries[0].Recipe);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyWolfTerminalStateMsg()
+        {
+            var msgData = Factory.CreateNewMessageData<AgencyWolfTerminalStateMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.EntryCount = 1;
+            msgData.Entries = new[]
+            {
+                new AgencyWolfTerminalEntry
+                {
+                    Id = "550e8400e29b41d4a716446655440000",   // Guid "N" form (no hyphens — WOLF source convention)
+                    Body = "Eve",
+                    Biome = "Foothills",
+                },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyWolfTerminalStateMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual("550e8400e29b41d4a716446655440000", roundTripped.Entries[0].Id,
+                "Terminal Id must preserve N-form (no hyphens) on wire round-trip");
+            Assert.AreEqual("Eve", roundTripped.Entries[0].Body);
+            Assert.AreEqual("Foothills", roundTripped.Entries[0].Biome);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeAgencyWolfCrewRouteStateMsg()
+        {
+            var msgData = Factory.CreateNewMessageData<AgencyWolfCrewRouteStateMsgData>();
+            msgData.AgencyId = Guid.NewGuid();
+            msgData.EntryCount = 1;
+            var uniqueId = Guid.NewGuid().ToString("N");
+            msgData.Entries = new[]
+            {
+                new AgencyWolfCrewRouteEntry
+                {
+                    ArrivalTime = 123456.789012,
+                    OriginBody = "Kerbin",
+                    OriginBiome = "Shores",
+                    DestinationBody = "Mun",
+                    DestinationBiome = "Crater",
+                    Duration = 21600.5,
+                    EconomyBerths = 4,
+                    LuxuryBerths = 2,
+                    FlightNumber = "7AB",
+                    FlightStatus = "Enroute",
+                    UniqueId = uniqueId,
+                    Passengers = new System.Collections.Generic.List<AgencyWolfPassengerEntry>
+                    {
+                        new AgencyWolfPassengerEntry { Name = "Jebediah Kerman", DisplayName = "Jebediah Kerman", IsTourist = false, Occupation = "Pilot", Stars = 5 },
+                        new AgencyWolfPassengerEntry { Name = "Tourist Alice", DisplayName = "Tourist Alice", IsTourist = true, Occupation = "Tourist", Stars = 0 },
+                    },
+                },
+            };
+
+            var roundTripped = RoundTripServer<AgencySrvMsg, AgencyWolfCrewRouteStateMsgData>(msgData);
+
+            Assert.AreEqual(msgData.AgencyId, roundTripped.AgencyId);
+            Assert.AreEqual(123456.789012, roundTripped.Entries[0].ArrivalTime, 1e-9);
+            Assert.AreEqual(21600.5, roundTripped.Entries[0].Duration, 1e-9);
+            Assert.AreEqual("Kerbin", roundTripped.Entries[0].OriginBody);
+            Assert.AreEqual("Mun", roundTripped.Entries[0].DestinationBody);
+            Assert.AreEqual(4, roundTripped.Entries[0].EconomyBerths);
+            Assert.AreEqual(2, roundTripped.Entries[0].LuxuryBerths);
+            Assert.AreEqual("7AB", roundTripped.Entries[0].FlightNumber);
+            Assert.AreEqual("Enroute", roundTripped.Entries[0].FlightStatus);
+            Assert.AreEqual(uniqueId, roundTripped.Entries[0].UniqueId);
+            Assert.AreEqual(2, roundTripped.Entries[0].Passengers.Count);
+            Assert.AreEqual("Jebediah Kerman", roundTripped.Entries[0].Passengers[0].Name);
+            Assert.IsFalse(roundTripped.Entries[0].Passengers[0].IsTourist);
+            Assert.AreEqual(5, roundTripped.Entries[0].Passengers[0].Stars);
+            Assert.AreEqual("Tourist Alice", roundTripped.Entries[0].Passengers[1].Name);
+            Assert.IsTrue(roundTripped.Entries[0].Passengers[1].IsTourist);
+        }
+
         [TestMethod]
         public void TestSerializeDeserializeAgencyStateMsg()
         {

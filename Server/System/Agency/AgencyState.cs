@@ -268,6 +268,79 @@ namespace Server.System.Agency
             new Dictionary<string, AgencyDMagicAnomalyEntry>(StringComparer.Ordinal);
 
         /// <summary>
+        /// [Phase 4 Slice A — WOLF] Per-agency depot pool (MKS' WOLF
+        /// <c>ScenarioPersister.Depots</c>). Keyed by <c>$"{Body}|{Biome}"</c>
+        /// (Ordinal compare). Two agencies CAN each have a depot at the same
+        /// (Body, Biome) — they live in separate per-agency dicts; the projector
+        /// emits only the requesting agency's depots into outgoing
+        /// <c>WOLF_ScenarioModule</c> blobs. Populated by Phase 4
+        /// <c>AgencyWolfDepotRouter</c> (Slice B); persisted under
+        /// <c>WOLF_DEPOTS</c> child node.
+        ///
+        /// <para><b>Concurrency contract</b>: same as <see cref="KolonyEntries"/>.</para>
+        /// </summary>
+        public Dictionary<string, AgencyWolfDepotEntry> WolfDepots { get; } =
+            new Dictionary<string, AgencyWolfDepotEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Phase 4 Slice A — WOLF] Per-agency cargo-route pool (MKS' WOLF
+        /// <c>ScenarioPersister.Routes</c>). Keyed by 4-string composite
+        /// <c>$"{OriginBody}|{OriginBiome}|{DestinationBody}|{DestinationBiome}"</c>
+        /// (Ordinal compare) mirroring WOLF's own <c>GetRoute</c> +
+        /// <c>HasRoute</c> lookup semantics. Populated by
+        /// <c>AgencyWolfRouteRouter</c> (Slice C); persisted under
+        /// <c>WOLF_ROUTES</c> child node.
+        ///
+        /// <para><b>Concurrency contract</b>: same as <see cref="KolonyEntries"/>.</para>
+        /// </summary>
+        public Dictionary<string, AgencyWolfRouteEntry> WolfRoutes { get; } =
+            new Dictionary<string, AgencyWolfRouteEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Phase 4 Slice A — WOLF] Per-agency hopper pool (MKS' WOLF
+        /// <c>ScenarioPersister.Hoppers</c>). Keyed by
+        /// <c>HopperMetadata.Id</c> — Guid in <c>ToString()</c> form WITH
+        /// hyphens (matches WOLF's <c>HopperMetadata.cs:18</c>). Distinct from
+        /// <see cref="WolfTerminals"/>' "N" form — do NOT normalize at any
+        /// boundary. Populated by <c>AgencyWolfHopperRouter</c> (Slice D);
+        /// persisted under <c>WOLF_HOPPERS</c> child node.
+        ///
+        /// <para><b>Concurrency contract</b>: same as <see cref="KolonyEntries"/>.</para>
+        /// </summary>
+        public Dictionary<string, AgencyWolfHopperEntry> WolfHoppers { get; } =
+            new Dictionary<string, AgencyWolfHopperEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Phase 4 Slice A — WOLF] Per-agency terminal pool (MKS' WOLF
+        /// <c>ScenarioPersister.Terminals</c>). Keyed by
+        /// <c>TerminalMetadata.Id</c> — Guid in <c>ToString("N")</c> form
+        /// (no hyphens; matches WOLF's <c>TerminalMetadata.cs:15</c>).
+        /// Distinct from <see cref="WolfHoppers"/>' with-hyphens form.
+        /// Populated by <c>AgencyWolfTerminalRouter</c> (Slice D); persisted
+        /// under <c>WOLF_TERMINALS</c> child node.
+        ///
+        /// <para><b>Concurrency contract</b>: same as <see cref="KolonyEntries"/>.</para>
+        /// </summary>
+        public Dictionary<string, AgencyWolfTerminalEntry> WolfTerminals { get; } =
+            new Dictionary<string, AgencyWolfTerminalEntry>(StringComparer.Ordinal);
+
+        /// <summary>
+        /// [Phase 4 Slice A — WOLF] Per-agency crew-route pool (MKS' WOLF
+        /// <c>ScenarioPersister.CrewRoutes</c>). Keyed by
+        /// <c>CrewRoute.UniqueId</c> — Guid in <c>ToString("N")</c> form
+        /// (matches WOLF's <c>CrewRoute.cs:90</c>). Populated by
+        /// <c>AgencyWolfCrewRouter</c> (Slice E) with the cross-agency kerbal
+        /// authority gate (vessel-proxy authority via
+        /// <c>KerbalAgencyResolver</c>; mirrors the K1 grief guard pattern
+        /// from Stage 5.17e-8). Persisted under <c>WOLF_CREWROUTES</c> child
+        /// node.
+        ///
+        /// <para><b>Concurrency contract</b>: same as <see cref="KolonyEntries"/>.</para>
+        /// </summary>
+        public Dictionary<string, AgencyWolfCrewRouteEntry> WolfCrewRoutes { get; } =
+            new Dictionary<string, AgencyWolfCrewRouteEntry>(StringComparer.Ordinal);
+
+        /// <summary>
         /// Universe-relative folder that holds one ConfigNode-format file per agency.
         /// Created at server boot via <see cref="Server.Context.Universe.CheckUniverse"/>
         /// alongside the other Universe child folders, so <see cref="FileHandler.WriteAtomic"/>
@@ -691,6 +764,166 @@ namespace Server.System.Agency
                         }
                     }
                     scannersRoot.AddNode(vNode);
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Depot pool. Each WOLF_DEPOT carries
+            // Body/Biome/IsEstablished/IsSurveyed plus a nested
+            // WOLF_RESOURCE_STREAMS child holding per-stream entries.
+            // Emitted only when non-empty so pristine pre-Phase-4 agency
+            // files stay visually identical.
+            if (WolfDepots.Count > 0)
+            {
+                var depotsRoot = new ConfigNode("") { Name = "WOLF_DEPOTS" };
+                node.AddNode(depotsRoot);
+                foreach (var entry in WolfDepots.Values)
+                {
+                    if (entry == null)
+                        continue;
+                    var dNode = new ConfigNode("") { Name = "WOLF_DEPOT" };
+                    dNode.CreateValue(new CfgNodeValue<string, string>("Body", entry.Body ?? string.Empty));
+                    dNode.CreateValue(new CfgNodeValue<string, string>("Biome", entry.Biome ?? string.Empty));
+                    dNode.CreateValue(new CfgNodeValue<string, string>("IsEstablished", entry.IsEstablished.ToString(CultureInfo.InvariantCulture)));
+                    dNode.CreateValue(new CfgNodeValue<string, string>("IsSurveyed", entry.IsSurveyed.ToString(CultureInfo.InvariantCulture)));
+
+                    if (entry.ResourceStreams != null && entry.ResourceStreams.Count > 0)
+                    {
+                        var streamsRoot = new ConfigNode("") { Name = "WOLF_RESOURCE_STREAMS" };
+                        dNode.AddNode(streamsRoot);
+                        foreach (var stream in entry.ResourceStreams)
+                        {
+                            if (stream == null || string.IsNullOrEmpty(stream.ResourceName))
+                                continue;
+                            var sNode = new ConfigNode("") { Name = "WOLF_RESOURCE_STREAM" };
+                            sNode.CreateValue(new CfgNodeValue<string, string>("ResourceName", stream.ResourceName));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("Incoming", stream.Incoming.ToString(CultureInfo.InvariantCulture)));
+                            sNode.CreateValue(new CfgNodeValue<string, string>("Outgoing", stream.Outgoing.ToString(CultureInfo.InvariantCulture)));
+                            streamsRoot.AddNode(sNode);
+                        }
+                    }
+                    depotsRoot.AddNode(dNode);
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Route pool. Each WOLF_ROUTE carries the
+            // 4-string origin/destination composite + Payload, plus a nested
+            // WOLF_ROUTE_RESOURCES child holding per-resource entries.
+            if (WolfRoutes.Count > 0)
+            {
+                var routesRoot = new ConfigNode("") { Name = "WOLF_ROUTES" };
+                node.AddNode(routesRoot);
+                foreach (var entry in WolfRoutes.Values)
+                {
+                    if (entry == null)
+                        continue;
+                    var rNode = new ConfigNode("") { Name = "WOLF_ROUTE" };
+                    rNode.CreateValue(new CfgNodeValue<string, string>("OriginBody", entry.OriginBody ?? string.Empty));
+                    rNode.CreateValue(new CfgNodeValue<string, string>("OriginBiome", entry.OriginBiome ?? string.Empty));
+                    rNode.CreateValue(new CfgNodeValue<string, string>("DestinationBody", entry.DestinationBody ?? string.Empty));
+                    rNode.CreateValue(new CfgNodeValue<string, string>("DestinationBiome", entry.DestinationBiome ?? string.Empty));
+                    rNode.CreateValue(new CfgNodeValue<string, string>("Payload", entry.Payload.ToString(CultureInfo.InvariantCulture)));
+
+                    if (entry.Resources != null && entry.Resources.Count > 0)
+                    {
+                        var resourcesRoot = new ConfigNode("") { Name = "WOLF_ROUTE_RESOURCES" };
+                        rNode.AddNode(resourcesRoot);
+                        foreach (var res in entry.Resources)
+                        {
+                            if (res == null || string.IsNullOrEmpty(res.ResourceName))
+                                continue;
+                            var resNode = new ConfigNode("") { Name = "WOLF_ROUTE_RESOURCE" };
+                            resNode.CreateValue(new CfgNodeValue<string, string>("ResourceName", res.ResourceName));
+                            resNode.CreateValue(new CfgNodeValue<string, string>("Quantity", res.Quantity.ToString(CultureInfo.InvariantCulture)));
+                            resourcesRoot.AddNode(resNode);
+                        }
+                    }
+                    routesRoot.AddNode(rNode);
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Hopper pool. Each WOLF_HOPPER carries
+            // Id (Guid with hyphens — preserve WOLF's source format) + Body +
+            // Biome + flat Recipe ingredient string.
+            if (WolfHoppers.Count > 0)
+            {
+                var hoppersRoot = new ConfigNode("") { Name = "WOLF_HOPPERS" };
+                node.AddNode(hoppersRoot);
+                foreach (var entry in WolfHoppers.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.Id))
+                        continue;
+                    var hNode = new ConfigNode("") { Name = "WOLF_HOPPER" };
+                    hNode.CreateValue(new CfgNodeValue<string, string>("Id", entry.Id));
+                    hNode.CreateValue(new CfgNodeValue<string, string>("Body", entry.Body ?? string.Empty));
+                    hNode.CreateValue(new CfgNodeValue<string, string>("Biome", entry.Biome ?? string.Empty));
+                    hNode.CreateValue(new CfgNodeValue<string, string>("Recipe", entry.Recipe ?? string.Empty));
+                    hoppersRoot.AddNode(hNode);
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Terminal pool. Each WOLF_TERMINAL
+            // carries Id (Guid "N" form — no hyphens) + Body + Biome.
+            if (WolfTerminals.Count > 0)
+            {
+                var terminalsRoot = new ConfigNode("") { Name = "WOLF_TERMINALS" };
+                node.AddNode(terminalsRoot);
+                foreach (var entry in WolfTerminals.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.Id))
+                        continue;
+                    var tNode = new ConfigNode("") { Name = "WOLF_TERMINAL" };
+                    tNode.CreateValue(new CfgNodeValue<string, string>("Id", entry.Id));
+                    tNode.CreateValue(new CfgNodeValue<string, string>("Body", entry.Body ?? string.Empty));
+                    tNode.CreateValue(new CfgNodeValue<string, string>("Biome", entry.Biome ?? string.Empty));
+                    terminalsRoot.AddNode(tNode);
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Crew-route pool. Each WOLF_CREWROUTE
+            // carries the route shape (origin/destination/berths/etc.) + a
+            // nested WOLF_PASSENGERS child with per-passenger entries.
+            // ArrivalTime + Duration use "R" + invariant culture per the
+            // BUG-013 / Invariant 9 precedent. FlightStatus persisted as the
+            // enum-name string to match WOLF's source convention.
+            if (WolfCrewRoutes.Count > 0)
+            {
+                var crewRoutesRoot = new ConfigNode("") { Name = "WOLF_CREWROUTES" };
+                node.AddNode(crewRoutesRoot);
+                foreach (var entry in WolfCrewRoutes.Values)
+                {
+                    if (entry == null || string.IsNullOrEmpty(entry.UniqueId))
+                        continue;
+                    var crNode = new ConfigNode("") { Name = "WOLF_CREWROUTE" };
+                    crNode.CreateValue(new CfgNodeValue<string, string>("ArrivalTime", entry.ArrivalTime.ToString("R", CultureInfo.InvariantCulture)));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("OriginBody", entry.OriginBody ?? string.Empty));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("OriginBiome", entry.OriginBiome ?? string.Empty));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("DestinationBody", entry.DestinationBody ?? string.Empty));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("DestinationBiome", entry.DestinationBiome ?? string.Empty));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("Duration", entry.Duration.ToString("R", CultureInfo.InvariantCulture)));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("EconomyBerths", entry.EconomyBerths.ToString(CultureInfo.InvariantCulture)));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("LuxuryBerths", entry.LuxuryBerths.ToString(CultureInfo.InvariantCulture)));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("FlightNumber", entry.FlightNumber ?? string.Empty));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("FlightStatus", entry.FlightStatus ?? string.Empty));
+                    crNode.CreateValue(new CfgNodeValue<string, string>("UniqueId", entry.UniqueId));
+
+                    if (entry.Passengers != null && entry.Passengers.Count > 0)
+                    {
+                        var passengersRoot = new ConfigNode("") { Name = "WOLF_PASSENGERS" };
+                        crNode.AddNode(passengersRoot);
+                        foreach (var passenger in entry.Passengers)
+                        {
+                            if (passenger == null || string.IsNullOrEmpty(passenger.Name))
+                                continue;
+                            var pNode = new ConfigNode("") { Name = "WOLF_PASSENGER" };
+                            pNode.CreateValue(new CfgNodeValue<string, string>("Name", passenger.Name));
+                            pNode.CreateValue(new CfgNodeValue<string, string>("DisplayName", passenger.DisplayName ?? string.Empty));
+                            pNode.CreateValue(new CfgNodeValue<string, string>("IsTourist", passenger.IsTourist.ToString(CultureInfo.InvariantCulture)));
+                            pNode.CreateValue(new CfgNodeValue<string, string>("Occupation", passenger.Occupation ?? string.Empty));
+                            pNode.CreateValue(new CfgNodeValue<string, string>("Stars", passenger.Stars.ToString(CultureInfo.InvariantCulture)));
+                            passengersRoot.AddNode(pNode);
+                        }
+                    }
+                    crewRoutesRoot.AddNode(crNode);
                 }
             }
 
@@ -1293,6 +1526,220 @@ namespace Server.System.Agency
                         Longitude = ParseDoubleOrZero(entryNode.GetValue("Longitude")?.Value),
                         Altitude = ParseDoubleOrZero(entryNode.GetValue("Altitude")?.Value),
                     };
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Depot pool parse. WOLF_DEPOTS is a
+            // Phase 4 addition; older AgencyState files predate it and load
+            // with an empty WolfDepots dict (forward-compat). Per-entry
+            // isolation: missing/empty Body OR Biome skips the slot with a
+            // Warning. Nested WOLF_RESOURCE_STREAMS parse handled inline.
+            var depotsRoot = node.GetNode("WOLF_DEPOTS")?.Value;
+            if (depotsRoot != null)
+            {
+                foreach (var dEntry in depotsRoot.GetNodes("WOLF_DEPOT"))
+                {
+                    var entryNode = dEntry.Value;
+                    var body = entryNode.GetValue("Body")?.Value;
+                    var biome = entryNode.GetValue("Biome")?.Value;
+                    if (string.IsNullOrEmpty(body) || string.IsNullOrEmpty(biome))
+                    {
+                        LunaLog.Warning($"[fix:WOLF-R4] WOLF_DEPOT entry skipped: missing Body or Biome");
+                        continue;
+                    }
+
+                    var entry = new AgencyWolfDepotEntry
+                    {
+                        Body = body,
+                        Biome = biome,
+                        IsEstablished = ParseBoolOrFalse(entryNode.GetValue("IsEstablished")?.Value),
+                        IsSurveyed = ParseBoolOrFalse(entryNode.GetValue("IsSurveyed")?.Value),
+                    };
+
+                    var streamsRoot = entryNode.GetNode("WOLF_RESOURCE_STREAMS")?.Value;
+                    if (streamsRoot != null)
+                    {
+                        foreach (var sEntry in streamsRoot.GetNodes("WOLF_RESOURCE_STREAM"))
+                        {
+                            var streamNode = sEntry.Value;
+                            var resName = streamNode.GetValue("ResourceName")?.Value;
+                            if (string.IsNullOrEmpty(resName))
+                            {
+                                LunaLog.Warning($"[fix:WOLF-R4] WOLF_RESOURCE_STREAM skipped under depot ({body}/{biome}): missing ResourceName");
+                                continue;
+                            }
+                            entry.ResourceStreams.Add(new AgencyWolfResourceStreamEntry
+                            {
+                                ResourceName = resName,
+                                Incoming = ParseIntOrZero(streamNode.GetValue("Incoming")?.Value),
+                                Outgoing = ParseIntOrZero(streamNode.GetValue("Outgoing")?.Value),
+                            });
+                        }
+                    }
+
+                    state.WolfDepots[$"{body}|{biome}"] = entry;
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Route pool parse. Same forward-compat
+            // shape as WOLF_DEPOTS. Per-entry isolation: missing any of the 4
+            // origin/destination strings skips the slot with a Warning.
+            var routesRoot = node.GetNode("WOLF_ROUTES")?.Value;
+            if (routesRoot != null)
+            {
+                foreach (var rEntry in routesRoot.GetNodes("WOLF_ROUTE"))
+                {
+                    var entryNode = rEntry.Value;
+                    var oBody = entryNode.GetValue("OriginBody")?.Value;
+                    var oBiome = entryNode.GetValue("OriginBiome")?.Value;
+                    var dBody = entryNode.GetValue("DestinationBody")?.Value;
+                    var dBiome = entryNode.GetValue("DestinationBiome")?.Value;
+                    if (string.IsNullOrEmpty(oBody) || string.IsNullOrEmpty(oBiome)
+                        || string.IsNullOrEmpty(dBody) || string.IsNullOrEmpty(dBiome))
+                    {
+                        LunaLog.Warning($"[fix:WOLF-R4] WOLF_ROUTE entry skipped: missing origin/destination Body or Biome");
+                        continue;
+                    }
+
+                    var entry = new AgencyWolfRouteEntry
+                    {
+                        OriginBody = oBody,
+                        OriginBiome = oBiome,
+                        DestinationBody = dBody,
+                        DestinationBiome = dBiome,
+                        Payload = ParseIntOrZero(entryNode.GetValue("Payload")?.Value),
+                    };
+
+                    var resourcesRoot = entryNode.GetNode("WOLF_ROUTE_RESOURCES")?.Value;
+                    if (resourcesRoot != null)
+                    {
+                        foreach (var resEntry in resourcesRoot.GetNodes("WOLF_ROUTE_RESOURCE"))
+                        {
+                            var resNode = resEntry.Value;
+                            var resName = resNode.GetValue("ResourceName")?.Value;
+                            if (string.IsNullOrEmpty(resName))
+                            {
+                                LunaLog.Warning($"[fix:WOLF-R4] WOLF_ROUTE_RESOURCE skipped under route ({oBody}/{oBiome}→{dBody}/{dBiome}): missing ResourceName");
+                                continue;
+                            }
+                            entry.Resources.Add(new AgencyWolfRouteResourceEntry
+                            {
+                                ResourceName = resName,
+                                Quantity = ParseIntOrZero(resNode.GetValue("Quantity")?.Value),
+                            });
+                        }
+                    }
+
+                    state.WolfRoutes[$"{oBody}|{oBiome}|{dBody}|{dBiome}"] = entry;
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Hopper pool parse. Per-entry isolation:
+            // missing/empty Id skips the slot.
+            var hoppersRoot = node.GetNode("WOLF_HOPPERS")?.Value;
+            if (hoppersRoot != null)
+            {
+                foreach (var hEntry in hoppersRoot.GetNodes("WOLF_HOPPER"))
+                {
+                    var entryNode = hEntry.Value;
+                    var id = entryNode.GetValue("Id")?.Value;
+                    if (string.IsNullOrEmpty(id))
+                    {
+                        LunaLog.Warning($"[fix:WOLF-R4] WOLF_HOPPER entry skipped: missing Id");
+                        continue;
+                    }
+
+                    state.WolfHoppers[id] = new AgencyWolfHopperEntry
+                    {
+                        Id = id,
+                        Body = entryNode.GetValue("Body")?.Value ?? string.Empty,
+                        Biome = entryNode.GetValue("Biome")?.Value ?? string.Empty,
+                        Recipe = entryNode.GetValue("Recipe")?.Value ?? string.Empty,
+                    };
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Terminal pool parse. Same shape as
+            // hoppers; per-entry isolation on missing Id.
+            var terminalsRoot = node.GetNode("WOLF_TERMINALS")?.Value;
+            if (terminalsRoot != null)
+            {
+                foreach (var tEntry in terminalsRoot.GetNodes("WOLF_TERMINAL"))
+                {
+                    var entryNode = tEntry.Value;
+                    var id = entryNode.GetValue("Id")?.Value;
+                    if (string.IsNullOrEmpty(id))
+                    {
+                        LunaLog.Warning($"[fix:WOLF-R4] WOLF_TERMINAL entry skipped: missing Id");
+                        continue;
+                    }
+
+                    state.WolfTerminals[id] = new AgencyWolfTerminalEntry
+                    {
+                        Id = id,
+                        Body = entryNode.GetValue("Body")?.Value ?? string.Empty,
+                        Biome = entryNode.GetValue("Biome")?.Value ?? string.Empty,
+                    };
+                }
+            }
+
+            // [Phase 4 Slice A — WOLF] Crew-route pool parse. Per-entry
+            // isolation: missing/empty UniqueId skips the slot. ArrivalTime +
+            // Duration use ParseDoubleOrZero which threads invariant culture
+            // per the BUG-013 / Invariant 9 precedent. Nested
+            // WOLF_PASSENGERS parse handled inline.
+            var crewRoutesRoot = node.GetNode("WOLF_CREWROUTES")?.Value;
+            if (crewRoutesRoot != null)
+            {
+                foreach (var crEntry in crewRoutesRoot.GetNodes("WOLF_CREWROUTE"))
+                {
+                    var entryNode = crEntry.Value;
+                    var uniqueId = entryNode.GetValue("UniqueId")?.Value;
+                    if (string.IsNullOrEmpty(uniqueId))
+                    {
+                        LunaLog.Warning($"[fix:WOLF-R4] WOLF_CREWROUTE entry skipped: missing UniqueId");
+                        continue;
+                    }
+
+                    var entry = new AgencyWolfCrewRouteEntry
+                    {
+                        ArrivalTime = ParseDoubleOrZero(entryNode.GetValue("ArrivalTime")?.Value),
+                        OriginBody = entryNode.GetValue("OriginBody")?.Value ?? string.Empty,
+                        OriginBiome = entryNode.GetValue("OriginBiome")?.Value ?? string.Empty,
+                        DestinationBody = entryNode.GetValue("DestinationBody")?.Value ?? string.Empty,
+                        DestinationBiome = entryNode.GetValue("DestinationBiome")?.Value ?? string.Empty,
+                        Duration = ParseDoubleOrZero(entryNode.GetValue("Duration")?.Value),
+                        EconomyBerths = ParseIntOrZero(entryNode.GetValue("EconomyBerths")?.Value),
+                        LuxuryBerths = ParseIntOrZero(entryNode.GetValue("LuxuryBerths")?.Value),
+                        FlightNumber = entryNode.GetValue("FlightNumber")?.Value ?? string.Empty,
+                        FlightStatus = entryNode.GetValue("FlightStatus")?.Value ?? string.Empty,
+                        UniqueId = uniqueId,
+                    };
+
+                    var passengersRoot = entryNode.GetNode("WOLF_PASSENGERS")?.Value;
+                    if (passengersRoot != null)
+                    {
+                        foreach (var pEntry in passengersRoot.GetNodes("WOLF_PASSENGER"))
+                        {
+                            var passengerNode = pEntry.Value;
+                            var passengerName = passengerNode.GetValue("Name")?.Value;
+                            if (string.IsNullOrEmpty(passengerName))
+                            {
+                                LunaLog.Warning($"[fix:WOLF-R4] WOLF_PASSENGER skipped under crew route '{uniqueId}': missing Name");
+                                continue;
+                            }
+                            entry.Passengers.Add(new AgencyWolfPassengerEntry
+                            {
+                                Name = passengerName,
+                                DisplayName = passengerNode.GetValue("DisplayName")?.Value ?? string.Empty,
+                                IsTourist = ParseBoolOrFalse(passengerNode.GetValue("IsTourist")?.Value),
+                                Occupation = passengerNode.GetValue("Occupation")?.Value ?? string.Empty,
+                                Stars = ParseIntOrZero(passengerNode.GetValue("Stars")?.Value),
+                            });
+                        }
+                    }
+
+                    state.WolfCrewRoutes[uniqueId] = entry;
                 }
             }
 
