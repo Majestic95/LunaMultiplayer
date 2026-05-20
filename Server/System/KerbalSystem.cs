@@ -118,14 +118,18 @@ namespace Server.System
         /// dual-channel EVA flow per spec §3), the tautology breaks and the helper
         /// MUST grow an explicit sender-vs-target agency check. Review SC-2.</para>
         ///
-        /// <para><b>Phase 6.8 cross-subdir rename — lock-domain constraint.</b>
-        /// Phase 6.8's <c>/setvesselagency</c> kerbal migration will move kerbal
-        /// files between agency subdirs. The move MUST acquire BOTH
-        /// <see cref="AgencySystem.GetAgencyLock"/> for source AND destination
-        /// agencies (in deterministic Guid order to avoid AB-BA deadlock) before
-        /// invoking the file rename, otherwise it races against concurrent calls
-        /// to this helper on either side. Document at the call site when 6.8
-        /// lands. Review C-1.</para>
+        /// <para><b>Phase 6.8 cross-subdir migration — lock domain shared.</b>
+        /// <see cref="Server.Command.Command.SetVesselAgencyCommand"/>'s kerbal
+        /// migration (shipped Phase 6.8) holds BOTH agency locks via
+        /// <c>RunUnderLockOrder</c> in deterministic Guid order for the
+        /// cross-subdir <c>ReadFile</c> + <c>WriteAtomic</c> + <c>FileDelete</c>
+        /// triple, so any concurrent call into this helper on either side
+        /// blocks until the migration releases. The optimistic-collision
+        /// re-check at <c>SetVesselAgencyCommand</c> step 4b is authoritative
+        /// under that lock — a same-name file appearing in destination's
+        /// subdir from <i>this</i> helper would have had to land BEFORE the
+        /// dual lock acquired, which the lock-free pre-check + under-lock
+        /// re-check pair catches.</para>
         /// </summary>
         internal static bool TryWriteKerbalProtoPerAgency(string senderPlayerName, string kerbalName, byte[] data, int numBytes, out Guid senderAgencyId)
         {
