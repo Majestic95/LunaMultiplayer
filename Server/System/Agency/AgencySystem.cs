@@ -2,6 +2,7 @@ using LmpCommon.Enums;
 using LunaConfigNode.CfgNode;
 using Server.Context;
 using Server.Log;
+using Server.Properties;
 using Server.Settings.Structures;
 using Server.System.Scenario;
 using System;
@@ -82,6 +83,28 @@ namespace Server.System.Agency
         public static bool PerAgencyKerbalRosterEnabled =>
             PerAgencyEnabled &&
             GameplaySettings.SettingsStore.PerAgencyKerbalRoster;
+
+        /// <summary>
+        /// [Stage 6 / Phase 6.3] Path to the per-agency kerbal subdir for the
+        /// given agency: <c>Universe/Agencies/{agencyId:N}/Kerbals/</c>. Sibling
+        /// of the agency state file at <c>Universe/Agencies/{agencyId:N}.txt</c>
+        /// — directory and file share the same stem under
+        /// <see cref="AgencyState.AgenciesPath"/>, which is fine on every
+        /// supported filesystem (a folder named "foo" and a file named
+        /// "foo.txt" coexist cleanly on NTFS / ext4 / APFS).
+        ///
+        /// <para>Phase 6.3 lifecycle hooks ensure this directory exists with
+        /// seeded stock 4 (Jeb/Bill/Bob/Val) for every freshly-minted or
+        /// loaded agency under <see cref="PerAgencyEnabled"/>. Phase 6.4/6.5
+        /// handlers route kerbal reads/writes through this path under
+        /// <see cref="PerAgencyKerbalRosterEnabled"/>.</para>
+        ///
+        /// <para>Expression-bodied (not <c>static readonly</c>) so per-test
+        /// temp <see cref="ServerContext.UniverseDirectory"/> rewrites flow
+        /// through. Mirrors <see cref="AgencyState.AgenciesPath"/>'s pattern.</para>
+        /// </summary>
+        public static string GetKerbalsPathForAgency(Guid agencyId)
+            => Path.Combine(AgencyState.AgenciesPath, agencyId.ToString("N", CultureInfo.InvariantCulture), "Kerbals");
 
         /// <summary>
         /// Authoritative registry. Key is the canonical <see cref="AgencyState.AgencyId"/> Guid
@@ -1878,6 +1901,15 @@ namespace Server.System.Agency
                 // SaveAgency that follows captures whatever state we have either way.
                 EnsureStartTechSeeded(state);
 
+                // [fix:per-agency-kerbal-disk-layout, Stage 6 Phase 6.3] Seed
+                // the per-agency Kerbals subdir + stock 4 (Jeb/Bill/Bob/Val).
+                // Disk-only mutation (per-file WriteAtomic); no AgencyState
+                // change, no SaveAgency dependency. The seed runs BEFORE
+                // SaveAgency so a SaveAgency failure post-seed (disk-full)
+                // leaves a self-healing partial state — next reconnect's
+                // RegisterAgency will re-run both seeds + retry SaveAgency.
+                SeedStockKerbalsForAgency(state);
+
                 // Persistence-before-index ordering (round-2 review). The XML doc on
                 // AgencyByPlayerName guarantees: persist via SaveAgency BEFORE flipping the
                 // index. Prior order (flip-then-save) created a crash window between the
@@ -2189,6 +2221,62 @@ namespace Server.System.Agency
                     var canonicalPath = source.FilePath;
                     FileHandler.FileDelete(canonicalPath);
                     FileHandler.FileDelete(canonicalPath + ".bak");
+
+                    // [fix:per-agency-kerbal-disk-layout, Stage 6 Phase 6.3]
+                    // Cascade-delete the agency's per-agency Kerbals subdir if
+                    // present. Pre-Stage-6 agencies have no subdir (the
+                    // FolderExists guard handles that). Use the recursive
+                    // delete variant — `Kerbals/` always contains files when
+                    // present. FolderDeleteRecursive propagates IOExceptions
+                    // (locked file on Windows, partial-rmdir on Linux); orphan
+                    // state is observable (operator sees the leftover directory
+                    // in Universe/Agencies/) rather than data-destroying. We
+                    // also remove the empty parent `{guid:N}/` folder so the
+                    // deleted agency leaves no artefacts behind, but only when
+                    // it's empty — a future Stage 6+ sibling subdir is
+                    // preserved if non-empty.
+                    //
+                    // PHASE 6.5 RACE-WINDOW WARNING (persistence-lens S2,
+                    // 2026-05-20). Phase 6.5's HandleKerbalProto write path
+                    // will use FileHandler.WriteAtomic and will NOT hold the
+                    // per-agency lock acquired above. A KerbalProto arriving
+                    // microseconds AFTER Agencies.TryRemove + AgencyByPlayerName
+                    // .TryRemove but BEFORE FolderDeleteRecursive below could
+                    // create a new file inside the subdir we're about to delete,
+                    // silently losing the file. When Phase 6.5 ships,
+                    // HandleKerbalProto MUST: (a) resolve sender→agencyId, (b)
+                    // acquire GetAgencyLock(senderAgencyId), (c) re-check
+                    // Agencies.ContainsKey(senderAgencyId) under the lock, (d)
+                    // bail if the agency was just deleted. Without this guard,
+                    // the cascade race produces orphan files that the next
+                    // LoadExistingAgencies skips (no .txt for the dead id) but
+                    // that waste disk + confuse operator forensics.
+                    //
+                    // PHASE-6+ LOCK-ANCHOR WARNING (server-systems-lens C3).
+                    // FolderDeleteRecursive on `…/Kerbals` and FolderDelete on
+                    // `…/{guid:N}` anchor on DIFFERENT GetLockSemaphore keys.
+                    // A future Stage-6+ sibling subdir under `{guid:N}/` (e.g.
+                    // per-agency Achievements, per-agency Flags) would be
+                    // serialised against Kerbals writes but NOT against the
+                    // empty-parent-folder cleanup below — needs its own
+                    // FolderExists+RemoveIfEmpty branch + matching write-time
+                    // lock-acquisition discipline.
+                    var kerbalsDir = GetKerbalsPathForAgency(agencyId);
+                    if (FileHandler.FolderExists(kerbalsDir))
+                    {
+                        var kerbalFileCount = FileHandler.GetFilesInPath(kerbalsDir).Length;
+                        FileHandler.FolderDeleteRecursive(kerbalsDir);
+                        LunaLog.Normal(
+                            $"[fix:per-agency-kerbal-disk-layout] Deleted {kerbalFileCount} per-agency kerbal file(s) for agency " +
+                            $"{agencyId:N} ({oldOwnerName}) at {kerbalsDir}");
+                    }
+                    var agencyDir = Path.GetDirectoryName(kerbalsDir);
+                    if (!string.IsNullOrEmpty(agencyDir) &&
+                        FileHandler.FolderExists(agencyDir) &&
+                        !Directory.EnumerateFileSystemEntries(agencyDir).Any())
+                    {
+                        FileHandler.FolderDelete(agencyDir);
+                    }
 
                     // GC the per-agency lock anchor. After the registry remove,
                     // no legitimate caller resolves this AgencyId; a stale path
@@ -2655,6 +2743,124 @@ namespace Server.System.Agency
             sb.Append(key).Append(" = ").Append(value).Append('\n');
         }
 
+        /// <summary>
+        /// [Stage 6 / Phase 6.3] Seeds the four stock kerbals (Jebediah /
+        /// Bill / Bob / Valentina) into the agency's
+        /// <see cref="GetKerbalsPathForAgency"/> subdir from the embedded
+        /// <see cref="Server.Properties.Resources"/> templates. Mirrors
+        /// <see cref="EnsureStartTechSeeded"/> in shape + idempotency contract
+        /// — safe to call multiple times.
+        ///
+        /// <para><b>Per-file idempotency.</b> Skips any kerbal file that
+        /// already exists in the target subdir. Partial-seed recovery
+        /// (operator manually deleted 1 of 4 files) automatically re-seeds
+        /// the missing names on next invocation. Same per-name template each
+        /// time — no name-collision considerations because Q-Seed (spec §2)
+        /// chose deterministic same-name-across-agencies (each agency's
+        /// "Jebediah Kerman" is its own independent copy).</para>
+        ///
+        /// <para><b>Persistence path.</b> Each kerbal file written via
+        /// <see cref="FileHandler.WriteAtomic"/> — Stage 6 spec §3 calls for
+        /// atomic writes on per-agency kerbal files because under gate=on each
+        /// file is the ONLY copy of that agency's version of that kerbal (no
+        /// shared default to fall back on). The temp+rename atomicity matches
+        /// the AgencyState write pattern + survives mid-write server kill.</para>
+        ///
+        /// <para><b>Subdir creation (lazy).</b> Helper calls
+        /// <see cref="FileHandler.FolderCreate"/> for the per-agency Kerbals
+        /// subdir LAZILY — only on the first iteration that actually needs
+        /// to write. The all-4-already-present idempotent path therefore
+        /// does zero filesystem IO.
+        /// <see cref="FileHandler.WriteAtomic"/> wraps
+        /// <see cref="File.WriteAllText(string, string, Encoding)"/> which
+        /// does NOT auto-create parent dirs, so the explicit FolderCreate
+        /// is required before the first write. The subdir's parent
+        /// (<c>Universe/Agencies/</c>) is created at
+        /// <see cref="Universe.CheckUniverse"/> boot time.
+        /// <see cref="FileHandler.FolderCreate"/> is idempotent
+        /// (<see cref="Directory.CreateDirectory(string)"/> contract).</para>
+        ///
+        /// <para><b>Known limitation (0-byte file on power loss).</b>
+        /// <see cref="FileHandler.WriteAtomic"/> does NOT fsync. A power
+        /// loss between <see cref="File.Move(string, string)"/> and the
+        /// kernel flushing the file's data pages can leave a 0-byte file
+        /// on disk where <see cref="FileHandler.FileExists"/> returns
+        /// true. The partial-seed-recovery branch will skip that file
+        /// (treating it as "already seeded") until an operator manually
+        /// deletes the 0-byte file to trigger re-seed. Persistence-lens
+        /// review 2026-05-20 C2; deferred because fsync would change the
+        /// behaviour of every <c>WriteAtomic</c> caller across the
+        /// codebase.</para>
+        ///
+        /// <para><b>Returns</b> <c>true</c> when at least one file was created;
+        /// <c>false</c> on every no-op branch (gate closed / all 4 already
+        /// present). Caller uses the bool to decide whether to emit a log
+        /// line.</para>
+        ///
+        /// <para>No-op when <see cref="PerAgencyEnabled"/> is false (gate off
+        /// OR non-Career). Deliberately independent of
+        /// <see cref="PerAgencyKerbalRosterEnabled"/> at seed time — the disk
+        /// layout is established up-front for every agency, and the rosters
+        /// become observably-per-agency only when the handler routing turns
+        /// on in Phase 6.4/6.5. Pre-seeding under PerAgencyCareer-only mode
+        /// is benign because nothing reads the subdir yet; seeding gated on
+        /// the combined predicate would mean operators flipping
+        /// PerAgencyKerbalRoster=true mid-cohort would need a per-agency
+        /// backfill pass we'd then have to write.</para>
+        /// </summary>
+        private static bool SeedStockKerbalsForAgency(AgencyState state)
+        {
+            if (state == null || !PerAgencyEnabled)
+                return false;
+
+            var kerbalsDir = GetKerbalsPathForAgency(state.AgencyId);
+
+            var templates = new (string FileName, string Content)[]
+            {
+                ("Jebediah Kerman.txt",  Resources.Jebediah_Kerman),
+                ("Bill Kerman.txt",      Resources.Bill_Kerman),
+                ("Bob Kerman.txt",       Resources.Bob_Kerman),
+                ("Valentina Kerman.txt", Resources.Valentina_Kerman),
+            };
+
+            var seeded = 0;
+            for (var i = 0; i < templates.Length; i++)
+            {
+                var (fileName, content) = templates[i];
+                var path = Path.Combine(kerbalsDir, fileName);
+                if (FileHandler.FileExists(path))
+                    continue;
+
+                // Lazy parent-dir creation: only call FolderCreate when we're
+                // about to write. Skips the directory creation on the all-present
+                // idempotent path (cheap-but-not-free I/O). FolderCreate is
+                // idempotent via Directory.CreateDirectory.
+                //
+                // Lock note: FolderCreate(kerbalsDir) and the subsequent
+                // WriteAtomic(path, content) calls below all serialize on
+                // the SAME per-path lock (FileHandler.GetLockSemaphore strips
+                // the filename via Path.GetDirectoryName for paths with an
+                // extension, so all `…/Kerbals/X.txt` writes anchor on
+                // `…/Kerbals` which equals the FolderCreate key). Future
+                // optimisation that hoists FolderCreate outside the loop with
+                // a different lock anchor would break this invariant —
+                // confirmed by the persistence-lens review 2026-05-20 S1.
+                if (seeded == 0)
+                    FileHandler.FolderCreate(kerbalsDir);
+
+                FileHandler.WriteAtomic(path, content);
+                seeded++;
+            }
+
+            if (seeded > 0)
+            {
+                LunaLog.Normal(
+                    $"[fix:per-agency-kerbal-disk-layout] Seeded {seeded} stock kerbal file(s) into agency " +
+                    $"{state.AgencyId:N} ({state.OwningPlayerName}) at {kerbalsDir}");
+            }
+            return seeded > 0;
+        }
+
         private static AgencyState LoadAgencyFromFile(string filePath)
         {
             var canonicalExisted = FileHandler.FileExists(filePath);
@@ -2703,6 +2909,25 @@ namespace Server.System.Agency
                 LunaLog.Normal(
                     $"[fix:per-agency-start] Persisted backfilled start tech to disk for agency {state.AgencyId:N} ({state.OwningPlayerName})");
             }
+
+            // [fix:per-agency-kerbal-disk-layout, Stage 6 Phase 6.3] Backfill
+            // the stock kerbal seed for pre-Stage-6 agency files (mints
+            // happened before Phase 6.3 shipped, so no Kerbals subdir exists)
+            // and for partial-seed recovery (operator hand-deleted one of the
+            // four files between sessions). Per-file FileExists check inside
+            // the helper handles both cases.
+            //
+            // No companion WriteAtomic(filePath, state.Serialize()) needed
+            // here — the helper writes per-kerbal-file directly to disk via
+            // FileHandler.WriteAtomic; there is no AgencyState field mutation
+            // to persist (unlike EnsureStartTechSeeded which mutates
+            // state.TechNodes + state.PurchasedParts and so requires the
+            // companion serialize+write above). RE-VERIFY: if Phase 6.4 or
+            // a later Stage-6+ phase adds an AgencyState field for kerbal
+            // bookkeeping (e.g. KerbalIndex, RecruitedNames, etc.), this
+            // no-companion-write rationale collapses + the call needs the
+            // start-tech-seed pattern's bool-return + companion WriteAtomic.
+            SeedStockKerbalsForAgency(state);
 
             return state;
         }

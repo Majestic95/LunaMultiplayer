@@ -298,6 +298,23 @@ namespace Server.System
         }
 
         /// <summary>
+        /// Thread safe RECURSIVE folder delete. Equivalent to
+        /// <see cref="FolderDelete(string)"/> but passes <c>recursive: true</c>
+        /// to <see cref="Directory.Delete(string, bool)"/>. Caller is
+        /// responsible for the existence pre-check (mirrors
+        /// <see cref="FolderDelete(string)"/> — both throw on missing path).
+        /// Required for Stage 6's per-agency Kerbals subdir cascade on
+        /// <c>/deleteagency</c>.
+        /// </summary>
+        public static void FolderDeleteRecursive(string path)
+        {
+            lock (GetLockSemaphore(path))
+            {
+                Directory.Delete(path, recursive: true);
+            }
+        }
+
+        /// <summary>
         /// Thread safe folder create method
         /// </summary>
         /// <param name="path">Path to the folder</param>
