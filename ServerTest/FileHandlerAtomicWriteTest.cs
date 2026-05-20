@@ -164,5 +164,74 @@ namespace ServerTest
 
             Assert.AreEqual(unicode, FileHandler.ReadAtomic(path));
         }
+
+        // ------------------------------------------------------------------
+        // Byte-buffer overload (Stage 6 Phase 6.5)
+        // ------------------------------------------------------------------
+
+        [TestMethod]
+        public void WriteAtomicBytes_FirstWrite_LeavesOnlyCanonicalFile()
+        {
+            var path = Path.Combine(_testDir, "bytes-first.bin");
+            var data = new byte[] { 0x01, 0x02, 0x03, 0x04 };
+
+            FileHandler.WriteAtomic(path, data, data.Length);
+
+            CollectionAssert.AreEqual(data, File.ReadAllBytes(path));
+            Assert.IsFalse(File.Exists(path + ".tmp"));
+            Assert.IsFalse(File.Exists(path + ".bak"));
+        }
+
+        [TestMethod]
+        public void WriteAtomicBytes_SecondWrite_RotatesPriorToBak()
+        {
+            var path = Path.Combine(_testDir, "bytes-rotate.bin");
+            var first = new byte[] { 0xAA, 0xBB };
+            var second = new byte[] { 0xCC, 0xDD, 0xEE };
+
+            FileHandler.WriteAtomic(path, first, first.Length);
+            FileHandler.WriteAtomic(path, second, second.Length);
+
+            CollectionAssert.AreEqual(second, File.ReadAllBytes(path),
+                "canonical must hold the most recent write");
+            CollectionAssert.AreEqual(first, File.ReadAllBytes(path + ".bak"),
+                ".bak must hold the prior generation for crash-recovery");
+        }
+
+        [TestMethod]
+        public void WriteAtomicBytes_NumBytesLessThanArrayLength_WritesExactlyNumBytes()
+        {
+            // Symmetric with WriteToFile(byte[], int)'s semantics: caller may
+            // pass an oversized buffer (rented from a pool, padded message,
+            // etc.) and numBytes < data.Length. We must write exactly numBytes,
+            // not data.Length. The Phase 6.5 KerbalProto path relies on this
+            // contract — KerbalInfo's compressed-buffer pattern reuses byte[]
+            // across messages so data.Length is the BUFFER size, not the
+            // payload size.
+            var path = Path.Combine(_testDir, "bytes-partial.bin");
+            var buf = new byte[] { 0x10, 0x20, 0x30, 0x40, 0x50 };
+
+            FileHandler.WriteAtomic(path, buf, numBytes: 3);
+
+            var read = File.ReadAllBytes(path);
+            Assert.AreEqual(3, read.Length,
+                "WriteAtomic(byte[], numBytes) must write exactly numBytes, not data.Length");
+            CollectionAssert.AreEqual(new byte[] { 0x10, 0x20, 0x30 }, read);
+        }
+
+        [TestMethod]
+        public void WriteAtomicBytes_ZeroNumBytes_WritesEmptyFile()
+        {
+            // Defensive: caller passes numBytes=0 on an edge case (empty
+            // ConfigNode, e.g.). Result is a real empty file (FileExists true,
+            // length 0), not the absence of one. Matches WriteToFile semantics.
+            var path = Path.Combine(_testDir, "bytes-zero.bin");
+            var buf = new byte[] { 0x99 };
+
+            FileHandler.WriteAtomic(path, buf, numBytes: 0);
+
+            Assert.IsTrue(File.Exists(path));
+            Assert.AreEqual(0, new FileInfo(path).Length);
+        }
     }
 }

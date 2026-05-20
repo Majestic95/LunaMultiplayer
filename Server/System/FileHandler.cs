@@ -136,6 +136,74 @@ namespace Server.System
         }
 
         /// <summary>
+        /// Byte-buffer overload of <see cref="WriteAtomic(string,string)"/>. Symmetric with
+        /// <see cref="WriteToFile(string,byte[],int)"/>: writes <paramref name="numBytes"/>
+        /// (not <c>data.Length</c>) from <paramref name="data"/> to <c>path.tmp</c>, then
+        /// rotates the existing canonical path to <c>path.bak</c> and renames
+        /// <c>path.tmp</c> to <c>path</c>. Same crash-tolerance contract as the string
+        /// overload; same per-path lock semaphore.
+        ///
+        /// <para>Added Stage 6 Phase 6.5 for the per-agency kerbal write path —
+        /// each agency's kerbal file is the only copy of that agency's version
+        /// of the kerbal, so a half-written file from a server kill is
+        /// unacceptable. Use this path under <see cref="Server.System.Agency.AgencySystem.PerAgencyKerbalRosterEnabled"/>;
+        /// the legacy shared-roster path keeps <see cref="WriteToFile(string,byte[],int)"/>
+        /// because shared defaults are regenerable.</para>
+        ///
+        /// <para>The <paramref name="numBytes"/> parameter exists for buffer-pooling
+        /// callers that pass an oversized rented array. The disk write writes
+        /// exactly that many bytes, matching the legacy <see cref="WriteToFile(string,byte[],int)"/>
+        /// semantics so a caller migrating from one to the other is byte-for-byte
+        /// equivalent.</para>
+        /// </summary>
+        public static void WriteAtomic(string path, byte[] data, int numBytes)
+        {
+            var tmpPath = path + ".tmp";
+            var bakPath = path + ".bak";
+
+            lock (GetLockSemaphore(path))
+            {
+                // Skip the rotate-and-rewrite when on-disk bytes already match.
+                // Symmetric with WriteToFile(byte[], int) which has the same
+                // short-circuit at FileHandler.cs:58. Phase 6.5 review SS-1 —
+                // KerbalProto is chatty (every periodic vessel-resync ships the
+                // full roster, not deltas) and unconditionally rewriting + rotating
+                // .bak on every duplicate write would (a) clobber the prior-good
+                // .bak prematurely, shrinking the crash-recovery window, and (b)
+                // burn disk I/O on no-op writes.
+                if (ContentChecker.ContentsAreEqual(data, numBytes, path))
+                    return;
+
+                try
+                {
+                    using (var fs = new FileStream(tmpPath, FileMode.Create, FileAccess.Write))
+                    {
+                        fs.Write(data, 0, numBytes);
+                    }
+
+                    if (File.Exists(path))
+                    {
+                        if (File.Exists(bakPath))
+                            File.Delete(bakPath);
+                        File.Move(path, bakPath);
+                    }
+
+                    File.Move(tmpPath, path);
+                }
+                catch (Exception e)
+                {
+                    LunaLog.Error($"Error writing atomically to file: {path}, Exception: {e}");
+
+                    if (File.Exists(tmpPath))
+                    {
+                        try { File.Delete(tmpPath); }
+                        catch { }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
         /// Thread-safe atomic read companion to <see cref="WriteAtomic"/>. Reads <c>path</c>
         /// if it exists; otherwise falls back to <c>path.bak</c> (the prior generation kept
         /// by the rotation). Logs a warning when recovering from <c>.bak</c> so operators see

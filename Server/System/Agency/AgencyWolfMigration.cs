@@ -180,6 +180,36 @@ namespace Server.System.Agency
             if (agency == null)
                 return result;
 
+            // [Stage 6 Phase 6.5 known limitation — Phase 6.7 scope]
+            // The kerbal-file rewrite below targets KerbalSystem.KerbalsPath
+            // (legacy Universe/Kerbals/) regardless of the per-agency gate. Under
+            // Phase 6.5's PerAgencyKerbalRosterEnabled=true mode, the per-agency
+            // request filter at KerbalSystem.ResolveKerbalsPathForRequester does
+            // NOT enumerate legacy — restored kerbals would be unreachable to
+            // clients of any agency. Phase 6.7 will rework this code path to
+            // route the restoration to the surviving agency's
+            // Universe/Agencies/{guid}/Kerbals/ subdir. For Phase 6.5 we surface
+            // the limitation as an audible Warning so an operator running
+            // /deleteagency on an agency with in-flight WOLF cross-agency
+            // CrewRoutes sees the kerbal-loss risk before the deletion completes.
+            // Operator-workflow mitigation per spec §Q-Migration: /kick the
+            // owner BEFORE /deleteagency to ensure no Launch lands during the
+            // cascade race window; AND manually restore any Missing passengers
+            // via the documented hand-edit workflow at Universe/Kerbals/{name}.txt
+            // (state = Available; ToD = 0) — they'll need to be hand-copied into
+            // the surviving agency's subdir for the receiving client to see them.
+            if (AgencySystem.PerAgencyKerbalRosterEnabled && agency.WolfCrewRoutes != null && agency.WolfCrewRoutes.Count > 0)
+            {
+                LunaLog.Warning(
+                    $"[fix:per-agency-kerbal-roster-write-routing] CascadeOnDelete invoked on agency {agency.AgencyId:N} " +
+                    "({agency.OwningPlayerName}) under PerAgencyKerbalRosterEnabled=true with in-flight WOLF CrewRoutes. " +
+                    "Restored kerbal files will land in legacy Universe/Kerbals/ but the per-agency request filter " +
+                    "(Phase 6.4) does not enumerate legacy under gate=on — restored kerbals will be unreachable to " +
+                    "clients of any surviving agency until Phase 6.7 ships the per-agency-subdir routing for Slice F. " +
+                    "Recovery: stop the server after this command completes, hand-copy any Universe/Kerbals/{name}.txt " +
+                    "files to the destination agency's Universe/Agencies/{guid:N}/Kerbals/ subdir, restart.");
+            }
+
             // Phase 1 — snapshot phase under the agency lock. We collect
             // distinct passenger names into a HashSet so a kerbal who somehow
             // appears in two in-flight routes (defensive — WOLF's wire

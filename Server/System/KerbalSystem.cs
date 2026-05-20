@@ -1,4 +1,5 @@
 ﻿using LmpCommon.Message.Data.Kerbal;
+using LmpCommon.Message.Interface;
 using LmpCommon.Message.Server;
 using Server.Client;
 using Server.Context;
@@ -35,12 +36,126 @@ namespace Server.System
 
         public static void HandleKerbalProto(ClientStructure client, KerbalProtoMsgData data)
         {
+            if (AgencySystem.PerAgencyKerbalRosterEnabled)
+            {
+                HandleKerbalProtoPerAgency(client, data);
+                return;
+            }
+
             LunaLog.Debug($"Saving kerbal {data.Kerbal.KerbalName} from {client.PlayerName}");
 
             var path = Path.Combine(KerbalsPath, $"{data.Kerbal.KerbalName}.txt");
             FileHandler.WriteToFile(path, data.Kerbal.KerbalData, data.Kerbal.NumBytes);
 
             MessageQueuer.RelayMessage<KerbalSrvMsg>(client, data);
+        }
+
+        /// <summary>
+        /// [Stage 6 / Phase 6.5] Per-agency write-path branch of
+        /// <see cref="HandleKerbalProto"/>. Delegates the disk-side work to
+        /// the pure helper <see cref="TryWriteKerbalProtoPerAgency"/> (string +
+        /// bytes inputs, directly unit-testable) and, on success, relays to
+        /// same-agency clients via <see cref="RelayToSameAgencyClients{TSrvMsg}"/>.
+        /// </summary>
+        private static void HandleKerbalProtoPerAgency(ClientStructure client, KerbalProtoMsgData data)
+        {
+            if (TryWriteKerbalProtoPerAgency(
+                    client.PlayerName,
+                    data.Kerbal.KerbalName,
+                    data.Kerbal.KerbalData,
+                    data.Kerbal.NumBytes,
+                    out var senderAgencyId))
+            {
+                RelayToSameAgencyClients<KerbalSrvMsg>(client, senderAgencyId, data);
+            }
+        }
+
+        /// <summary>
+        /// [Stage 6 / Phase 6.5] Pure helper that performs the per-agency disk
+        /// write for a kerbal proto. Resolves the sender's agency, holds
+        /// <see cref="AgencySystem.GetAgencyLock"/> across the
+        /// <see cref="AgencySystem.Agencies"/> re-check + disk write to close
+        /// the <c>/deleteagency</c> cascade race documented at Phase 6.3
+        /// commit <c>90470f08</c> (CLAUDE.md Stack Notes "Phase 6.5 race-window").
+        /// Writes via <see cref="FileHandler.WriteAtomic(string,byte[],int)"/>
+        /// because each per-agency kerbal file is the ONLY copy of that
+        /// agency's version of the kerbal — half-written files from a server
+        /// kill are unacceptable.
+        ///
+        /// <para><b>Returns</b> <c>true</c> on successful write (caller relays);
+        /// <c>false</c> on every DROP branch (caller skips relay).
+        /// <paramref name="senderAgencyId"/> is set to <see cref="Guid.Empty"/>
+        /// when the helper returns false on the mapping-miss branch; set to
+        /// the resolved agency-id (then dropped) when the cascade-race branch
+        /// fires.</para>
+        ///
+        /// <para><b>DROP semantics on resolve failure.</b> If
+        /// <see cref="AgencySystem.AgencyByPlayerName"/> misses (torn registry
+        /// — unreachable on a healthy handshake order) OR
+        /// <see cref="AgencySystem.Agencies"/> miss under the lock (cascade
+        /// raced our resolve), the proto is DROPPED with a Warning. Asymmetric
+        /// with the read-side fallback-to-legacy in
+        /// <see cref="ResolveKerbalsPathForRequester"/> — falling back to
+        /// legacy on the write side would silently land mutations in a
+        /// directory the per-agency handler never reads back (the gate=on
+        /// equivalent of "writing to /dev/null"). The DROP makes the data loss
+        /// audible.</para>
+        ///
+        /// <para>Pure-helper signature (string + bytes + numBytes, not
+        /// <see cref="ClientStructure"/>) so ServerTest can directly exercise
+        /// every branch without constructing a <see cref="Lidgren.Network.NetConnection"/>.
+        /// Same testability pattern as Phase 6.4's
+        /// <see cref="ResolveKerbalsPathForRequester"/>.</para>
+        ///
+        /// <para><b>Sender-vs-target tautology — verify before adding new callers.</b>
+        /// The current contract has the target directory derived FROM the sender's
+        /// agency, so "sender agency == target dir agency" is true by construction
+        /// and the helper does not need a separate cross-agency-write check beyond
+        /// the cascade-race guard. If a future Stage-6+ change introduces a path
+        /// where the sender doesn't directly own the proto (e.g. a server-side
+        /// kerbal extractor that pulls names out of an incoming vessel-proto and
+        /// re-routes them to a different agency's roster — Phase 6.6+ /
+        /// dual-channel EVA flow per spec §3), the tautology breaks and the helper
+        /// MUST grow an explicit sender-vs-target agency check. Review SC-2.</para>
+        ///
+        /// <para><b>Phase 6.8 cross-subdir rename — lock-domain constraint.</b>
+        /// Phase 6.8's <c>/setvesselagency</c> kerbal migration will move kerbal
+        /// files between agency subdirs. The move MUST acquire BOTH
+        /// <see cref="AgencySystem.GetAgencyLock"/> for source AND destination
+        /// agencies (in deterministic Guid order to avoid AB-BA deadlock) before
+        /// invoking the file rename, otherwise it races against concurrent calls
+        /// to this helper on either side. Document at the call site when 6.8
+        /// lands. Review C-1.</para>
+        /// </summary>
+        internal static bool TryWriteKerbalProtoPerAgency(string senderPlayerName, string kerbalName, byte[] data, int numBytes, out Guid senderAgencyId)
+        {
+            if (!AgencySystem.AgencyByPlayerName.TryGetValue(senderPlayerName, out senderAgencyId))
+            {
+                LunaLog.Warning($"[fix:per-agency-kerbal-roster] DROPPED KerbalProto for {kerbalName} from {senderPlayerName}: no AgencyByPlayerName mapping under PerAgencyKerbalRosterEnabled. Either the registry is torn or the player has not yet auto-registered. The write is dropped (not legacy-fallback) because legacy is structurally unread under gate=on.");
+                senderAgencyId = Guid.Empty;
+                return false;
+            }
+
+            lock (AgencySystem.GetAgencyLock(senderAgencyId))
+            {
+                // Cascade-race guard. TryDeleteAgency holds this same lock
+                // across Agencies.TryRemove + FolderDeleteRecursive — if we
+                // see Agencies.ContainsKey=false after acquiring, the cascade
+                // has either completed or is about to (we won the lock first
+                // but the agency is gone). Drop rather than create a file in
+                // a now-orphan subdir.
+                if (!AgencySystem.Agencies.ContainsKey(senderAgencyId))
+                {
+                    LunaLog.Warning($"[fix:per-agency-kerbal-roster] DROPPED KerbalProto for {kerbalName} from {senderPlayerName}: agency {senderAgencyId:N} no longer in registry (TryDeleteAgency cascade raced the write). Agency was deleted between AgencyByPlayerName lookup and lock acquire.");
+                    return false;
+                }
+
+                var path = Path.Combine(AgencySystem.GetKerbalsPathForAgency(senderAgencyId), $"{kerbalName}.txt");
+                LunaLog.Debug($"[fix:per-agency-kerbal-roster] Saving kerbal {kerbalName} from {senderPlayerName} -> {path}");
+                FileHandler.WriteAtomic(path, data, numBytes);
+            }
+
+            return true;
         }
 
         public static void HandleKerbalsRequest(ClientStructure client)
@@ -140,6 +255,12 @@ namespace Server.System
         {
             var kerbalToRemove = message.KerbalName;
 
+            if (AgencySystem.PerAgencyKerbalRosterEnabled)
+            {
+                HandleKerbalRemovePerAgency(client, message);
+                return;
+            }
+
             // [Stage 5.17e-8] K1 kerbal-roster grief guard (spec §10 Q-Kerbal sign-off).
             // The v1 kerbal roster is shared across agencies (per-agency rosters are
             // Stage 6 work — wire-extension on every Kerbal*MsgData + per-agency
@@ -151,6 +272,16 @@ namespace Server.System
             // be removed by anyone — legitimate KSP-driven removes (KIA, EVA-rescue
             // completion) fire AFTER the kerbal is no longer crewing a vessel, so
             // the unassigned path covers them.
+            //
+            // [Phase 6.5] Under PerAgencyKerbalRosterEnabled the K1 scan is
+            // STRUCTURALLY MOOT — the Phase 6.4 request filter only delivers
+            // same-agency kerbals to each client, so a client can never construct
+            // a KerbalRemoveMsgData for a foreign-agency kerbal. The K1 scan is
+            // therefore skipped under gate=on (the per-agency branch above takes
+            // over). It runs unchanged under gate=off for the Stage 5 cohort. See
+            // spec §Q-K1; Stage 7 cleanup pass removes both the scan and the
+            // client-side ProtoCrewMember_Die Harmony patch once gate=on is the
+            // default cohort.
             if (AgencySystem.PerAgencyEnabled && !CanRemoveKerbalUnderK1(client, kerbalToRemove))
             {
                 LunaLog.Warning($"[fix:per-agency-career] Refused KerbalRemove for {kerbalToRemove} from {client.PlayerName}: kerbal is currently aboard a vessel owned by a different agency. K1 v1 limitation — see spec §10 Q-Kerbal.");
@@ -161,6 +292,92 @@ namespace Server.System
             FileHandler.FileDelete(Path.Combine(KerbalsPath, $"{kerbalToRemove}.txt"));
 
             MessageQueuer.RelayMessage<KerbalSrvMsg>(client, message);
+        }
+
+        /// <summary>
+        /// [Stage 6 / Phase 6.5] Per-agency write-path branch of
+        /// <see cref="HandleKerbalRemove"/>. Delegates to the pure helper
+        /// <see cref="TryDeleteKerbalPerAgency"/> and relays on success.
+        /// K1 scan SKIPPED here (structurally moot — see comment in the
+        /// gate=off branch).
+        /// </summary>
+        private static void HandleKerbalRemovePerAgency(ClientStructure client, KerbalRemoveMsgData message)
+        {
+            if (TryDeleteKerbalPerAgency(client.PlayerName, message.KerbalName, out var senderAgencyId))
+            {
+                RelayToSameAgencyClients<KerbalSrvMsg>(client, senderAgencyId, message);
+            }
+        }
+
+        /// <summary>
+        /// [Stage 6 / Phase 6.5] Pure helper that performs the per-agency disk
+        /// delete for a kerbal remove. Mirrors
+        /// <see cref="TryWriteKerbalProtoPerAgency"/>'s lock + ContainsKey shape.
+        /// </summary>
+        internal static bool TryDeleteKerbalPerAgency(string senderPlayerName, string kerbalName, out Guid senderAgencyId)
+        {
+            if (!AgencySystem.AgencyByPlayerName.TryGetValue(senderPlayerName, out senderAgencyId))
+            {
+                LunaLog.Warning($"[fix:per-agency-kerbal-roster] DROPPED KerbalRemove for {kerbalName} from {senderPlayerName}: no AgencyByPlayerName mapping under PerAgencyKerbalRosterEnabled.");
+                senderAgencyId = Guid.Empty;
+                return false;
+            }
+
+            lock (AgencySystem.GetAgencyLock(senderAgencyId))
+            {
+                if (!AgencySystem.Agencies.ContainsKey(senderAgencyId))
+                {
+                    LunaLog.Warning($"[fix:per-agency-kerbal-roster] DROPPED KerbalRemove for {kerbalName} from {senderPlayerName}: agency {senderAgencyId:N} no longer in registry (TryDeleteAgency cascade raced the remove).");
+                    return false;
+                }
+
+                var path = Path.Combine(AgencySystem.GetKerbalsPathForAgency(senderAgencyId), $"{kerbalName}.txt");
+                LunaLog.Debug($"[fix:per-agency-kerbal-roster] Removing kerbal {kerbalName} from {senderPlayerName} -> {path}");
+                FileHandler.FileDelete(path);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// [Stage 6 / Phase 6.5] Per-agency-scoped relay. Sends <paramref name="data"/>
+        /// to every <see cref="ServerContext.Clients"/> entry whose PlayerName
+        /// maps to <paramref name="senderAgencyId"/> in
+        /// <see cref="AgencySystem.AgencyByPlayerName"/>, EXCEPT the sender.
+        /// Under the current 1:1 OwningPlayerName design this selects zero
+        /// peers — sender's own client already has the canonical data, no
+        /// other client in the agency exists. The structure is forward-
+        /// compatible: if a future Stage-7+ commit introduces multi-player-
+        /// per-agency, the filter selects exactly the right peers.
+        ///
+        /// <para>Inline-filter pattern (vs adding a new <see cref="MessageQueuer"/>
+        /// method) matches the precedent of <see cref="Server.System.Agency.AgencySystemSender"/>'s
+        /// per-target <c>SendToClient</c> loops — per-agency scoping is a
+        /// caller concern, not a transport-layer concern.</para>
+        /// </summary>
+        private static void RelayToSameAgencyClients<TSrvMsg>(ClientStructure sender, Guid senderAgencyId, IMessageData data)
+            where TSrvMsg : class, IServerMessageBase
+        {
+            // Sender is always in Clients, so Count <= 1 means there are zero
+            // possible peers and the foreach below would be pure overhead. Under
+            // the current 1:1 OwningPlayerName design this short-circuit fires
+            // most of the time (every solo session); the loop only runs when at
+            // least one other client is connected, at which point the
+            // AgencyByPlayerName filter selects same-agency peers correctly.
+            // Phase 6.5 review SS-2.
+            if (ServerContext.Clients.Count <= 1)
+                return;
+
+            foreach (var otherClient in ServerContext.Clients.Values)
+            {
+                if (Equals(otherClient, sender))
+                    continue;
+                if (!AgencySystem.AgencyByPlayerName.TryGetValue(otherClient.PlayerName, out var peerAgencyId))
+                    continue;
+                if (peerAgencyId != senderAgencyId)
+                    continue;
+                MessageQueuer.SendToClient<TSrvMsg>(otherClient, data);
+            }
         }
 
         /// <summary>
