@@ -21,9 +21,15 @@ namespace LmpClient.Systems.Agency
     /// view for the local player's agency, and other agencies' private state is
     /// privacy-rule-blocked from ever reaching this client (spec §10 Q1).
     ///
-    /// **Lifecycle.** <see cref="EnableStage"/> is <see cref="ClientState.Handshaked"/>
-    /// so the queue-drain routine is set up immediately after the LMP handshake reply
-    /// transitions client state — that's exactly when the server's
+    /// **Lifecycle.** Enabled explicitly from
+    /// <see cref="Network.NetworkSystem"/>'s
+    /// <c>NetworkUpdate</c> in the <see cref="ClientState.Handshaked"/> case,
+    /// alongside <see cref="SettingsSys.SettingsSystem"/>. The base-class
+    /// <see cref="System{T}.EnableStage"/> event path is unreliable for the
+    /// Handshaked state — <c>NetworkUpdate</c> consumes and advances out of
+    /// Handshaked inside a single Update tick, so the event subscribers see
+    /// SyncingSettings instead. The explicit enable runs immediately after
+    /// the LMP handshake reply — that's exactly when the server's
     /// <c>AgencySystemSender.SendHandshakeTo</c> + <c>SendStateTo</c> +
     /// <c>SendContractCatchupTo</c> traffic starts arriving on channel 22 (Lidgren
     /// per-channel ordering preserves Handshake → State → Contract). Messages that
@@ -64,8 +70,6 @@ namespace LmpClient.Systems.Agency
         MessageSystem<AgencySystem, AgencyMessageSender, AgencyMessageHandler>
     {
         public override string SystemName { get; } = nameof(AgencySystem);
-
-        protected override ClientState EnableStage => ClientState.Handshaked;
 
         /// <summary>
         /// The local player's assigned agency id, set when

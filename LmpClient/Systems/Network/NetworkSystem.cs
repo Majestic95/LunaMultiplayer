@@ -2,6 +2,7 @@
 using LmpClient.Events;
 using LmpClient.Localization;
 using LmpClient.Network;
+using LmpClient.Systems.Agency;
 using LmpClient.Systems.Flag;
 using LmpClient.Systems.Handshake;
 using LmpClient.Systems.KerbalSys;
@@ -98,6 +99,13 @@ namespace LmpClient.Systems.Network
                 case ClientState.Handshaked:
                     MainSystem.Singleton.Status = "Handshaking successful";
                     SettingsSystem.Singleton.Enabled = true;
+                    // Per-agency client mirror. AgencySystem.EnableStage =
+                    // ClientState.Handshaked is unreachable via the event path
+                    // (this routine consumes the Handshaked state in the same
+                    // Update tick that ProcessNetworkStatusChanges would fire it,
+                    // so the event observed by subscribers is SyncingSettings).
+                    // Explicit enable here matches the sibling pattern below.
+                    AgencySystem.Singleton.Enabled = true;
                     MainSystem.NetworkState = ClientState.SyncingSettings;
                     SettingsSystem.Singleton.MessageSender.SendSettingsRequest();
 
