@@ -2,6 +2,7 @@
 using LmpClient.Base;
 using LmpClient.Base.Interface;
 using LmpClient.Extensions;
+using LmpClient.Systems.Scenario;
 using LmpClient.Systems.ShareCareer;
 using LmpClient.Systems.ShareExperimentalParts;
 using LmpClient.Systems.ShareFunds;
@@ -161,6 +162,30 @@ namespace LmpClient.Systems.ShareContracts
             var contractTypeName = node.GetValue("type") ?? "Unknown";
             var contractGuid = node.GetValue("guid") ?? "Unknown";
             var partName = node.GetValue("part"); // Only present on PartTest contracts
+            var isConfiguredContract = string.Equals(contractTypeName, "ConfiguredContract", StringComparison.OrdinalIgnoreCase);
+
+            // Wire-batch body-index scrub. Mirrors the scenario-blob scrub in
+            // ScenarioSystem.StripContractsWithMissingParts. The scenario path is
+            // already filtered; the wire-batch path (ShareProgressContractsMsgData +
+            // Stage 5.18a AgencyContractMsgData catchup/echo) was not, so a CC
+            // contract whose body field is a stock-format integer reached
+            // ConfiguredContract.OnLoad — which re-logs the parse error as [EXC] via
+            // CC's LoggingUtil BEFORE the try/catch below catches the C# exception.
+            // Dropping at the ConfigNode level here is the only way to suppress
+            // CC's in-game console error.
+            var invalidBody = ScenarioSystem.FindInvalidBodyIndex(node, isConfiguredContract);
+            if (invalidBody != null)
+            {
+                LunaLog.LogWarning($"[ShareContracts]: Skipping contract {contractGuid} ({contractTypeName}) — {invalidBody}.");
+                return null;
+            }
+
+            var missingBody = ScenarioSystem.FindMissingBodyReference(node, isConfiguredContract);
+            if (missingBody != null)
+            {
+                LunaLog.LogWarning($"[ShareContracts]: Skipping contract {contractGuid} ({contractTypeName}) — {missingBody}.");
+                return null;
+            }
 
             Contract contract;
             try

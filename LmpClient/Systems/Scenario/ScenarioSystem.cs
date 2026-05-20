@@ -666,7 +666,7 @@ namespace LmpClient.Systems.Scenario
         ///
         /// Returns a human-readable description on mismatch, or null if all body references are valid.
         /// </summary>
-        private static string FindInvalidBodyIndex(ConfigNode node, bool isConfiguredContract = false)
+        internal static string FindInvalidBodyIndex(ConfigNode node, bool isConfiguredContract = false)
         {
             // Guard: if Bodies hasn't been populated yet (shouldn't happen at load time, but be safe).
             if (FlightGlobals.Bodies == null || FlightGlobals.Bodies.Count == 0)
@@ -725,7 +725,7 @@ namespace LmpClient.Systems.Scenario
         /// <c>"PARAM 'SCANsatCoverage' has body-context field but no body target"</c>),
         /// or <c>null</c> if no issue is found.
         /// </returns>
-        private static string FindMissingBodyReference(ConfigNode contractNode, bool isConfiguredContract)
+        internal static string FindMissingBodyReference(ConfigNode contractNode, bool isConfiguredContract)
         {
             if (!isConfiguredContract) return null;
 
