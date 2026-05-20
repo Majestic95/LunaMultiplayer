@@ -604,5 +604,30 @@ namespace LmpCommon.ModFile.Structure
                 "Ablator"
             };
         }
+
+        // Asymmetric-visual carve-out per docs/mod-compat/asymmetric-visual-mods.md.
+        // OptionalPlugins entries pass the ModFileHandler join check at any
+        // version (no SHA pin) whether or not the client has the file, so listing
+        // a visual mod here means individual joiners may install it without
+        // breaking modlist uniformity for everyone else.
+        //
+        // Audit status (2026-05-19): EVE Redux is Candidate, not yet Verified —
+        // the six-rule inclusion test in the carve-out doc has not been
+        // grep-walked against current EVE Redux source. Listed as default
+        // because EVE is the textbook case the carve-out was designed for; an
+        // operator wanting the formal audit pass should walk rules 1-6 against
+        // the upstream source before relying on this entry.
+        public void SetDefaultOptionalPlugins()
+        {
+            OptionalPlugins = new List<DllFile>
+            {
+                new DllFile
+                {
+                    Text = "EVE Redux (engine only)",
+                    Link = "https://github.com/LGhassen/EnvironmentalVisualEnhancements",
+                    FilePath = "environmentalvisualenhancements/environmentalvisualenhancements.dll",
+                },
+            };
+        }
     }
 }
