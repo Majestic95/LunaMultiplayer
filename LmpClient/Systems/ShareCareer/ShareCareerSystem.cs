@@ -17,7 +17,15 @@ namespace LmpClient.Systems.ShareCareer
     {
         public override string SystemName { get; } = nameof(ShareCareerSystem);
 
-        private Queue<Action> _actionQueue;
+        // Eager init so QueueAction is safe before OnEnabled fires. AgencyMessageHandler
+        // (v5) routes through here as soon as ClientState.Handshaked traffic arrives on
+        // channel 22, which is BEFORE this system's default-Running EnableStage. Pre-
+        // Running QueueAction lands here, RunQueue's synchronous call bails on
+        // ShareSystemReady=false (no SpaceCenter scene yet), and the action waits in
+        // the queue until OnEnabled's 1Hz routine picks it up. Queue persists across
+        // Enabled state to preserve any pre-enable enqueues; OnDisabled clears it so a
+        // reconnect doesn't replay stale actions from the previous session.
+        private readonly Queue<Action> _actionQueue = new Queue<Action>();
 
         //Dependencies to run the queue
         protected bool ShareSystemReady => ContractSystem.Instance != null && Funding.Instance != null &&
@@ -30,9 +38,13 @@ namespace LmpClient.Systems.ShareCareer
 
             base.OnEnabled();
 
-            _actionQueue = new Queue<Action>();
-
             SetupRoutine(new RoutineDefinition(1000, RoutineExecution.Update, RunQueue));
+        }
+
+        protected override void OnDisabled()
+        {
+            base.OnDisabled();
+            _actionQueue.Clear();
         }
 
         /// <summary>
