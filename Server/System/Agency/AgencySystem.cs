@@ -63,6 +63,27 @@ namespace Server.System.Agency
             GeneralSettings.SettingsStore.GameMode == GameMode.Career;
 
         /// <summary>
+        /// [Stage 6] Combined gate for per-agency kerbal roster handlers. Composes
+        /// <see cref="PerAgencyEnabled"/> (PerAgencyCareer + Career mode) AND the
+        /// dedicated <see cref="GameplaySettingsDefinition.PerAgencyKerbalRoster"/>
+        /// setting. Per Stage 6 spec §1, per-agency kerbal roster REQUIRES per-agency
+        /// career as a precondition — the kerbal partition leans on
+        /// <see cref="AgencyByPlayerName"/> for sender→agency resolution, which is
+        /// only populated when the career gate is on. Reading PerAgencyKerbalRoster
+        /// alone outside the boot diagnostic path would bypass the precondition.
+        ///
+        /// Phase 6.2 lands this predicate but no handler reads it yet — handler
+        /// routing is Phase 6.4 (HandleKerbalsRequest filter) and Phase 6.5
+        /// (HandleKerbalProto + HandleKerbalRemove routing). Dual-mode silence
+        /// is structural: under the default gate=false, every kerbal handler
+        /// still routes through the shared <c>Universe/Kerbals/</c> path
+        /// bit-for-bit identical to v7.
+        /// </summary>
+        public static bool PerAgencyKerbalRosterEnabled =>
+            PerAgencyEnabled &&
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster;
+
+        /// <summary>
         /// Authoritative registry. Key is the canonical <see cref="AgencyState.AgencyId"/> Guid
         /// per Q7 sign-off — survives player renames and is the on-disk filename.
         /// </summary>
@@ -207,7 +228,9 @@ namespace Server.System.Agency
                 WarnAboutSharedSCANsatOnUpgrade();
                 WarnAboutSharedDMagicOnUpgrade();
                 WarnAboutSharedWolfOnUpgrade();
+                WarnAboutSharedKerbalsOnUpgrade();
                 RefuseStartupIfUpgradeHazardWithoutOverride();
+                RefuseStartupIfKerbalHazardWithoutOverride();
                 return;
             }
 
@@ -377,6 +400,13 @@ namespace Server.System.Agency
             // deleteagency kerbal-restoration helper after upgrade).
             WarnAboutSharedWolfOnUpgrade();
 
+            // [Stage 6] Per-agency kerbal roster upgrade-lens diagnostic. Independent
+            // of the career-hazard family — fires when PerAgencyKerbalRoster=true AND
+            // legacy Universe/Kerbals/ has files, regardless of Agencies.Count. The
+            // operator may have already accepted career migration but still need to
+            // separately accept kerbal-roster migration.
+            WarnAboutSharedKerbalsOnUpgrade();
+
             // [Stage 5.17e-9] Hard refusal: if any of the above upgrade-hazard
             // warnings fired AND the operator hasn't explicitly opted into the
             // accepted-loss path, refuse to keep running. The accumulated shared
@@ -385,6 +415,8 @@ namespace Server.System.Agency
             // connect); fail-closed prevents the operator missing the warnings
             // and continuing into silent data-loss territory.
             RefuseStartupIfUpgradeHazardWithoutOverride();
+            // [Stage 6] Parallel kerbal-roster refusal — independent override flag.
+            RefuseStartupIfKerbalHazardWithoutOverride();
         }
 
         /// <summary>
@@ -1392,6 +1424,99 @@ namespace Server.System.Agency
                 "restart. Each agency begins with empty WOLF state. No mid-flight kerbal hazard. " +
                 "(3) Stay on shared-agency mode (PerAgencyCareer=false) — no WOLF data loss; " +
                 "WOLF continues as shared graph under the Phase 4 gate=off path.");
+        }
+
+        /// <summary>
+        /// [Stage 6 upgrade-lens diagnostic] Fires when (a) <see cref="GameplaySettingsDefinition.PerAgencyKerbalRoster"/>
+        /// is true AND (b) <see cref="KerbalSystem.KerbalsPath"/> contains
+        /// <c>*.txt</c> files. Under those conditions, Phase 6.4's
+        /// <see cref="KerbalSystem.HandleKerbalsRequest"/> filter will route each
+        /// player to their per-agency <c>Universe/Agencies/{guid}/Kerbals/</c>
+        /// subdir; the legacy shared kerbals become a frozen reference set (no
+        /// agency reads or mutates them).
+        ///
+        /// Per spec §Q-Migration, the operator workflow is fresh-start: archive
+        /// <c>Universe/Kerbals/</c> before flipping the gate. The opt-in flag
+        /// <see cref="GameplaySettingsDefinition.AllowEnablePerAgencyKerbalsOnExistingUniverse"/>
+        /// accepts the frozen-reference outcome explicitly.
+        ///
+        /// **Independent of the career-side hazard family.** Unlike the existing
+        /// <c>WarnAboutShared*OnUpgrade</c> helpers which guard on
+        /// <c>Agencies.Count &gt; 0</c> (fresh-mint-upcoming signal), this
+        /// predicate fires regardless of whether per-agency career state has
+        /// already loaded — kerbal-roster migration is its own operator decision
+        /// orthogonal to career-scalar migration. An operator may have already
+        /// accepted career migration via
+        /// <c>AllowEnablePerAgencyOnExistingUniverse=true</c> but still need to
+        /// accept the kerbal migration separately.
+        /// </summary>
+        private static void WarnAboutSharedKerbalsOnUpgrade()
+        {
+            if (!GameplaySettings.SettingsStore.PerAgencyKerbalRoster)
+                return;
+            var legacyDir = KerbalSystem.KerbalsPath;
+            if (!FileHandler.FolderExists(legacyDir))
+                return;
+            var legacyCount = FileHandler.GetFilesInPath(legacyDir)
+                .Count(p => Path.GetExtension(p) == ".txt");
+            if (legacyCount == 0)
+                return;
+
+            LunaLog.Warning(
+                $"[fix:per-agency-kerbal-roster-scaffolding] PerAgencyKerbalRoster=true on a universe with " +
+                $"{legacyCount} legacy shared kerbal file(s) at {legacyDir}. " +
+                "Under Stage 6 per-agency mode, each agency reads/writes only its own " +
+                "Universe/Agencies/{agencyId}/Kerbals/ subdir — the legacy shared kerbals stay readable " +
+                "on disk but no agency can mutate them; they become a frozen reference set. " +
+                "RECOVERY OPTIONS: " +
+                "(1) Fresh-start workflow (spec §Q-Migration): stop the server, archive Universe/Kerbals/, " +
+                "restart. Each agency mints its own Jeb/Bill/Bob/Val from stock templates. " +
+                "(2) Accept the frozen-reference outcome + set " +
+                "AllowEnablePerAgencyKerbalsOnExistingUniverse=true in Settings/GameplaySettings.xml. " +
+                "Each agency still mints fresh stock 4; the legacy files remain readable for operator " +
+                "inspection but are unowned. " +
+                "(3) Stay on shared-roster mode (PerAgencyKerbalRoster=false) — no change.");
+        }
+
+        /// <summary>
+        /// [Stage 6 boot-refusal hardening] Mirrors
+        /// <see cref="RefuseStartupIfUpgradeHazardWithoutOverride"/> but for the
+        /// kerbal-roster-specific override. Detects the upgrade-in-place hazard
+        /// (PerAgencyKerbalRoster=true + legacy <c>Universe/Kerbals/</c> has
+        /// files) and flips <see cref="ServerContext.ServerRunning"/> to false
+        /// unless <see cref="GameplaySettingsDefinition.AllowEnablePerAgencyKerbalsOnExistingUniverse"/>
+        /// is true.
+        ///
+        /// Independent of <see cref="RefuseStartupIfUpgradeHazardWithoutOverride"/>
+        /// — the two overrides are orthogonal. An operator can accept the
+        /// career-scalar projection-strip without accepting the kerbal-roster
+        /// frozen-reference outcome, and vice versa.
+        /// </summary>
+        private static void RefuseStartupIfKerbalHazardWithoutOverride()
+        {
+            if (GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse)
+                return; // Operator opted in; respect the override.
+            if (!GameplaySettings.SettingsStore.PerAgencyKerbalRoster)
+                return; // Gate off; no hazard.
+
+            var legacyDir = KerbalSystem.KerbalsPath;
+            if (!FileHandler.FolderExists(legacyDir))
+                return;
+            var legacyCount = FileHandler.GetFilesInPath(legacyDir)
+                .Count(p => Path.GetExtension(p) == ".txt");
+            if (legacyCount == 0)
+                return;
+
+            LunaLog.Fatal(
+                $"[fix:per-agency-kerbal-roster-scaffolding] BOOT REFUSED: PerAgencyKerbalRoster=true on a " +
+                $"universe with {legacyCount} legacy shared kerbal file(s) at {legacyDir}. " +
+                "Per spec §Q-Migration, the server fails closed by default — Phase 6.4's per-agency request " +
+                "filter would leave the legacy shared kerbals as a frozen reference set readable but " +
+                "unowned by any agency. Resolve by either: (a) follow spec §Q-Migration fresh-start workflow " +
+                "— stop server, archive Universe/Kerbals/, restart with each agency minting its own stock 4; " +
+                "OR (b) set AllowEnablePerAgencyKerbalsOnExistingUniverse=true in Settings/GameplaySettings.xml " +
+                "to explicitly accept the frozen-reference outcome and continue. The server will now shut down.");
+            ServerContext.ServerRunning = false;
         }
 
         /// <summary>

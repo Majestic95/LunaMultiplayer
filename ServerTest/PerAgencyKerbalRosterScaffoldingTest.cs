@@ -1,0 +1,323 @@
+using LmpCommon.Enums;
+using LmpCommon.Xml;
+using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Server.Context;
+using Server.Settings.Definition;
+using Server.Settings.Structures;
+using Server.System;
+using Server.System.Agency;
+using Server.System.Scenario;
+using System;
+using System.IO;
+
+namespace ServerTest
+{
+    /// <summary>
+    /// Stage 6 Phase 6.2 scaffolding tests. Pins:
+    ///   1. The two new GameplaySettings properties round-trip through XML
+    ///      cleanly (default false; non-default values preserved).
+    ///   2. The combined gate <see cref="AgencySystem.PerAgencyKerbalRosterEnabled"/>
+    ///      composes correctly across PerAgencyCareer, GameMode=Career, and
+    ///      PerAgencyKerbalRoster — all three must be on.
+    ///   3. The new <c>RefuseStartupIfKerbalHazardWithoutOverride</c> fires on
+    ///      legacy <c>Universe/Kerbals/</c> contents and is bypassed by the
+    ///      independent override flag.
+    ///
+    /// Tested through the public <see cref="AgencySystem.LoadExistingAgencies"/>
+    /// entry point — mirrors the established pattern from
+    /// <see cref="AgencySystemTest"/>'s boot-refusal coverage (lines 540-599).
+    /// </summary>
+    [TestClass]
+    public class PerAgencyKerbalRosterScaffoldingTest
+    {
+        [TestInitialize]
+        public void Setup()
+        {
+            ServerContext.UniverseDirectory = Path.Combine(Path.GetTempPath(),
+                "lmp-stage6-scaffold-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(ServerContext.UniverseDirectory);
+            Directory.CreateDirectory(AgencyState.AgenciesPath);
+
+            // Default state: gates off, server running. Each test opts in as needed.
+            ServerContext.ServerRunning = true;
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = false;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = false;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = false;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
+
+            AgencySystem.Reset();
+            ScenarioStoreSystem.CurrentScenarios.Clear();
+            VesselStoreSystem.CurrentVessels.Clear();
+        }
+
+        [TestCleanup]
+        public void Teardown()
+        {
+            AgencySystem.Reset();
+            ScenarioStoreSystem.CurrentScenarios.Clear();
+            VesselStoreSystem.CurrentVessels.Clear();
+
+            ServerContext.ServerRunning = false;
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = false;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = false;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = false;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
+
+            if (Directory.Exists(ServerContext.UniverseDirectory))
+                Directory.Delete(ServerContext.UniverseDirectory, recursive: true);
+        }
+
+        // ---------- Settings round-trip ----------
+
+        [TestMethod]
+        public void Settings_RoundTrip_PreservesPerAgencyKerbalRoster()
+        {
+            // Operator hand-writes the two new settings to gameplaysettings.xml.
+            // Load + Save through LunaXmlSerializer (matches the SettingsBase.Load
+            // -> Save flow on BUG-039) must preserve both values bit-for-bit.
+            var path = Path.Combine(ServerContext.UniverseDirectory, $"stage6_round_trip_{Guid.NewGuid():N}.xml");
+            try
+            {
+                var initial =
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+                    "<GameplaySettingsDefinition>\n" +
+                    "  <PerAgencyKerbalRoster>true</PerAgencyKerbalRoster>\n" +
+                    "  <AllowEnablePerAgencyKerbalsOnExistingUniverse>true</AllowEnablePerAgencyKerbalsOnExistingUniverse>\n" +
+                    "</GameplaySettingsDefinition>\n";
+                File.WriteAllText(path, initial);
+
+                var loaded = LunaXmlSerializer.ReadXmlFromPath<GameplaySettingsDefinition>(path);
+                Assert.IsNotNull(loaded);
+                Assert.IsTrue(loaded.PerAgencyKerbalRoster,
+                    "PerAgencyKerbalRoster must deserialise from operator-written XML.");
+                Assert.IsTrue(loaded.AllowEnablePerAgencyKerbalsOnExistingUniverse,
+                    "AllowEnablePerAgencyKerbalsOnExistingUniverse must deserialise from operator-written XML.");
+
+                // Server boots, rewrites the file. Both flags must survive.
+                LunaXmlSerializer.WriteToXmlFile(loaded, path);
+                var rewritten = File.ReadAllText(path);
+                Assert.IsTrue(rewritten.Contains("<PerAgencyKerbalRoster>true</PerAgencyKerbalRoster>"),
+                    $"PerAgencyKerbalRoster must round-trip through save. Got: {rewritten}");
+                Assert.IsTrue(rewritten.Contains("<AllowEnablePerAgencyKerbalsOnExistingUniverse>true</AllowEnablePerAgencyKerbalsOnExistingUniverse>"),
+                    $"AllowEnablePerAgencyKerbalsOnExistingUniverse must round-trip through save. Got: {rewritten}");
+
+                // Re-reading still produces the same values.
+                var reloaded = LunaXmlSerializer.ReadXmlFromPath<GameplaySettingsDefinition>(path);
+                Assert.IsTrue(reloaded.PerAgencyKerbalRoster);
+                Assert.IsTrue(reloaded.AllowEnablePerAgencyKerbalsOnExistingUniverse);
+            }
+            finally
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+        }
+
+        [TestMethod]
+        public void Settings_Defaults_ArePinnedFalse()
+        {
+            // Default-constructed GameplaySettingsDefinition has both new fields false.
+            // Matches the PerAgencyCareer / AllowEnablePerAgencyOnExistingUniverse precedent;
+            // operators must opt in explicitly.
+            var fresh = new GameplaySettingsDefinition();
+            Assert.IsFalse(fresh.PerAgencyKerbalRoster);
+            Assert.IsFalse(fresh.AllowEnablePerAgencyKerbalsOnExistingUniverse);
+        }
+
+        [TestMethod]
+        public void Settings_DifficultyPresets_LeaveBothFalse()
+        {
+            // All four presets explicitly set both flags to false. Without this, an
+            // operator hitting a difficulty preset after enabling per-agency-kerbal
+            // would silently reset their kerbal-mode opt-in.
+            var def = new GameplaySettingsDefinition
+            {
+                PerAgencyKerbalRoster = true,
+                AllowEnablePerAgencyKerbalsOnExistingUniverse = true,
+            };
+            def.SetEasy();
+            Assert.IsFalse(def.PerAgencyKerbalRoster, "SetEasy must reset PerAgencyKerbalRoster to false.");
+            Assert.IsFalse(def.AllowEnablePerAgencyKerbalsOnExistingUniverse,
+                "SetEasy must reset AllowEnablePerAgencyKerbalsOnExistingUniverse to false.");
+
+            def.PerAgencyKerbalRoster = true;
+            def.AllowEnablePerAgencyKerbalsOnExistingUniverse = true;
+            def.SetNormal();
+            Assert.IsFalse(def.PerAgencyKerbalRoster);
+            Assert.IsFalse(def.AllowEnablePerAgencyKerbalsOnExistingUniverse);
+
+            def.PerAgencyKerbalRoster = true;
+            def.AllowEnablePerAgencyKerbalsOnExistingUniverse = true;
+            def.SetModerate();
+            Assert.IsFalse(def.PerAgencyKerbalRoster);
+            Assert.IsFalse(def.AllowEnablePerAgencyKerbalsOnExistingUniverse);
+
+            def.PerAgencyKerbalRoster = true;
+            def.AllowEnablePerAgencyKerbalsOnExistingUniverse = true;
+            def.SetHard();
+            Assert.IsFalse(def.PerAgencyKerbalRoster);
+            Assert.IsFalse(def.AllowEnablePerAgencyKerbalsOnExistingUniverse);
+        }
+
+        // ---------- Combined gate predicate ----------
+
+        [TestMethod]
+        public void PerAgencyKerbalRosterEnabled_RequiresPerAgencyCareer()
+        {
+            // PerAgencyKerbalRoster alone is not enough — the kerbal partition
+            // depends on AgencyByPlayerName which is only populated by the
+            // per-agency career runtime.
+            GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
+
+            Assert.IsFalse(AgencySystem.PerAgencyKerbalRosterEnabled,
+                "Combined gate must return false when PerAgencyCareer is off, regardless of PerAgencyKerbalRoster.");
+        }
+
+        [TestMethod]
+        public void PerAgencyKerbalRosterEnabled_RequiresCareerGameMode()
+        {
+            // Sandbox / Science: combined gate must inherit the Career-mode-only
+            // constraint from PerAgencyEnabled.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
+
+            Assert.IsFalse(AgencySystem.PerAgencyKerbalRosterEnabled,
+                "Combined gate must return false under non-Career GameMode (Sandbox).");
+
+            GeneralSettings.SettingsStore.GameMode = GameMode.Science;
+            Assert.IsFalse(AgencySystem.PerAgencyKerbalRosterEnabled,
+                "Combined gate must return false under non-Career GameMode (Science).");
+        }
+
+        [TestMethod]
+        public void PerAgencyKerbalRosterEnabled_AllGatesOn_ReturnsTrue()
+        {
+            // Full happy path: all three gates on → predicate fires true. This is
+            // the only configuration under which Phase 6.4/6.5 handlers will route.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            GeneralSettings.SettingsStore.GameMode = GameMode.Career;
+
+            Assert.IsTrue(AgencySystem.PerAgencyKerbalRosterEnabled,
+                "Combined gate must return true when all three preconditions hold (PerAgencyCareer + PerAgencyKerbalRoster + Career mode).");
+        }
+
+        // ---------- Boot-refusal ----------
+
+        [TestMethod]
+        public void LoadExistingAgencies_RefusesBoot_OnLegacyKerbalsWithoutOverride()
+        {
+            // The kerbal-roster boot-refusal fires on a directly observable disk
+            // condition (legacy Universe/Kerbals/ has *.txt) AND the gate flip,
+            // independent of the career-side hazard family. Even with zero
+            // vessels / zero accumulated scenario state, the kerbal refusal
+            // fires because the disk has legacy data the projector would freeze.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = false;
+            // Pristine universe on the career side — no vessels, no scenarios.
+            // This isolates the kerbal hazard from the career-side one.
+            SeedLegacyKerbalFile("Jebediah Kerman.txt");
+            SeedLegacyKerbalFile("Valentina Kerman.txt");
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsFalse(ServerContext.ServerRunning,
+                "RefuseStartupIfKerbalHazardWithoutOverride must flip ServerRunning=false when legacy " +
+                "Universe/Kerbals/ has files and PerAgencyKerbalRoster=true without operator override.");
+        }
+
+        [TestMethod]
+        public void LoadExistingAgencies_AllowsBoot_OnLegacyKerbals_WhenOverrideOn()
+        {
+            // Operator opt-in: the kerbal override is independent of the career
+            // override. With AllowEnablePerAgencyKerbalsOnExistingUniverse=true,
+            // the refusal short-circuits and boot proceeds (legacy kerbals stay
+            // as frozen reference set per spec §Q-Migration).
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = true;
+            SeedLegacyKerbalFile("Jebediah Kerman.txt");
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsTrue(ServerContext.ServerRunning,
+                "RefuseStartupIfKerbalHazardWithoutOverride must respect AllowEnablePerAgencyKerbalsOnExistingUniverse=true.");
+        }
+
+        [TestMethod]
+        public void LoadExistingAgencies_AllowsBoot_OnLegacyKerbals_WhenGateOff()
+        {
+            // PerAgencyKerbalRoster=false → kerbal refusal short-circuits at the
+            // gate check before scanning the directory. Vanilla v7 behaviour:
+            // shared-roster mode handles the legacy directory normally.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = false;
+            SeedLegacyKerbalFile("Jebediah Kerman.txt");
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsTrue(ServerContext.ServerRunning,
+                "Kerbal refusal must NOT fire when PerAgencyKerbalRoster=false (dual-mode silence).");
+        }
+
+        [TestMethod]
+        public void LoadExistingAgencies_AllowsBoot_WhenLegacyKerbalsDirIsEmpty()
+        {
+            // Gate on, override off, but the legacy directory is empty (fresh
+            // universe). No refusal — there's no data to lose.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = false;
+            // Create the dir but no files in it.
+            Directory.CreateDirectory(KerbalSystem.KerbalsPath);
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsTrue(ServerContext.ServerRunning,
+                "Kerbal refusal must NOT fire on an empty legacy kerbal directory — no data to freeze.");
+        }
+
+        [TestMethod]
+        public void LoadExistingAgencies_KerbalRefusal_Independent_Of_CareerOverride()
+        {
+            // Critical orthogonality property: the kerbal override is INDEPENDENT
+            // of the career override. An operator who has accepted career
+            // migration (AllowEnablePerAgencyOnExistingUniverse=true) but NOT
+            // kerbal migration must still hit the kerbal refusal.
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = true;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = false;
+            SeedLegacyKerbalFile("Jebediah Kerman.txt");
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsFalse(ServerContext.ServerRunning,
+                "Career override must NOT bypass the kerbal refusal — overrides are orthogonal " +
+                "operator decisions per spec §Q-Migration.");
+        }
+
+        // ---------- Helpers ----------
+
+        private static void SeedLegacyKerbalFile(string fileName)
+        {
+            var dir = KerbalSystem.KerbalsPath;
+            Directory.CreateDirectory(dir);
+            // Minimal valid kerbal ConfigNode shape. Content not parsed by the
+            // refusal predicate — it only counts *.txt files.
+            var stub =
+                "KERBAL\n" +
+                "{\n" +
+                "    name = " + Path.GetFileNameWithoutExtension(fileName) + "\n" +
+                "    state = Available\n" +
+                "    ToD = 0\n" +
+                "}\n";
+            File.WriteAllText(Path.Combine(dir, fileName), stub);
+        }
+    }
+}
