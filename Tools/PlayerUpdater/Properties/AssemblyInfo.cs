@@ -1,8 +1,10 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 
 [assembly: SupportedOSPlatform("windows6.1")]
+[assembly: InternalsVisibleTo("LunaMultiplayer-PlayerUpdater.Tests")]
 
 [assembly: AssemblyTitle("Luna Multiplayer Player Updater")]
 [assembly: AssemblyDescription("Standalone Windows updater for the Majestic95 fork of Luna Multiplayer")]
