@@ -151,6 +151,25 @@ namespace LmpClient.Systems.Agency
                     // AgencyWolfRouteStateMsgData XML).
                     LunaLog.Log("[Agency]: WolfRouteState received — client mirror not yet wired (Phase 4 Slice C, future-slice follow-up).");
                     break;
+                case AgencyMessageType.WolfHopperState:
+                    // [Phase 4 Slice D] Forward-compat stub. HandshakeSystem
+                    // ships AgencyWolfHopperStateMsgData unconditionally under
+                    // gate=on (after depots + routes per the catchup ordering
+                    // invariant). Every Create/Remove echo from
+                    // AgencyWolfHopperRouter also arrives here. A future
+                    // client mirror author moves real apply logic into this
+                    // branch (upsert-by-Id + RemovedKeys handling + REPLACE
+                    // on catchup per the AgencyWolfHopperStateMsgData XML).
+                    LunaLog.Log("[Agency]: WolfHopperState received — client mirror not yet wired (Phase 4 Slice D, future-slice follow-up).");
+                    break;
+                case AgencyMessageType.WolfTerminalState:
+                    // [Phase 4 Slice D] Forward-compat stub. Same shape as
+                    // WolfHopperState. Terminals are Guid("N") keyed (no
+                    // hyphens) — distinct from Hopper's with-hyphens form;
+                    // do NOT normalize at apply time. A future client mirror
+                    // author moves real apply logic into this branch.
+                    LunaLog.Log("[Agency]: WolfTerminalState received — client mirror not yet wired (Phase 4 Slice D, future-slice follow-up).");
+                    break;
                 default:
                     LunaLog.LogWarning($"[Agency]: Unknown AgencyMessageType {msgData.AgencyMessageType} — dropping.");
                     break;

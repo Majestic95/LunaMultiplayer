@@ -129,6 +129,41 @@ namespace Server.Message
                     // AgencySystemSender.SendWolfRouteStateToOwner.
                     AgencyWolfRouteRouter.TryRoute(client, (AgencyWolfRouteStateMsgData)data);
                     break;
+                case AgencyMessageType.WolfHopperState:
+                    // [Phase 4 Slice D] MKS WOLF hopper per-agency routing.
+                    // Inbound from client postfixes on
+                    // ScenarioPersister.CreateHopper + RemoveHopper (Slice D
+                    // client-side). Hoppers are Guid-keyed
+                    // (HopperMetadata.cs:18 — ToString() WITH hyphens; do not
+                    // normalize). No cross-agency vessel-proxy check.
+                    // Owner-only echo via
+                    // AgencySystemSender.SendWolfHopperStateToOwner. The
+                    // matching projector splice in
+                    // AgencyScenarioProjector.SpliceAgencyWolfState FK-sweeps
+                    // hoppers against the just-emitted per-agency depot pool
+                    // (WOLF's ScenarioPersister.OnLoad silently drops hoppers
+                    // whose Body+Biome doesn't match a known depot per
+                    // ScenarioPersister.cs:320-329).
+                    AgencyWolfHopperRouter.TryRoute(client, (AgencyWolfHopperStateMsgData)data);
+                    break;
+                case AgencyMessageType.WolfTerminalState:
+                    // [Phase 4 Slice D] MKS WOLF terminal per-agency routing.
+                    // Inbound from client postfixes on
+                    // ScenarioPersister.CreateTerminal + RemoveTerminal (Slice
+                    // D client-side). Terminals are Guid-keyed
+                    // (TerminalMetadata.cs:15 — ToString("N") WITHOUT
+                    // hyphens; distinct from Hopper's with-hyphens form, do
+                    // not normalize). No cross-agency vessel-proxy check.
+                    // Owner-only echo via
+                    // AgencySystemSender.SendWolfTerminalStateToOwner. Unlike
+                    // Hoppers, the projector does NOT FK-sweep terminals
+                    // against the depot pool — WOLF's
+                    // ScenarioPersister.OnLoad at ScenarioPersister.cs:343-353
+                    // loads terminals directly via TerminalMetadata.OnLoad
+                    // (no depot lookup); a terminal can persist independent
+                    // of depot existence.
+                    AgencyWolfTerminalRouter.TryRoute(client, (AgencyWolfTerminalStateMsgData)data);
+                    break;
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:

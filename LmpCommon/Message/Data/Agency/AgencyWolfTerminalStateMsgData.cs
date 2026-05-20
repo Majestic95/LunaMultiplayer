@@ -7,12 +7,64 @@ namespace LmpCommon.Message.Data.Agency
 {
     /// <summary>
     /// Phase 4 WOLF — single shared MsgData used both directions on
-    /// <see cref="AgencyMessageType.WolfTerminalState"/> (slot 12). Same shape
-    /// and privacy contract as <see cref="AgencyWolfDepotStateMsgData"/>.
-    /// <para><b>Slice A scope:</b> wire shape only. Slice D wires the router +
-    /// projector splice; Slice D client-side postfix on
-    /// <c>WOLF.ScenarioPersister.CreateTerminal</c> + <c>RemoveTerminal</c>
-    /// emits this message (same Remove-is-a-normal-op pattern as Hopper).</para>
+    /// <see cref="AgencyMessageType.WolfTerminalState"/> (slot 12).
+    /// <list type="bullet">
+    ///   <item><b>Server → client (owner-only echo + connect catch-up):</b>
+    ///        emitted by <c>AgencySystemSender.SendWolfTerminalStateToOwner</c>
+    ///        after the per-agency router upserts a batch, AND by
+    ///        <c>AgencySystemSender.SendWolfTerminalCatchupTo</c> wired into
+    ///        <c>HandshakeSystem</c>'s channel 22 catch-up sequence
+    ///        immediately after the hopper catchup (depots → routes →
+    ///        hoppers → terminals — Slice D). Terminals do NOT depend on
+    ///        depots in WOLF's OnLoad, so their last-in-chain position is
+    ///        for invariant uniformity rather than load-bearing ordering.
+    ///        <see cref="AgencyId"/> carries the receiving client's
+    ///        agency.</item>
+    ///   <item><b>Client → server (per-mutation emit from postfix):</b>
+    ///        emitted by <c>LmpClient.Systems.Agency.AgencyWolfTerminalSender</c>
+    ///        from Harmony postfixes on
+    ///        <c>WOLF.ScenarioPersister.CreateTerminal</c> +
+    ///        <c>RemoveTerminal</c> (Slice D). The server's
+    ///        <c>AgencyMsgReader</c> + <c>AgencyWolfTerminalRouter.TryRoute</c>
+    ///        IGNORE the wire-supplied <see cref="AgencyId"/> and derive
+    ///        the sender's agency from <c>AgencySystem.AgencyByPlayerName</c>.
+    ///        Clients cannot spoof attribution.</item>
+    /// </list>
+    ///
+    /// <para><b>Key form preservation</b> (pre-spec §2.f.vi). Terminal id
+    /// is a Guid in <c>ToString("N")</c> form WITHOUT hyphens per WOLF's
+    /// <c>TerminalMetadata.cs:15</c>. Distinct from
+    /// <see cref="AgencyWolfHopperStateMsgData"/>'s with-hyphens form —
+    /// do NOT normalize at any boundary.</para>
+    ///
+    /// <para><b>REPLACE semantics on receive.</b> Each arrival of this
+    /// message — both per-mutation echo and catch-up — is idempotent: the
+    /// receiver upserts the full per-entry snapshot under the
+    /// <see cref="AgencyWolfTerminalEntry.Id"/> key. A future client mirror
+    /// landing the apply path should mirror this posture (last-write-wins).</para>
+    ///
+    /// <para><b>RemovedKeys is non-trivial</b>. WOLF's
+    /// <c>ScenarioPersister.RemoveTerminal(string id)</c> at
+    /// <c>ScenarioPersister.cs:442-449</c> is a normal-operation API — the
+    /// WOLF UI removes a terminal when the operator decommissions it. The
+    /// <see cref="ScenarioPersister_RemoveTerminalPostfix"/>-equivalent
+    /// client path ships the removed Id in the <see cref="RemovedKeys"/>
+    /// tail. A future client mirror MUST handle the RemovedKeys tail.</para>
+    ///
+    /// <para><b>NO depot FK</b> (unlike Hopper / Route / future CrewRoute).
+    /// <c>TerminalMetadata.OnLoad</c> at <c>ScenarioPersister.cs:343-353</c>
+    /// loads terminals directly via <c>TerminalMetadata.OnLoad</c> without
+    /// a depot lookup; <see cref="AgencyWolfTerminalEntry"/> carries Body +
+    /// Biome explicitly per <c>TerminalMetadata.cs:9-29</c>. The projector
+    /// does NOT FK-sweep terminals against the depot pool.</para>
+    ///
+    /// <para><b>Privacy rule (spec §10 Q1 — PrivateAgencyResources = true).</b>
+    /// WOLF terminal state is per-agency private under gate=on.</para>
+    ///
+    /// <para><b>Wire shape.</b> <see cref="AgencyId"/> (Guid) +
+    /// <see cref="EntryCount"/> (int) + <see cref="Entries"/>[0..EntryCount-1]
+    /// + forward-compat removal tail (<see cref="RemovedKeyCount"/> +
+    /// <see cref="RemovedKeys"/>).</para>
     /// </summary>
     public class AgencyWolfTerminalStateMsgData : AgencyBaseMsgData
     {

@@ -119,6 +119,21 @@ namespace Server.System
                         // protects a future Slice (C+) client mirror that
                         // applies the same OnLoad-equivalent sequence.
                         AgencySystemSender.SendWolfRouteCatchupTo(client, assignedState);
+                        // [Phase 4 Slice D] MKS WOLF hopper catch-up.
+                        // Hoppers reference one depot — WOLF's OnLoad at
+                        // ScenarioPersister.cs:320-329 looks up the depot by
+                        // Body+Biome and silently drops the hopper on miss.
+                        // Depots ship first; hoppers follow.
+                        AgencySystemSender.SendWolfHopperCatchupTo(client, assignedState);
+                        // [Phase 4 Slice D] MKS WOLF terminal catch-up.
+                        // Terminals do NOT depend on depots in WOLF's OnLoad
+                        // (ScenarioPersister.cs:343-353 — TerminalMetadata
+                        // carries its own Body+Biome and is loaded without a
+                        // depot lookup), so terminal ordering is not load-
+                        // bearing. Placing them last preserves a single
+                        // "depots-then-children" invariant the Slice E
+                        // CrewRoutes catchup will inherit.
+                        AgencySystemSender.SendWolfTerminalCatchupTo(client, assignedState);
                     }
 
                     // [Mod-compat / Path B D2 catch-up] Synchronous connect-

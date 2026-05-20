@@ -35,6 +35,8 @@ namespace LmpClient.Base
             PatchOrbitalLogisticsTransferRequest();
             PatchWolfDepot();
             PatchWolfRoute();
+            PatchWolfHopper();
+            PatchWolfTerminal();
         }
 
         /// <summary>
@@ -559,6 +561,149 @@ namespace LmpClient.Base
             catch (Exception e)
             {
                 LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF route methods: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice D] Imperatively-registered Harmony patches on
+        /// WOLF.ScenarioPersister.CreateHopper + RemoveHopper.
+        ///
+        /// <para><b>All-or-nothing 2-method resolve.</b> If either method
+        /// can't be resolved (WOLF source drift / version mismatch), neither
+        /// patch lands and we log a single Warning. Mirrors the Slice C
+        /// <see cref="PatchWolfRoute"/> 3-method all-or-nothing pattern. The
+        /// hopper Create/Remove pair must move together — if Create patches
+        /// but Remove doesn't, per-agency state would accumulate stale
+        /// hoppers indefinitely under gate=on.</para>
+        ///
+        /// <para><b>Slice D / Terminal sibling.</b> <see cref="PatchWolfTerminal"/>
+        /// follows the same 2-method shape. The 4 WOLF entity-family patchers
+        /// (depot / route / hopper / terminal) stay siblings under
+        /// <see cref="PatchOptionalMods"/> for a single grep namespace, with
+        /// Slice E adding <c>PatchWolfCrewRoute</c> later.</para>
+        /// </summary>
+        internal static void PatchWolfHopper()
+        {
+            try
+            {
+                var persisterType = HarmonyLib.AccessTools.TypeByName("WOLF.ScenarioPersister");
+                if (persisterType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:WOLF-R4] WOLF.ScenarioPersister type not found — WOLF (MKS WOLF) not installed, skipping per-agency hopper postfixes.");
+                    return;
+                }
+
+                var depotInterface = HarmonyLib.AccessTools.TypeByName("WOLF.IDepot");
+                var recipeInterface = HarmonyLib.AccessTools.TypeByName("WOLF.IRecipe");
+                if (depotInterface == null || recipeInterface == null)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: [fix:WOLF-R4] WOLF interface type resolve failed " +
+                        $"(IDepot={(depotInterface != null ? "OK" : "MISSING")}, " +
+                        $"IRecipe={(recipeInterface != null ? "OK" : "MISSING")}) — " +
+                        "WOLF version mismatch? Per-agency WOLF hopper routing NOT active.");
+                    return;
+                }
+
+                var createHopperMethod = HarmonyLib.AccessTools.Method(persisterType, "CreateHopper",
+                    new[] { depotInterface, recipeInterface });
+                var removeHopperMethod = HarmonyLib.AccessTools.Method(persisterType, "RemoveHopper",
+                    new[] { typeof(string) });
+
+                if (createHopperMethod == null || removeHopperMethod == null)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: [fix:WOLF-R4] WOLF hopper method resolve failed " +
+                        $"(CreateHopper={(createHopperMethod != null ? "OK" : "MISSING")}, " +
+                        $"RemoveHopper={(removeHopperMethod != null ? "OK" : "MISSING")}) — " +
+                        "WOLF version mismatch? Per-agency WOLF hopper routing NOT active; " +
+                        "under gate=on the legacy 30s SHA broadcast for WOLF_ScenarioModule is " +
+                        "suppressed so hopper state will not propagate at all (sync lag = infinite). " +
+                        "Under gate=off the shared-mode broadcast continues unchanged.");
+                    return;
+                }
+
+                var createHopperPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ScenarioPersister_CreateHopperPostfix),
+                    nameof(LmpClient.Harmony.ScenarioPersister_CreateHopperPostfix.Postfix));
+                var removeHopperPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ScenarioPersister_RemoveHopperPostfix),
+                    nameof(LmpClient.Harmony.ScenarioPersister_RemoveHopperPostfix.Postfix));
+
+                HarmonyInstance.Patch(createHopperMethod, postfix: createHopperPostfix);
+                HarmonyInstance.Patch(removeHopperMethod, postfix: removeHopperPostfix);
+
+                LunaLog.Log(
+                    "[LMP]: [fix:WOLF-R4] Patched WOLF.ScenarioPersister.CreateHopper + " +
+                    "RemoveHopper — per-agency hopper routing active under PerAgencyCareerEnabled.");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF hopper methods: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice D] Imperatively-registered Harmony patches on
+        /// WOLF.ScenarioPersister.CreateTerminal + RemoveTerminal.
+        ///
+        /// <para><b>All-or-nothing 2-method resolve.</b> Same shape as
+        /// <see cref="PatchWolfHopper"/>. The Create/Remove pair must move
+        /// together to avoid accumulating stale terminals.</para>
+        /// </summary>
+        internal static void PatchWolfTerminal()
+        {
+            try
+            {
+                var persisterType = HarmonyLib.AccessTools.TypeByName("WOLF.ScenarioPersister");
+                if (persisterType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:WOLF-R4] WOLF.ScenarioPersister type not found — WOLF (MKS WOLF) not installed, skipping per-agency terminal postfixes.");
+                    return;
+                }
+
+                var depotInterface = HarmonyLib.AccessTools.TypeByName("WOLF.IDepot");
+                if (depotInterface == null)
+                {
+                    LunaLog.LogWarning("[LMP]: [fix:WOLF-R4] WOLF.IDepot type not found — WOLF version mismatch? Per-agency WOLF terminal routing NOT active.");
+                    return;
+                }
+
+                var createTerminalMethod = HarmonyLib.AccessTools.Method(persisterType, "CreateTerminal",
+                    new[] { depotInterface });
+                var removeTerminalMethod = HarmonyLib.AccessTools.Method(persisterType, "RemoveTerminal",
+                    new[] { typeof(string) });
+
+                if (createTerminalMethod == null || removeTerminalMethod == null)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: [fix:WOLF-R4] WOLF terminal method resolve failed " +
+                        $"(CreateTerminal={(createTerminalMethod != null ? "OK" : "MISSING")}, " +
+                        $"RemoveTerminal={(removeTerminalMethod != null ? "OK" : "MISSING")}) — " +
+                        "WOLF version mismatch? Per-agency WOLF terminal routing NOT active; " +
+                        "under gate=on the legacy 30s SHA broadcast for WOLF_ScenarioModule is " +
+                        "suppressed so terminal state will not propagate at all (sync lag = infinite). " +
+                        "Under gate=off the shared-mode broadcast continues unchanged.");
+                    return;
+                }
+
+                var createTerminalPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ScenarioPersister_CreateTerminalPostfix),
+                    nameof(LmpClient.Harmony.ScenarioPersister_CreateTerminalPostfix.Postfix));
+                var removeTerminalPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ScenarioPersister_RemoveTerminalPostfix),
+                    nameof(LmpClient.Harmony.ScenarioPersister_RemoveTerminalPostfix.Postfix));
+
+                HarmonyInstance.Patch(createTerminalMethod, postfix: createTerminalPostfix);
+                HarmonyInstance.Patch(removeTerminalMethod, postfix: removeTerminalPostfix);
+
+                LunaLog.Log(
+                    "[LMP]: [fix:WOLF-R4] Patched WOLF.ScenarioPersister.CreateTerminal + " +
+                    "RemoveTerminal — per-agency terminal routing active under PerAgencyCareerEnabled.");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF terminal methods: {e.Message}");
             }
         }
 

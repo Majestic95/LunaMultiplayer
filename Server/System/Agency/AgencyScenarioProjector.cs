@@ -1722,12 +1722,14 @@ namespace Server.System.Agency
             }
 
             // Snapshot agency WOLF state under a SINGLE per-agency lock
-            // acquisition so a concurrent router upsert across either depot
-            // or route can't tear our iteration AND so the depot/route view
-            // is internally consistent (route FK sweep relies on the snapshot
-            // pair being from the same moment in time).
+            // acquisition so a concurrent router upsert across any of the
+            // four families can't tear our iteration AND so the cross-family
+            // view is internally consistent (route + hopper FK sweeps rely
+            // on the depot snapshot being from the same moment in time).
             AgencyWolfDepotEntry[] depotSnapshot;
             AgencyWolfRouteEntry[] routeSnapshot;
+            AgencyWolfHopperEntry[] hopperSnapshot;
+            AgencyWolfTerminalEntry[] terminalSnapshot;
             lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
             {
                 depotSnapshot = new AgencyWolfDepotEntry[targetAgency.WolfDepots.Count];
@@ -1749,6 +1751,26 @@ namespace Server.System.Agency
                 }
                 if (ri < routeSnapshot.Length)
                     Array.Resize(ref routeSnapshot, ri);
+
+                hopperSnapshot = new AgencyWolfHopperEntry[targetAgency.WolfHoppers.Count];
+                var hi = 0;
+                foreach (var kvp in targetAgency.WolfHoppers)
+                {
+                    if (kvp.Value == null) continue;
+                    hopperSnapshot[hi++] = kvp.Value;
+                }
+                if (hi < hopperSnapshot.Length)
+                    Array.Resize(ref hopperSnapshot, hi);
+
+                terminalSnapshot = new AgencyWolfTerminalEntry[targetAgency.WolfTerminals.Count];
+                var ti = 0;
+                foreach (var kvp in targetAgency.WolfTerminals)
+                {
+                    if (kvp.Value == null) continue;
+                    terminalSnapshot[ti++] = kvp.Value;
+                }
+                if (ti < terminalSnapshot.Length)
+                    Array.Resize(ref terminalSnapshot, ti);
             }
 
             // Emit DEPOTS first (WOLF OnLoad ordering invariant). Slices
@@ -1924,15 +1946,150 @@ namespace Server.System.Agency
                 }
             }
 
-            // [Phase 4 Slices D-E insertion point]
-            // Slice D inserts WOLF_HOPPERS + WOLF_TERMINALS emit here.
-            //   Hoppers reference one depot — reuse the depotKeySet HashSet
-            //   declared above (build it lazily if routeSnapshot was empty;
-            //   the null-check + populate is one line: see the routes block
-            //   above for the canonical shape).
+            // [Phase 4 Slice D] WOLF_HOPPERS emit with FK integrity sweep
+            // against the per-agency depot pool. WOLF's
+            // ScenarioPersister.OnLoad at ScenarioPersister.cs:320-329 looks
+            // up each hopper's depot by Body+Biome via
+            // Depots.FirstOrDefault(...) and SILENTLY DROPS hoppers whose
+            // depot isn't present. Unlike Routes (which throw
+            // DepotDoesNotExistException), a missing-depot hopper does not
+            // crash OnLoad — but the hopper is lost. The projector enforces
+            // the same FK contract proactively so the emitted blob doesn't
+            // carry hoppers whose owner client (or any peer client viewing
+            // the projected scenario) would silently lose them on first
+            // OnLoad parse. depotKeySet is the shared HashSet declared at
+            // method scope for Slices D / E reuse (built lazily by the
+            // routes block; build it here if the routes block was empty).
+            if (hopperSnapshot.Length > 0)
+            {
+                if (depotKeySet == null && depotSnapshot.Length > 0)
+                {
+                    depotKeySet = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var d in depotSnapshot)
+                    {
+                        if (d == null) continue;
+                        depotKeySet.Add($"{d.Body ?? string.Empty}|{d.Biome ?? string.Empty}");
+                    }
+                }
+
+                ConfigNode hoppersContainer = null;
+                foreach (var entry in hopperSnapshot)
+                {
+                    if (entry == null)
+                        continue;
+                    try
+                    {
+                        if (string.IsNullOrEmpty(entry.Id)
+                            || string.IsNullOrEmpty(entry.Body)
+                            || string.IsNullOrEmpty(entry.Biome))
+                        {
+                            // Malformed entry — drop, keep siblings.
+                            continue;
+                        }
+
+                        // FK sweep: hopper's Body+Biome must be in the
+                        // emitted depot pool (single-depot FK, unlike Routes'
+                        // two-endpoint FK). The router accepts hoppers out-
+                        // of-order; the projector enforces the lookup
+                        // contract WOLF expects.
+                        var depotKey = $"{entry.Body}|{entry.Biome}";
+                        if (depotKeySet == null || !depotKeySet.Contains(depotKey))
+                        {
+                            LunaLog.Debug($"[fix:WOLF-R4] Hopper '{entry.Id}' at {depotKey} dropped from projection (agency {targetAgency.AgencyId:N}): depot missing from per-agency pool — will reappear once the parent depot's postfix has routed.");
+                            continue;
+                        }
+
+                        // Lazy-allocate the HOPPERS container so an FK-sweep-
+                        // empty result emits no container node at all.
+                        if (hoppersContainer == null)
+                        {
+                            hoppersContainer = new ConfigNode("") { Name = "HOPPERS" };
+                            node.AddNode(hoppersContainer);
+                        }
+
+                        // Per WOLF HopperMetadata.OnSave at HopperMetadata.cs:37-49,
+                        // hoppers persist as HOPPER child nodes (NOT
+                        // WOLF_HOPPER — that's our disk-side name). Wire
+                        // format MUST match WOLF's OnLoad parse contract.
+                        var hNode = new ConfigNode("") { Name = "HOPPER" };
+                        hNode.CreateValue(new CfgNodeValue<string, string>("Id", entry.Id));
+                        hNode.CreateValue(new CfgNodeValue<string, string>("Body", entry.Body));
+                        hNode.CreateValue(new CfgNodeValue<string, string>("Biome", entry.Biome));
+                        hNode.CreateValue(new CfgNodeValue<string, string>("Recipe", entry.Recipe ?? string.Empty));
+                        hoppersContainer.AddNode(hNode);
+                    }
+                    catch (Exception)
+                    {
+                        // Per-entry isolation — drop this hopper, keep others.
+                    }
+                }
+            }
+
+            // [Phase 4 Slice D] WOLF_TERMINALS emit. NO FK sweep — WOLF's
+            // ScenarioPersister.OnLoad at ScenarioPersister.cs:343-353 loads
+            // terminals via TerminalMetadata.OnLoad without a depot lookup
+            // (TerminalMetadata carries its own Body+Biome per
+            // TerminalMetadata.cs:9-29). A terminal can persist independent
+            // of depot existence; emitting unconditionally is the source-
+            // contract-correct shape. Per-entry try/catch + Id/Body/Biome
+            // validation mirrors the Hoppers block.
+            if (terminalSnapshot.Length > 0)
+            {
+                ConfigNode terminalsContainer = null;
+                foreach (var entry in terminalSnapshot)
+                {
+                    if (entry == null)
+                        continue;
+                    try
+                    {
+                        if (string.IsNullOrEmpty(entry.Id)
+                            || string.IsNullOrEmpty(entry.Body)
+                            || string.IsNullOrEmpty(entry.Biome))
+                        {
+                            // Malformed entry — drop, keep siblings.
+                            continue;
+                        }
+
+                        if (terminalsContainer == null)
+                        {
+                            terminalsContainer = new ConfigNode("") { Name = "TERMINALS" };
+                            node.AddNode(terminalsContainer);
+                        }
+
+                        // Per WOLF TerminalMetadata.OnSave at
+                        // TerminalMetadata.cs:31-37, terminals persist as
+                        // TERMINAL child nodes (NOT WOLF_TERMINAL — that's
+                        // our disk-side name).
+                        var tNode = new ConfigNode("") { Name = "TERMINAL" };
+                        tNode.CreateValue(new CfgNodeValue<string, string>("Id", entry.Id));
+                        tNode.CreateValue(new CfgNodeValue<string, string>("Body", entry.Body));
+                        tNode.CreateValue(new CfgNodeValue<string, string>("Biome", entry.Biome));
+                        terminalsContainer.AddNode(tNode);
+                    }
+                    catch (Exception)
+                    {
+                        // Per-entry isolation — drop this terminal, keep others.
+                    }
+                }
+            }
+
+            // [Phase 4 Slice E insertion point]
             // Slice E inserts WOLF_CREWROUTES emit here — reuse depotKeySet
             //   (CrewRoutes have origin + destination FK like routes).
-            //   Slice E additionally consults the K1 kerbal-authority guard
+            //
+            // Lazy-build pattern: depotKeySet may already be populated by
+            //   the Routes block (~line 1846) AND/OR the Hoppers block
+            //   (~line 1965). When all of Routes + Hoppers are empty but
+            //   CrewRoutes are present, Slice E needs the same
+            //   `if (depotKeySet == null && depotSnapshot.Length > 0) { ... }`
+            //   build at the top of its CrewRoutes block — see the Routes
+            //   block at lines 1846-1854 for the canonical idiom. If this
+            //   pattern repeats a third time, consider extracting to a
+            //   `BuildDepotKeySet(depotSnapshot)` static local function so
+            //   Slice E inherits one source of truth — cosmetic, not load-
+            //   bearing (the duplication is per-Slice scope-isolated).
+            //
+            // Slice E additionally consults the K1 kerbal-authority guard
             //   per pre-spec §8 (separate from depotKeySet — kerbals are
             //   tracked via their own per-vessel lmpOwningAgency stamps).
 

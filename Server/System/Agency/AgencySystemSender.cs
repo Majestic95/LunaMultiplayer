@@ -1123,5 +1123,261 @@ namespace Server.System.Agency
 
             MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
         }
+
+        /// <summary>
+        /// [Phase 4 Slice D — WOLF] Owner-only echo of a per-agency hopper
+        /// batch. Emitted by <see cref="AgencyWolfHopperRouter.TryRoute"/>
+        /// after a successful upsert + persist. Peers never receive another
+        /// agency's per-agency hoppers (spec §10 Q1 PrivateAgencyResources=true)
+        /// — projection through <see cref="AgencyScenarioProjector"/>'s
+        /// <c>WOLF_ScenarioModule</c> case is the only path by which
+        /// cross-agency awareness leaks into the read-side, and projection
+        /// happens per-target-client at scene-load time.
+        ///
+        /// <para>Mirrors <see cref="SendWolfDepotStateToOwner"/> /
+        /// <see cref="SendWolfRouteStateToOwner"/> shape including the
+        /// protective null-filter on entries + removedKeys. No-op when
+        /// gate=off / owner==null / batch empty.</para>
+        /// </summary>
+        public static void SendWolfHopperStateToOwner(
+            ClientStructure owner,
+            Guid agencyId,
+            IReadOnlyList<AgencyWolfHopperEntry> entries,
+            IReadOnlyList<string> removedKeys = null)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (owner == null)
+                return;
+
+            var entriesEmpty = entries == null || entries.Count == 0;
+            var removedEmpty = removedKeys == null || removedKeys.Count == 0;
+            if (entriesEmpty && removedEmpty)
+                return;
+
+            var nonNullEntries = entriesEmpty
+                ? null
+                : new List<AgencyWolfHopperEntry>(entries.Count);
+            if (!entriesEmpty)
+            {
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    if (entries[i] != null) nonNullEntries.Add(entries[i]);
+                }
+            }
+
+            var nonNullRemoved = removedEmpty
+                ? null
+                : new List<string>(removedKeys.Count);
+            if (!removedEmpty)
+            {
+                for (var i = 0; i < removedKeys.Count; i++)
+                {
+                    if (!string.IsNullOrEmpty(removedKeys[i])) nonNullRemoved.Add(removedKeys[i]);
+                }
+            }
+
+            var emitEntries = nonNullEntries != null && nonNullEntries.Count > 0;
+            var emitRemoved = nonNullRemoved != null && nonNullRemoved.Count > 0;
+            if (!emitEntries && !emitRemoved)
+                return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfHopperStateMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.EntryCount = emitEntries ? nonNullEntries.Count : 0;
+            msgData.Entries = emitEntries ? nonNullEntries.ToArray() : new AgencyWolfHopperEntry[0];
+            msgData.RemovedKeyCount = emitRemoved ? nonNullRemoved.Count : 0;
+            msgData.RemovedKeys = emitRemoved ? nonNullRemoved.ToArray() : new string[0];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice D — WOLF] Connect-time catch-up: ships the
+        /// owner's persisted <c>AgencyState.WolfHoppers</c> dictionary as a
+        /// single batch <see cref="AgencyWolfHopperStateMsgData"/>. Wired
+        /// into <c>HandshakeSystem.HandleHandshakeRequest</c> immediately
+        /// after <see cref="SendWolfRouteCatchupTo"/> per the depots →
+        /// routes → hoppers → terminals call-ordering invariant. Hoppers
+        /// reference one depot (by Body+Biome) — WOLF's
+        /// <c>ScenarioPersister.OnLoad</c> at <c>ScenarioPersister.cs:320-329</c>
+        /// looks up the depot and silently drops a hopper if its depot is
+        /// missing; depots must arrive first on a future client mirror that
+        /// applies the same OnLoad-equivalent sequence.
+        ///
+        /// <para>Sends unconditionally under gate=on, even for empty
+        /// dictionaries (same shape as <see cref="SendWolfDepotCatchupTo"/>).
+        /// REPLACE semantics on the client side — an offline-window admin
+        /// /deleteagency on a stale hopper must produce post-mutation
+        /// authoritative state on reconnect.</para>
+        ///
+        /// <para><b>Chunking TODO</b> (inherited from Slice B catchup gap
+        /// per <see cref="SendWolfDepotCatchupTo"/> XML): catchup ships
+        /// <c>state.WolfHoppers.Count</c> entries unconditionally. If a
+        /// megabase cohort accumulates &gt;200 hoppers
+        /// (<see cref="AgencyWolfHopperStateMsgData.MaxEntryCount"/>), the
+        /// receive-side <c>InternalDeserialize</c> at slot 11 throws
+        /// <c>InvalidDataException</c> + the client disconnects at handshake
+        /// completion. Phase 3 Slice D-1 closed this for orbital via
+        /// <see cref="SendOrbitalCatchupTo"/>'s chunked loop — pattern is
+        /// available to mirror here when soak shows clipping. Acceptable
+        /// for Slice D (200 hoppers/agency is well above realistic cohort
+        /// sizes; matches the pre-existing Wolf-depot / Wolf-route / Kolony /
+        /// Planetary gap that hasn't fired in soak).</para>
+        /// </summary>
+        public static void SendWolfHopperCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (client == null || state == null)
+                return;
+
+            AgencyWolfHopperEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(state.AgencyId))
+            {
+                snapshot = new AgencyWolfHopperEntry[state.WolfHoppers.Count];
+                var i = 0;
+                foreach (var kvp in state.WolfHoppers)
+                {
+                    if (kvp.Value == null) continue;
+                    snapshot[i++] = kvp.Value;
+                }
+                if (i < snapshot.Length)
+                    Array.Resize(ref snapshot, i);
+            }
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfHopperStateMsgData>();
+            msgData.AgencyId = state.AgencyId;
+            msgData.EntryCount = snapshot.Length;
+            msgData.Entries = snapshot;
+            // Catchup is upsert-only — no removals at connect time. Set
+            // RemovedKeyCount/RemovedKeys explicitly rather than rely on
+            // the MsgData factory default so a future field-default refactor
+            // (e.g. `RemovedKeys = null`) can't silently flip catchup into
+            // a NRE-on-serialize path. Integration-logic review #1.
+            msgData.RemovedKeyCount = 0;
+            msgData.RemovedKeys = new string[0];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice D — WOLF] Owner-only echo of a per-agency terminal
+        /// batch. Emitted by <see cref="AgencyWolfTerminalRouter.TryRoute"/>
+        /// after a successful upsert + persist. Same privacy contract as
+        /// <see cref="SendWolfHopperStateToOwner"/>.
+        ///
+        /// <para>Mirrors sibling-router senders shape including the
+        /// protective null-filter on entries + removedKeys. No-op when
+        /// gate=off / owner==null / batch empty.</para>
+        /// </summary>
+        public static void SendWolfTerminalStateToOwner(
+            ClientStructure owner,
+            Guid agencyId,
+            IReadOnlyList<AgencyWolfTerminalEntry> entries,
+            IReadOnlyList<string> removedKeys = null)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (owner == null)
+                return;
+
+            var entriesEmpty = entries == null || entries.Count == 0;
+            var removedEmpty = removedKeys == null || removedKeys.Count == 0;
+            if (entriesEmpty && removedEmpty)
+                return;
+
+            var nonNullEntries = entriesEmpty
+                ? null
+                : new List<AgencyWolfTerminalEntry>(entries.Count);
+            if (!entriesEmpty)
+            {
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    if (entries[i] != null) nonNullEntries.Add(entries[i]);
+                }
+            }
+
+            var nonNullRemoved = removedEmpty
+                ? null
+                : new List<string>(removedKeys.Count);
+            if (!removedEmpty)
+            {
+                for (var i = 0; i < removedKeys.Count; i++)
+                {
+                    if (!string.IsNullOrEmpty(removedKeys[i])) nonNullRemoved.Add(removedKeys[i]);
+                }
+            }
+
+            var emitEntries = nonNullEntries != null && nonNullEntries.Count > 0;
+            var emitRemoved = nonNullRemoved != null && nonNullRemoved.Count > 0;
+            if (!emitEntries && !emitRemoved)
+                return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfTerminalStateMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.EntryCount = emitEntries ? nonNullEntries.Count : 0;
+            msgData.Entries = emitEntries ? nonNullEntries.ToArray() : new AgencyWolfTerminalEntry[0];
+            msgData.RemovedKeyCount = emitRemoved ? nonNullRemoved.Count : 0;
+            msgData.RemovedKeys = emitRemoved ? nonNullRemoved.ToArray() : new string[0];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice D — WOLF] Connect-time catch-up: ships the
+        /// owner's persisted <c>AgencyState.WolfTerminals</c> dictionary as a
+        /// single batch <see cref="AgencyWolfTerminalStateMsgData"/>. Wired
+        /// into <c>HandshakeSystem.HandleHandshakeRequest</c> immediately
+        /// after <see cref="SendWolfHopperCatchupTo"/> per the depots →
+        /// routes → hoppers → terminals call-ordering invariant.
+        ///
+        /// <para><b>Ordering rationale.</b> Terminals do NOT depend on
+        /// depots in WOLF's OnLoad (per
+        /// <c>ScenarioPersister.cs:343-353</c> — terminals load directly
+        /// via <c>TerminalMetadata.OnLoad</c> without a depot lookup), so
+        /// terminals could in principle ship in any order. Placing them
+        /// last preserves a single global "depots-then-children" ordering
+        /// invariant that future Slice E CrewRoutes (FK-coupled to depots
+        /// like Routes) will inherit, and makes the chain easier to reason
+        /// about. The cost of strictly-last is zero (single message).</para>
+        ///
+        /// <para>Sends unconditionally under gate=on, even for empty
+        /// dictionaries. REPLACE semantics on the client side. Same
+        /// chunking TODO as <see cref="SendWolfHopperCatchupTo"/>.</para>
+        /// </summary>
+        public static void SendWolfTerminalCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (client == null || state == null)
+                return;
+
+            AgencyWolfTerminalEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(state.AgencyId))
+            {
+                snapshot = new AgencyWolfTerminalEntry[state.WolfTerminals.Count];
+                var i = 0;
+                foreach (var kvp in state.WolfTerminals)
+                {
+                    if (kvp.Value == null) continue;
+                    snapshot[i++] = kvp.Value;
+                }
+                if (i < snapshot.Length)
+                    Array.Resize(ref snapshot, i);
+            }
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfTerminalStateMsgData>();
+            msgData.AgencyId = state.AgencyId;
+            msgData.EntryCount = snapshot.Length;
+            msgData.Entries = snapshot;
+            // See SendWolfHopperCatchupTo for the explicit-init rationale
+            // (integration-logic review #1 — guard against latent MsgData
+            // field-default refactors).
+            msgData.RemovedKeyCount = 0;
+            msgData.RemovedKeys = new string[0];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+        }
     }
 }

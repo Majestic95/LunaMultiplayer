@@ -1292,15 +1292,18 @@ namespace Server.System.Agency
         /// per WOLF's <c>ScenarioPersister.OnSave</c> at MKS SHA
         /// <c>ed0f6aa6</c>.</para>
         ///
-        /// <para><b>[Phase 4 Slice B — dead code; Slice B-2 call site
-        /// lands here]</b> This helper is defined but uncalled in Slice B
-        /// (per the deferral notes at the upper LoadExistingAgencies +
-        /// LoadAgency call sites). Slice B-2 wires both call sites
-        /// simultaneously with the projector splice, IgnoredScenarios
-        /// filter, hazard predicate, and Harmony postfixes. C# does not
-        /// warn on unused <c>private static</c> methods, so this method
-        /// compiles silently. Do NOT strip as dead code before Slice B-2
-        /// ships.</para>
+        /// <para><b>Wired since Slice B-2.</b> Called from
+        /// <see cref="LoadExistingAgencies"/> (line ~206) AND
+        /// <see cref="RefuseStartupIfUpgradeHazardWithoutOverride"/> (~375).
+        /// Refreshed Slice D to include hoppers + terminals in the count +
+        /// recovery-text — the routed-families bullet now lists depots,
+        /// routes, hoppers, AND terminals (CrewRoutes pending Slice E).
+        /// Mid-session gate-flip on a fresh universe fires this once at the
+        /// flip event; subsequent connecting players do NOT re-warn because
+        /// the <c>Agencies.Count &gt; 0</c> early-return at line 1307 takes
+        /// effect after the first agency mints. This is intentional —
+        /// upgrade-in-place is a one-time operator decision documented in
+        /// the WARN text.</para>
         /// </summary>
         private static void WarnAboutSharedWolfOnUpgrade()
         {
@@ -1351,11 +1354,12 @@ namespace Server.System.Agency
                 midFlightSuffix + ". " +
                 "The Phase 4 projector strips ALL 5 WOLF child node families on first per-agency " +
                 "connect; accumulated WOLF logistics graph is NOT migrated. " +
-                "EVEN THE ROUTED FAMILIES LOSE THEIR PRE-UPGRADE STATE: Slice B-2 (depots) and " +
-                "Slice C (routes) route fresh mutations into per-agency AgencyState, but the " +
-                "stripper has no migration path for pre-existing shared entries — only mutations " +
-                "made AFTER gate=on populate WolfDepots / WolfRoutes. Hoppers / Terminals / " +
-                "CrewRoutes remain fully stripped (Slices D-E pending). " +
+                "EVEN THE ROUTED FAMILIES LOSE THEIR PRE-UPGRADE STATE: Slice B-2 (depots), " +
+                "Slice C (routes), and Slice D (hoppers + terminals) route fresh mutations into " +
+                "per-agency AgencyState, but the stripper has no migration path for pre-existing " +
+                "shared entries — only mutations made AFTER gate=on populate WolfDepots / " +
+                "WolfRoutes / WolfHoppers / WolfTerminals. CrewRoutes remain fully stripped " +
+                "(Slice E pending). " +
                 "RECOVERY OPTIONS: " +
                 "(1) BEFORE upgrade: ensure no CrewRoutes are mid-flight (let in-flight routes " +
                 "complete to Arrived OR Disembark passengers OR delete routes via in-game UI). " +
