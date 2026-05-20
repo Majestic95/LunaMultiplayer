@@ -90,7 +90,9 @@ luna-multiplayer/
 │   ├── BaseLogger.cs           # Shared logger base (server's LunaLog extends this)
 │   └── Locks/                  # Lock primitives shared with server
 ├── LmpMasterServer/            # Optional public registry
-├── LmpUpdater/                 # Self-updater
+├── LmpUpdater/                 # Self-updater (legacy server-side, netstandard2.0)
+├── Tools/
+│   └── PlayerUpdater/          # Standalone player-facing Windows updater (net10.0-windows, WinForms, x64). Reads Majestic95 releases only; per-file overlay onto KSP install with backup + rollback. `feature/auto-updater` branch.
 ├── Lidgren/ Lidgren.Core/ Lidgren.Net/   # Vendored UDP transport
 ├── ServerTest/                 # NUnit tests for server (18 tests)
 ├── LmpCommonTest/              # NUnit tests for LmpCommon

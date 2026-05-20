@@ -117,9 +117,11 @@ The static `LunaMultiplayer.version` file on disk becomes a fallback / template;
 
 **Step 2:**
 
-Build script publishes the PlayerUpdater exe in two flavours alongside the existing 5 zips:
-- `LunaMultiplayer-Updater-win-x64-Release.exe` (~5 MB framework-dependent — requires .NET 10 Desktop Runtime on the player machine)
-- `LunaMultiplayer-Updater-win-x64-selfcontained-Release.zip` (~70 MB, no runtime dep)
+Build script publishes the PlayerUpdater exe in two flavours alongside the existing 5 zips. Asset names match the AssemblyName set in `Tools/PlayerUpdater/PlayerUpdater.csproj` (`LunaMultiplayer-PlayerUpdater`):
+- `LunaMultiplayer-PlayerUpdater-win-x64-Release.exe` (~5 MB framework-dependent — requires .NET 10 Desktop Runtime on the player machine)
+- `LunaMultiplayer-PlayerUpdater-win-x64-selfcontained-Release.zip` (~70 MB, no runtime dep)
+
+(The earlier draft used `LunaMultiplayer-Updater-…` for the asset names. Renamed to `PlayerUpdater` to disambiguate from `LmpUpdater`, the legacy server-side updater. Keep these names in sync with `<AssemblyName>`.)
 
 `LMP Readme.txt` updated to point new players at the exe.
 
