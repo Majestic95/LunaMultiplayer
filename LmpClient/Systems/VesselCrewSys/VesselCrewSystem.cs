@@ -25,6 +25,8 @@ namespace LmpClient.Systems.VesselCrewSys
             GameEvents.onVesselCrewWasModified.Add(VesselCrewEvents.OnCrewModified);
             EvaEvent.onCrewEvaReady.Add(VesselCrewEvents.CrewEvaReady);
             EvaEvent.onCrewEvaBoarded.Add(VesselCrewEvents.OnCrewBoard);
+            ExternalSeatEvent.onExternalSeatBoard.Add(VesselCrewEvents.OnExternalSeatBoard);
+            ExternalSeatEvent.onExternalSeatUnboard.Add(VesselCrewEvents.OnExternalSeatUnboard);
         }
 
         protected override void OnDisabled()
@@ -34,6 +36,8 @@ namespace LmpClient.Systems.VesselCrewSys
             GameEvents.onVesselCrewWasModified.Remove(VesselCrewEvents.OnCrewModified);
             EvaEvent.onCrewEvaReady.Remove(VesselCrewEvents.CrewEvaReady);
             EvaEvent.onCrewEvaBoarded.Remove(VesselCrewEvents.OnCrewBoard);
+            ExternalSeatEvent.onExternalSeatBoard.Remove(VesselCrewEvents.OnExternalSeatBoard);
+            ExternalSeatEvent.onExternalSeatUnboard.Remove(VesselCrewEvents.OnExternalSeatUnboard);
         }
 
         #endregion
