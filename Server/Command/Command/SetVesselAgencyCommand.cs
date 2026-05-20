@@ -236,6 +236,19 @@ namespace Server.Command.Command
             LockType.UnloadedUpdate,
         };
 
+        /// <summary>
+        /// [Stage 6 Phase 6.9-hardening — security-lens MUST FIX #3] Maximum
+        /// number of crew this command will migrate on a single invocation.
+        /// Prevents a malformed or hostile vessel proto with thousands of
+        /// forged <c>crew = NAME{i}</c> lines from locking the dual agency
+        /// lock for minutes while iterating ReadFile + WriteAtomic + FileDelete
+        /// per name. Legitimate KSP-stock vessels carry ≤8 crew per part; the
+        /// most generously-modded large stations top out around ~50 crew.
+        /// 64 is a generous cap above any realistic crewed-vessel value. Set
+        /// as <c>public const</c> so tests can pin the threshold.
+        /// </summary>
+        public const int MaxCrewMigration = 64;
+
         public override bool Execute(string commandArgs)
         {
             // (1) Pure parse.
@@ -396,6 +409,29 @@ namespace Server.Command.Command
                         $"[fix:per-agency-kerbal-roster] setvesselagency {movedVesselId:N} crew-extraction failed; " +
                         "continuing with no kerbal migration (vessel-stamp + router migration still apply).");
                     crewNames = new List<string>();
+                }
+
+                // [Stage 6 Phase 6.9-hardening — security-lens MUST FIX #3]
+                // Crew-count cap to prevent dual-agency-lock-held DoS via a
+                // vessel proto with thousands of forged `crew = NAME{i}`
+                // lines. KSP-stock vessels carry ≤8 crew per part; the most
+                // generously-modded large stations top out around ~50 crew.
+                // 64 caps the migration loop's worst-case lock-held disk
+                // I/O while leaving generous headroom for legitimate KSP
+                // vessels. Refuses the whole command on overflow because
+                // splitting the migration across multiple lock-release-
+                // and-reacquire cycles would lose the optimistic-collision
+                // re-check authoritativeness (see Phase 6.8 step-4b XML at
+                // SetVesselAgencyCommand.cs).
+                if (crewNames.Count > MaxCrewMigration)
+                {
+                    LunaLog.Error(
+                        $"[fix:per-agency-kerbal-roster] setvesselagency {movedVesselId:N} result=refused-crew-overflow " +
+                        $"vessel proto reports {crewNames.Count} crew which exceeds the cap of {MaxCrewMigration}. " +
+                        "This is far above any legitimate KSP-stock or supported-mod vessel crew count and likely " +
+                        "indicates a malformed or hostile vessel proto. The vessel stamp + router migration are " +
+                        "NOT applied. Inspect Universe/Vessels/{vid}.txt for the actual crew block before re-running.");
+                    return false;
                 }
 
                 if (crewNames.Count > 0)
@@ -1236,6 +1272,34 @@ namespace Server.Command.Command
                         continue;
                     var name = trimmed.Substring("crew = ".Length).Trim();
                     if (string.IsNullOrEmpty(name)) continue;
+
+                    // [Stage 6 Phase 6.9-hardening — security-lens MUST FIX #1
+                    // defense-in-depth] The `crew = NAME` line came from the
+                    // vessel proto, which is written by a (potentially modified)
+                    // client via VesselProtoMsgData. The v4 cross-agency write
+                    // guard at HandleVesselProto prevents an attacker from
+                    // writing protos for OTHER agencies' vessels, but the
+                    // attacker's OWN vessel proto could contain forged
+                    // `crew = ../../../etc/passwd` lines that would feed the
+                    // unsafe name straight through to the migration loop's
+                    // path-construction sinks (Path.Combine in
+                    // ResolveKerbalSourcePathForMove + CheckDestinationCollisions
+                    // + the per-kerbal move). Validate here so a malicious
+                    // vessel proto on the operator's reassign command fails
+                    // closed at the name-extraction boundary.
+                    if (!KerbalNameValidator.IsValid(name, out var reason))
+                    {
+                        // Snippet-truncated log to prevent recursive
+                        // amplification on a malformed long name. Same shape
+                        // as KerbalMsgReader.RejectIfInvalidKerbalName.
+                        var snippet = name.Length <= 32 ? $"'{name}'" : $"'{name.Substring(0, 32)}...'";
+                        LunaLog.Warning(
+                            $"[fix:per-agency-kerbal-roster] setvesselagency {vesselId:N} extracted crew-name {snippet} " +
+                            $"failed validation ({reason}); skipping. Vessel proto may have been tampered with — " +
+                            "inspect Universe/Vessels/{vid}.txt for unexpected `crew = ...` lines.");
+                        continue;
+                    }
+
                     if (seen.Add(name))
                         crewNames.Add(name);
                 }
