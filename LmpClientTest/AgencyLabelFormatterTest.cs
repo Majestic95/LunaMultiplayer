@@ -263,5 +263,162 @@ namespace LmpClientTest
             // and they renamed to "alice Space Agency" deliberately.
             Assert.IsFalse(AgencyLabelFormatter.IsDefaultDisplayName("ALICE Space Agency", "alice"));
         }
+
+        // --- IsForeignVessel (Stage 6 Phase 6.6) ---
+
+        [TestMethod]
+        public void IsForeign_NullRegistry_False()
+        {
+            // Defensive: a not-yet-constructed registry must not throw. Same
+            // pattern as the null-registry guard on FormatVesselAgencyLabel.
+            Assert.IsFalse(AgencyLabelFormatter.IsForeignVessel(
+                Guid.NewGuid(), Guid.NewGuid(), null));
+        }
+
+        [TestMethod]
+        public void IsForeign_LocalAgencyEmpty_False()
+        {
+            // Mid-handshake window or per-agency gate=off: there is no "local
+            // agency" to compare against, so the predicate cannot conclude the
+            // vessel is foreign. Belt-and-braces with LabelEvents' own gate check
+            // (which already short-circuits before reaching this helper).
+            var ownership = EmptyOwnership();
+            var vesselId = Guid.NewGuid();
+            ownership[vesselId] = Guid.NewGuid();
+
+            Assert.IsFalse(AgencyLabelFormatter.IsForeignVessel(
+                vesselId, Guid.Empty, ownership));
+        }
+
+        [TestMethod]
+        public void IsForeign_VesselAbsent_False()
+        {
+            // Registry miss: vessel hasn't arrived through a wire round yet.
+            // Don't claim it's foreign — the baseline label rendering (which
+            // FormatVesselAgencyLabel resolves to null in this case) handles
+            // the absent-vessel surface.
+            Assert.IsFalse(AgencyLabelFormatter.IsForeignVessel(
+                Guid.NewGuid(), Guid.NewGuid(), EmptyOwnership()));
+        }
+
+        [TestMethod]
+        public void IsForeign_OwningAgencyEmpty_False()
+        {
+            // Unassigned-sentinel vessel (spec §10 Q3): there is no agency to
+            // attribute crew to. The bare "Unassigned" decoration on the row
+            // is the right surface; we don't render "Crew: 3 (Unassigned)"
+            // because the count without an agency tag is not actionable for
+            // the player.
+            var vesselId = Guid.NewGuid();
+            var ownership = EmptyOwnership();
+            ownership[vesselId] = Guid.Empty;
+
+            Assert.IsFalse(AgencyLabelFormatter.IsForeignVessel(
+                vesselId, Guid.NewGuid(), ownership));
+        }
+
+        [TestMethod]
+        public void IsForeign_OwningAgencyIsLocal_False()
+        {
+            // Owner-agency vessel: spec §2 Q-Render says these render unchanged.
+            // Local crew count is correct via KSP's own GetCrewCount; the foreign
+            // enrichment must not fire.
+            var vesselId = Guid.NewGuid();
+            var localId = Guid.NewGuid();
+            var ownership = EmptyOwnership();
+            ownership[vesselId] = localId;
+
+            Assert.IsFalse(AgencyLabelFormatter.IsForeignVessel(
+                vesselId, localId, ownership));
+        }
+
+        [TestMethod]
+        public void IsForeign_OwningAgencyIsForeign_True()
+        {
+            // Happy path: vessel owned by a different agency. Enrichment fires
+            // (assuming registry has a positive crew count for it).
+            var vesselId = Guid.NewGuid();
+            var foreignId = Guid.NewGuid();
+            var localId = Guid.NewGuid();
+            var ownership = EmptyOwnership();
+            ownership[vesselId] = foreignId;
+
+            Assert.IsTrue(AgencyLabelFormatter.IsForeignVessel(
+                vesselId, localId, ownership));
+        }
+
+        // --- FormatForeignVesselCrewLabel (Stage 6 Phase 6.6) ---
+
+        [TestMethod]
+        public void FormatForeignCrew_ZeroCount_ReturnsNull()
+        {
+            // Foreign vessel arrived with no crew (drone / probe). No enrichment —
+            // caller falls back to the bare [agency] suffix already shipped in 5.18c.
+            // This is the common case for foreign vessels (most KSP missions are
+            // unmanned), so we keep the row label uncluttered.
+            Assert.IsNull(AgencyLabelFormatter.FormatForeignVesselCrewLabel(0, "Acme Astronautics"));
+        }
+
+        [TestMethod]
+        public void FormatForeignCrew_NegativeCount_ReturnsNull()
+        {
+            // Defensive: a negative registry value would only result from a future
+            // mutation bug. Don't render "Crew: -1" — return null so the caller
+            // renders the baseline [agency] decoration unchanged. Matches the spec
+            // §2 Q-Render's "scrub-foreign" contract: when in doubt, render the
+            // identity without false crew claims.
+            Assert.IsNull(AgencyLabelFormatter.FormatForeignVesselCrewLabel(-1, "Acme Astronautics"));
+        }
+
+        [TestMethod]
+        public void FormatForeignCrew_SingleCrew_ReturnsLabel()
+        {
+            // Singleton-crew foreign vessel (typical solo-pilot mission). Pins the
+            // exact spec §2 Q-Render text format — peer must see "Crew: 1 (Acme
+            // Astronautics)" so the count + identity render together.
+            Assert.AreEqual(
+                "Crew: 1 (Acme Astronautics)",
+                AgencyLabelFormatter.FormatForeignVesselCrewLabel(1, "Acme Astronautics"));
+        }
+
+        [TestMethod]
+        public void FormatForeignCrew_MultiCrew_ReturnsLabel()
+        {
+            // Multi-crew vessel. Same formatting rule. Pinned separately from the
+            // singleton case so a future maintainer who specialises the format for
+            // count=1 (e.g. "Pilot:" vs "Crew:") doesn't quietly break the multi-
+            // crew path.
+            Assert.AreEqual(
+                "Crew: 4 (Acme Astronautics)",
+                AgencyLabelFormatter.FormatForeignVesselCrewLabel(4, "Acme Astronautics"));
+        }
+
+        [TestMethod]
+        public void FormatForeignCrew_NullAgency_FallsBackToUnknownLabel()
+        {
+            // Caller arrived with a registry hit (positive count) but the agency
+            // identity couldn't be resolved — late-joiner whose AgencyInfo isn't
+            // in OtherAgencies, or a defensive null-passthrough. Mirrors
+            // FormatVesselAgencyLabel's late-joiner fallback rather than rendering
+            // a blank-paren "Crew: N ()" string.
+            Assert.AreEqual(
+                $"Crew: 2 ({AgencyLabelFormatter.UnknownAgencyLabel})",
+                AgencyLabelFormatter.FormatForeignVesselCrewLabel(2, null));
+        }
+
+        [TestMethod]
+        public void FormatForeignCrew_EmptyAgency_FallsBackToUnknownLabel()
+        {
+            // Mid-handshake race window where a foreign vessel's proto arrived
+            // before its owning agency's AgencyInfo was populated; OtherAgencies
+            // lookup succeeded but DisplayName + OwningPlayerName were both empty
+            // and FormatVesselAgencyLabel returned UnknownAgencyLabel. The crew
+            // formatter sees the same end state — both passes converge on the same
+            // fallback so the bracketed surface reads consistently across the two
+            // helpers.
+            Assert.AreEqual(
+                $"Crew: 3 ({AgencyLabelFormatter.UnknownAgencyLabel})",
+                AgencyLabelFormatter.FormatForeignVesselCrewLabel(3, string.Empty));
+        }
     }
 }

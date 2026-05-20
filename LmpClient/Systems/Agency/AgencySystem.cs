@@ -224,6 +224,65 @@ namespace LmpClient.Systems.Agency
             new ConcurrentDictionary<Guid, Guid>();
 
         /// <summary>
+        /// Stage 6 Phase 6.6 — vessel-id → pre-scrub crew count mirror for
+        /// foreign-agency vessels whose kerbal roster was scrubbed locally by
+        /// <see cref="VesselUtilities.VesselLoader.ScrubInvalidProtoCrew"/>.
+        ///
+        /// <para><b>Why a separate registry from <see cref="VesselOwnership"/>.</b>
+        /// Ownership is a permanent two-state attribute of a vessel; foreign-crew-
+        /// count is a snapshot of "what would the local <c>vessel.GetCrewCount()</c>
+        /// have read if the local <c>CrewRoster</c> contained those names." It's
+        /// only populated when the BUG-023 scrub actually removed entries — which
+        /// is the natural marker of "this is a foreign-agency vessel with crew"
+        /// under spec §2 Q-Render's scrub-foreign rendering policy. Vessels with
+        /// zero scrubbed entries (the owner's own vessels under gate=on, or every
+        /// vessel under gate=off in steady state) get no registry entry, so the
+        /// row label rendering falls back to KSP's local count.</para>
+        ///
+        /// <para><b>Gate.</b> Only populated by the scrub site when
+        /// <c>SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled</c> is
+        /// true (combined <c>PerAgencyCareer AND PerAgencyKerbalRoster AND
+        /// GameMode=Career</c> gate). Under the intermediate Stage 5 → Stage 6
+        /// configuration (PerAgencyCareer=on / PerAgencyKerbalRoster=off), the
+        /// roster is still shared and BUG-023 KerbalProto-after-VesselProto race
+        /// windows still produce transient scrubs of LOCAL kerbal names — gating
+        /// on the combined Phase 6.6 flag prevents those transients from seeding
+        /// "Crew: N (agency)" labels that misattribute shared kerbals to a
+        /// specific agency. PerAgencyCareerEnabled alone would not be sufficient.</para>
+        ///
+        /// <para><b>Eviction.</b> Symmetric write+evict at the scrub site:
+        /// <c>VesselLoader.ScrubInvalidProtoCrew</c>'s <c>totalRemoved &gt; 0</c>
+        /// branch writes, the <c>totalRemoved == 0</c> branch removes. So a
+        /// destructive vessel reload always reflects the latest wire truth.
+        /// Non-destructive reload paths (<c>UpdateProtoInPlace</c>,
+        /// <c>UnchangedEarlyOut</c>) leave the registry untouched — see
+        /// <see cref="AgencyLabelFormatter.IsForeignVessel"/> XML for the cosmetic
+        /// drift this allows; render-time <c>IsForeignVessel</c> guards against
+        /// the worst case (transferred-to-local staleness). On disconnect
+        /// <see cref="OnDisabled"/> clears the whole registry alongside
+        /// <see cref="VesselOwnership"/>.</para>
+        ///
+        /// <para><b>Phase 6.7 / 6.8 forward-looking note.</b> Future work that
+        /// touches <see cref="VesselOwnership"/> mid-session (e.g. <c>/setvesselagency</c>
+        /// per-vessel ownership reassignment, or <c>/transferagency</c>'s
+        /// <c>AgencyVisibilityMsgData</c> push extending into kerbal-file migration)
+        /// does NOT need to invalidate ForeignCrewCount in lockstep — the
+        /// render-time <see cref="AgencyLabelFormatter.IsForeignVessel"/> check is
+        /// the source of truth for whether to render an enriched label. The
+        /// registry's only invariant is "either reflects the latest scrub event
+        /// or is empty"; staleness across ownership changes is harmless.</para>
+        ///
+        /// <para><b>Thread.</b> Populated from the Unity-thread vessel-load path
+        /// (<see cref="VesselUtilities.VesselLoader"/> runs on the Unity main
+        /// thread). Read from the Unity thread by the label-render hooks. The
+        /// <see cref="ConcurrentDictionary{TKey, TValue}"/> backing is defensive
+        /// against any future async vessel-load — same pattern as
+        /// <see cref="VesselOwnership"/>.</para>
+        /// </summary>
+        public ConcurrentDictionary<Guid, int> ForeignCrewCount { get; } =
+            new ConcurrentDictionary<Guid, int>();
+
+        /// <summary>
         /// Last <see cref="AgencyCreateReplyMsgData"/>.Success flag — true on first
         /// load (until the user submits anything) so the AgencyCreateWindow doesn't
         /// render a misleading error banner before the user has tried to rename.
@@ -256,6 +315,18 @@ namespace LmpClient.Systems.Agency
             return VesselOwnership.TryGetValue(vesselId, out agencyId);
         }
 
+        /// <summary>
+        /// Stage 6 Phase 6.6 accessor over <see cref="ForeignCrewCount"/>. Returns
+        /// true and the snapshot count if the registry has an entry for
+        /// <paramref name="vesselId"/>; false (and <paramref name="crewCount"/> = 0)
+        /// when absent. A miss is the normal case for the owner's own vessels and
+        /// for crewless vessels; callers fall back to baseline label rendering.
+        /// </summary>
+        public bool TryGetForeignCrewCount(Guid vesselId, out int crewCount)
+        {
+            return ForeignCrewCount.TryGetValue(vesselId, out crewCount);
+        }
+
         protected override void OnDisabled()
         {
             base.OnDisabled();
@@ -269,16 +340,20 @@ namespace LmpClient.Systems.Agency
             // didn't cover all previously-known vessels, which 5.18d economy
             // guards will surface as deny-on-absent).
             var clearedOwnerships = VesselOwnership.Count;
+            var clearedForeignCrewCounts = ForeignCrewCount.Count;
             LocalAgencyId = Guid.Empty;
             LocalAgencyDisplayName = string.Empty;
             LocalAgencyOwningPlayerName = string.Empty;
             OtherAgencies.Clear();
             VesselOwnership.Clear();
+            ForeignCrewCount.Clear();
             LastCreateReplySuccess = true;
             LastCreateReplyReason = string.Empty;
 
             if (clearedOwnerships > 0)
                 LunaLog.Log($"[Agency]: Cleared {clearedOwnerships} vessel-ownership entries on disconnect.");
+            if (clearedForeignCrewCounts > 0)
+                LunaLog.Log($"[Agency]: Cleared {clearedForeignCrewCounts} foreign-crew-count entries on disconnect.");
         }
     }
 }

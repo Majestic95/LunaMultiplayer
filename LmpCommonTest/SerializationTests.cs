@@ -947,18 +947,25 @@ namespace LmpCommonTest
         [TestMethod]
         public void TestSerializeDeserializeSettingsReplyMsg_TruncatedPayloadMissingTail_DefaultsFalse()
         {
-            // [Stage 5.17e-2 review-finding A.3] Backward read-compat for the tail
-            // PerAgencyCareerEnabled bool. A peer that doesn't ship the byte —
-            // older 0.31.0 server, mixed-dev-build, or any future tail-bump we drop
-            // — must NOT throw on deserialize; defaults the field to false (gate
-            // off). Matches the VesselProtoMsgData.Reason / HandshakeRequest /
-            // WarpNewSubspace tail-bit guard pattern.
+            // [Stage 5.17e-2 review-finding A.3 + Stage 6 Phase 6.6] Backward
+            // read-compat for tail-positional bool fields. A peer that doesn't ship
+            // the final byte — older 0.31.0 server, mixed-dev-build, or any future
+            // tail-bump we drop — must NOT throw on deserialize; defaults the
+            // affected field to false (gate off). Matches the
+            // VesselProtoMsgData.Reason / HandshakeRequest / WarpNewSubspace tail-bit
+            // guard pattern.
             //
-            // Setup: serialize a full payload with the flag TRUE, then truncate the
-            // receiver's LengthBits by 1 to drop the trailing bool bit. The earlier
-            // fields stay intact; only the guarded tail read sees "no bits left."
+            // Setup: serialize a full payload with both gate flags TRUE, then
+            // truncate by exactly 1 bit. After Phase 6.6 the new tail is
+            // PerAgencyKerbalRosterEnabled, so the 1-bit truncation drops THAT bit
+            // (formerly dropped PerAgencyCareerEnabled when it was the tail in
+            // 5.17e-2). PerAgencyCareerEnabled is now one position back from the
+            // tail and must still decode correctly. This pins the tail-bit-read
+            // guard against the most recently added field — any future tail
+            // additions follow the same pattern.
             var msgData = BuildRepresentativeSettingsReply();
             msgData.PerAgencyCareerEnabled = true;
+            msgData.PerAgencyKerbalRosterEnabled = true;
 
             var msg = Factory.CreateNew<SetingsSrvMsg>(msgData);
             var sendBuf = Client.CreateMessage(msg.GetMessageSize());
@@ -973,11 +980,17 @@ namespace LmpCommonTest
 
             var deserialised = (SettingsReplyMsgData)Factory.Deserialize(recvBuf, Environment.TickCount).Data;
 
-            // The flag must default to false — proves the Position<LengthBits guard
-            // short-circuits the ReadBoolean. Pre-fix, ReadBoolean was unconditional
-            // and would either return a stray bit value or throw past end-of-stream.
-            Assert.IsFalse(deserialised.PerAgencyCareerEnabled,
-                "PerAgencyCareerEnabled must default to false when the tail bit is absent from the wire.");
+            // The NEW tail field defaults to false — proves the Position<LengthBits
+            // guard short-circuits the ReadBoolean for the most recently appended
+            // field.
+            Assert.IsFalse(deserialised.PerAgencyKerbalRosterEnabled,
+                "PerAgencyKerbalRosterEnabled (Phase 6.6 tail field) must default to false when its bit is absent from the wire.");
+
+            // PerAgencyCareerEnabled is no longer the tail, so its bit IS present
+            // in the truncated buffer and must decode as TRUE — confirms the
+            // 1-bit truncation dropped only the new tail field, not the previous one.
+            Assert.IsTrue(deserialised.PerAgencyCareerEnabled,
+                "PerAgencyCareerEnabled is one position back from the new Phase 6.6 tail and must still decode correctly when only the trailing 1 bit is dropped.");
 
             // Earlier fields remain correctly decoded — confirms the truncation only
             // affected the guarded tail read and the rest of the wire layout was
@@ -986,6 +999,85 @@ namespace LmpCommonTest
             Assert.AreEqual("test-server", deserialised.ConsoleIdentifier);
             Assert.AreEqual(true, deserialised.PrintMotdInChat,
                 "Previous tail field PrintMotdInChat must still decode correctly.");
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeSettingsReplyMsg_TruncatedPayloadMissingBothTails_BothDefaultFalse()
+        {
+            // [Stage 6 Phase 6.6] Backward read-compat against a pre-5.17e-2 server
+            // shape (or a future protocol-tail rewrite that drops BOTH tail fields).
+            // Truncating 2 bits drops both PerAgencyKerbalRosterEnabled AND
+            // PerAgencyCareerEnabled — both guards must short-circuit and default
+            // false. Catches a future regression where one guard is added but the
+            // other is removed, or where the field order in the deserialize body
+            // gets reordered relative to the serialize body.
+            var msgData = BuildRepresentativeSettingsReply();
+            msgData.PerAgencyCareerEnabled = true;
+            msgData.PerAgencyKerbalRosterEnabled = true;
+
+            var msg = Factory.CreateNew<SetingsSrvMsg>(msgData);
+            var sendBuf = Client.CreateMessage(msg.GetMessageSize());
+            msg.Serialize(sendBuf);
+            var sentLengthBits = sendBuf.LengthBits;
+
+            var bytes = sendBuf.ReadBytes(sendBuf.LengthBytes);
+            var recvBuf = Client.CreateIncomingMessage(NetIncomingMessageType.Data, bytes);
+            recvBuf.LengthBits = sentLengthBits - 2; // drop both trailing 1-bit bools
+
+            msg.Recycle();
+
+            var deserialised = (SettingsReplyMsgData)Factory.Deserialize(recvBuf, Environment.TickCount).Data;
+
+            Assert.IsFalse(deserialised.PerAgencyCareerEnabled,
+                "PerAgencyCareerEnabled must default to false when its bit is also truncated off the wire.");
+            Assert.IsFalse(deserialised.PerAgencyKerbalRosterEnabled,
+                "PerAgencyKerbalRosterEnabled must default to false when its bit is truncated off the wire.");
+            Assert.AreEqual(true, deserialised.PrintMotdInChat,
+                "Previous-previous tail field PrintMotdInChat must still decode correctly when both gate tails are truncated.");
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeSettingsReplyMsg_PerAgencyKerbalRosterEnabled_True()
+        {
+            // [Stage 6 Phase 6.6] The PerAgencyKerbalRosterEnabled tail field
+            // mirrors the server's combined `PerAgencyEnabled AND PerAgencyKerbalRoster`
+            // gate so the client's VesselLoader scrub site can distinguish "shared-
+            // roster transient scrub" from "per-agency partition scrub." Round-trip
+            // representative payloads with the flag ON pins the wire layout against
+            // any future tail-byte miscount or InternalGetMessageSize regression.
+            var msgData = BuildRepresentativeSettingsReply();
+            msgData.PerAgencyCareerEnabled = true;
+            msgData.PerAgencyKerbalRosterEnabled = true;
+
+            var roundTripped = RoundTripServer<SetingsSrvMsg, SettingsReplyMsgData>(msgData);
+
+            Assert.IsTrue(roundTripped.PerAgencyKerbalRosterEnabled,
+                "PerAgencyKerbalRosterEnabled=true must round-trip through Serialize/Deserialize.");
+            Assert.IsTrue(roundTripped.PerAgencyCareerEnabled,
+                "PerAgencyCareerEnabled (previous tail field) must remain stable when a new tail field is appended.");
+            Assert.AreEqual(GameMode.Career, roundTripped.GameMode);
+            Assert.AreEqual("test-server", roundTripped.ConsoleIdentifier);
+        }
+
+        [TestMethod]
+        public void TestSerializeDeserializeSettingsReplyMsg_PerAgencyKerbalRosterEnabled_FalseIsDefault()
+        {
+            // [Stage 6 Phase 6.6] Mirror of the True case with the flag OFF.
+            // Important precondition: under the intermediate Stage 5 → 6 ramp config
+            // (PerAgencyCareer=on / PerAgencyKerbalRoster=off), the per-career gate
+            // is true but the kerbal-roster gate is false — and the false value MUST
+            // round-trip false so the client's VesselLoader scrub site doesn't seed
+            // BUG-023-race transient mislabels.
+            var msgData = BuildRepresentativeSettingsReply();
+            msgData.PerAgencyCareerEnabled = true;
+            msgData.PerAgencyKerbalRosterEnabled = false;
+
+            var roundTripped = RoundTripServer<SetingsSrvMsg, SettingsReplyMsgData>(msgData);
+
+            Assert.IsFalse(roundTripped.PerAgencyKerbalRosterEnabled,
+                "PerAgencyKerbalRosterEnabled=false must round-trip through Serialize/Deserialize.");
+            Assert.IsTrue(roundTripped.PerAgencyCareerEnabled,
+                "PerAgencyCareerEnabled (previous tail field) must remain stable in the OFF/ON intermediate config.");
         }
 
         private static SettingsReplyMsgData BuildRepresentativeSettingsReply()

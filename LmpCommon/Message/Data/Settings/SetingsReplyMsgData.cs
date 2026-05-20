@@ -86,6 +86,24 @@ namespace LmpCommon.Message.Data.Settings
         /// </summary>
         public bool PerAgencyCareerEnabled;
 
+        /// <summary>
+        /// Stage 6 Phase 6.6 — mirrors <c>AgencySystem.PerAgencyKerbalRosterEnabled</c>
+        /// (the server's combined <c>PerAgencyCareer=true AND GameMode=Career AND
+        /// PerAgencyKerbalRoster=true</c> gate). Lets the client distinguish "shared
+        /// roster, transient BUG-023 scrub races possible" from "per-agency roster,
+        /// every scrub is a foreign-agency partition." Phase 6.6's
+        /// <c>VesselLoader.ScrubInvalidProtoCrew</c> registry population path gates
+        /// on this combined flag — gating on <see cref="PerAgencyCareerEnabled"/>
+        /// alone would seed transient mislabels under the intermediate
+        /// <c>PerAgencyCareer=on / PerAgencyKerbalRoster=off</c> configuration that
+        /// most operators will run during the Stage 5 → Stage 6 ramp.
+        ///
+        /// <para>New trailing field at the wire tail; backward-read-compat preserves
+        /// false on a peer that doesn't ship the byte (older 0.31.0 server or a
+        /// future protocol-tail rewrite that drops this field).</para>
+        /// </summary>
+        public bool PerAgencyKerbalRosterEnabled;
+
         public override string ClassName { get; } = nameof(SettingsReplyMsgData);
 
         internal override void InternalSerialize(NetOutgoingMessage lidgrenMsg)
@@ -151,6 +169,7 @@ namespace LmpCommon.Message.Data.Settings
             lidgrenMsg.Write(MinCraftLibraryRequestIntervalMs);
             lidgrenMsg.Write(PrintMotdInChat);
             lidgrenMsg.Write(PerAgencyCareerEnabled);
+            lidgrenMsg.Write(PerAgencyKerbalRosterEnabled);
         }
 
         internal override void InternalDeserialize(NetIncomingMessage lidgrenMsg)
@@ -223,13 +242,20 @@ namespace LmpCommon.Message.Data.Settings
             // 5.17e-2 code unconditionally called ReadBoolean and contradicted the
             // backward-read-compat claim in the field's XML doc.
             PerAgencyCareerEnabled = lidgrenMsg.Position < lidgrenMsg.LengthBits && lidgrenMsg.ReadBoolean();
+            // [Stage 6 Phase 6.6] Tail-field for PerAgencyKerbalRosterEnabled, same
+            // tail-bit-read pattern as PerAgencyCareerEnabled above. A peer that
+            // doesn't ship the byte (Phase 6.5 server or earlier) defaults to false
+            // (combined gate off → Phase 6.6 registry stays empty → label surface
+            // renders the baseline 5.18c agency-only decoration).
+            PerAgencyKerbalRosterEnabled = lidgrenMsg.Position < lidgrenMsg.LengthBits && lidgrenMsg.ReadBoolean();
         }
 
         internal override int InternalGetMessageSize()
         {
-            // bool count went from 24 → 25 with Stage 5.17e-2 PerAgencyCareerEnabled tail field.
+            // bool count went from 24 → 25 with Stage 5.17e-2 PerAgencyCareerEnabled tail field;
+            // 25 → 26 with Stage 6 Phase 6.6 PerAgencyKerbalRosterEnabled tail field.
             return base.InternalGetMessageSize() + sizeof(WarpMode) + sizeof(GameMode) + sizeof(TerrainQuality) + sizeof(GameDifficulty) +
-                sizeof(bool) * 25 + sizeof(int) * 9 + sizeof(float) * 19 + ConsoleIdentifier.GetByteCount();
+                sizeof(bool) * 26 + sizeof(int) * 9 + sizeof(float) * 19 + ConsoleIdentifier.GetByteCount();
         }
     }
 }

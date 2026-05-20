@@ -1,5 +1,7 @@
 ﻿using KSP.UI.Screens.Flight;
 using LmpClient.Extensions;
+using LmpClient.Systems.Agency;
+using LmpClient.Systems.SettingsSys;
 using LmpClient.Systems.VesselPositionSys;
 using System;
 using Object = UnityEngine.Object;
@@ -477,6 +479,61 @@ namespace LmpClient.VesselUtilities
                         $"Part.RegisterCrew (scene→FLIGHT), and ModuleCommand.UpdateControlSourceState (every FixedUpdate); " +
                         $"without the lockstep removal, KerbalRoster.ValidateAssignments would later ExpungeKerbal on a " +
                         $"misindexed real kerbal.");
+
+                    // [Stage 6 Phase 6.6] Snapshot the scrubbed count so the
+                    // tracking-station / map / flight label surfaces can render
+                    // "Crew: N (agency)" for foreign-agency vessels per spec §2
+                    // Q-Render. The scrub removes exactly the kerbals whose names
+                    // don't resolve in the local CrewRoster — under
+                    // PerAgencyKerbalRosterEnabled (Phase 6.4 request filter), those
+                    // are foreign-agency kerbals BY DEFINITION because the per-
+                    // agency request filter prevents foreign kerbal files from
+                    // ever reaching this client.
+                    //
+                    // Why the combined gate, not PerAgencyCareerEnabled alone: under
+                    // the intermediate PerAgencyCareer=on / PerAgencyKerbalRoster=off
+                    // configuration (typical Stage 5 → Stage 6 ramp), the roster is
+                    // still shared, so foreign-vessel kerbal names ARE in the local
+                    // roster eventually. BUG-023 KerbalProto-after-VesselProto race
+                    // windows still produce transient scrubs of those local-but-not-
+                    // yet-arrived names. Populating the registry on those transients
+                    // would seed misleading "Crew: N (Acme Astronautics)" labels
+                    // implying Acme owns kerbals that are actually shared — and the
+                    // eviction-on-clean-scrub branch below wouldn't fire if no
+                    // subsequent VesselProto reload arrives (UnchangedEarlyOut path).
+                    // Gating on the combined Phase 6.6 flag means the registry only
+                    // populates when the scrub is genuinely the per-agency partition
+                    // doing its job.
+                    if (SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled)
+                    {
+                        AgencySystem.Singleton.ForeignCrewCount[vesselProto.vesselID] = totalRemoved;
+                    }
+                }
+                else
+                {
+                    // [Stage 6 Phase 6.6] Symmetric eviction: a vessel that
+                    // previously had foreign crew recorded above but now scrubs
+                    // cleanly has either lost all foreign crew (EVA / death /
+                    // disembark) or — under the eventual transferagency push —
+                    // had its ownership flip to the local agency in a future
+                    // re-load. The eviction is a no-op on vessels that never
+                    // had a registry entry (TryRemove on missing key is safe);
+                    // mentioned in [[feedback-cascade-race-same-lock-recheck]]
+                    // discipline that "symmetric write/evict at the snapshot
+                    // site beats trying to invalidate from N consumers."
+                    //
+                    // Same combined-gate guard as the population branch — under
+                    // gate=off the registry is never written and the eviction
+                    // is unreachable. The render-time IsForeignVessel check in
+                    // LabelEvents is the SECOND line of defense against staleness
+                    // (covers the case where the vessel was scrubbed-clean once
+                    // under gate=on but the gate later flipped off, leaving the
+                    // entry behind — eviction here doesn't fire because the
+                    // gate flipped before the next scrub).
+                    if (SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled)
+                    {
+                        AgencySystem.Singleton.ForeignCrewCount.TryRemove(vesselProto.vesselID, out _);
+                    }
                 }
 
                 if (nameDesyncs > 0)

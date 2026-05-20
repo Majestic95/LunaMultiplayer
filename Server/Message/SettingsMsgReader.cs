@@ -47,6 +47,15 @@ namespace Server.Message
             // because the gate is independent of difficulty preset.
             msgData.PerAgencyCareerEnabled = AgencySystem.PerAgencyEnabled;
 
+            // [Stage 6 Phase 6.6] Per-agency kerbal-roster active state. Uses the
+            // combined Phase 6.5 predicate (PerAgencyEnabled AND PerAgencyKerbalRoster)
+            // so the client distinguishes "shared-roster transient scrub" from
+            // "per-agency partition scrub" — Phase 6.6's tracking-station "Crew: N
+            // (agency)" label gates on this field to avoid seeding transient
+            // mislabels under PerAgencyCareer=on / PerAgencyKerbalRoster=off
+            // configurations (typical Stage 5 → Stage 6 ramp window).
+            msgData.PerAgencyKerbalRosterEnabled = AgencySystem.PerAgencyKerbalRosterEnabled;
+
             if (GeneralSettings.SettingsStore.GameDifficulty == GameDifficulty.Custom && GameplaySettings.SettingsStore != null)
             {
                 msgData.EnableCommNet = GameplaySettings.SettingsStore.CommNetwork;

@@ -37,5 +37,18 @@ namespace LmpClient.Systems.SettingsSys
         /// per-agency-off.
         /// </summary>
         public bool PerAgencyCareerEnabled { get; set; }
+
+        /// <summary>
+        /// Stage 6 Phase 6.6 — mirrors
+        /// <c>SettingsReplyMsgData.PerAgencyKerbalRosterEnabled</c> (server's combined
+        /// <c>PerAgencyEnabled AND PerAgencyKerbalRoster</c> gate). Phase 6.6's
+        /// foreign-vessel "Crew: N (agency)" label population gates on this flag so a
+        /// shared-roster server with per-agency-career on (intermediate Stage 5 → 6
+        /// configuration) does NOT seed transient BUG-023-race mislabels into
+        /// <see cref="Agency.AgencySystem.ForeignCrewCount"/>. Defaults to false so a
+        /// pre-Phase-6.6 server (no tail byte for this field) reads as roster-off and
+        /// the label surface renders the baseline 5.18c agency-only decoration.
+        /// </summary>
+        public bool PerAgencyKerbalRosterEnabled { get; set; }
     }
 }

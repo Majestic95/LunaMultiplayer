@@ -36,6 +36,7 @@ namespace LmpClient.Systems.SettingsSys
             SettingsSystem.ServerSettings.MinCraftLibraryRequestIntervalMs = msgData.MinScreenshotIntervalMs;
             SettingsSystem.ServerSettings.PrintMotdInChat = msgData.PrintMotdInChat;
             SettingsSystem.ServerSettings.PerAgencyCareerEnabled = msgData.PerAgencyCareerEnabled;
+            SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled = msgData.PerAgencyKerbalRosterEnabled;
 
             SettingsSystem.ServerSettings.ServerParameters =
                 GameParameters.GetDefaultParameters(
