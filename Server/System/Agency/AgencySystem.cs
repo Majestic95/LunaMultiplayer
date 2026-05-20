@@ -254,6 +254,7 @@ namespace Server.System.Agency
                 WarnAboutSharedKerbalsOnUpgrade();
                 RefuseStartupIfUpgradeHazardWithoutOverride();
                 RefuseStartupIfKerbalHazardWithoutOverride();
+                RefuseStartupIfKerbalWriteRoutingNotYetShipped();
                 return;
             }
 
@@ -440,6 +441,10 @@ namespace Server.System.Agency
             RefuseStartupIfUpgradeHazardWithoutOverride();
             // [Stage 6] Parallel kerbal-roster refusal — independent override flag.
             RefuseStartupIfKerbalHazardWithoutOverride();
+            // [Stage 6 Phase 6.4] TEMPORARY refusal until Phase 6.5 ships the
+            // KerbalProto + KerbalRemove write-path counterparts. Remove this
+            // call (and the predicate body) when Phase 6.5 lands.
+            RefuseStartupIfKerbalWriteRoutingNotYetShipped();
         }
 
         /// <summary>
@@ -1539,6 +1544,50 @@ namespace Server.System.Agency
                 "— stop server, archive Universe/Kerbals/, restart with each agency minting its own stock 4; " +
                 "OR (b) set AllowEnablePerAgencyKerbalsOnExistingUniverse=true in Settings/GameplaySettings.xml " +
                 "to explicitly accept the frozen-reference outcome and continue. The server will now shut down.");
+            ServerContext.ServerRunning = false;
+        }
+
+        /// <summary>
+        /// [Stage 6 Phase 6.4 TEMPORARY] Hard refusal that fires when
+        /// <see cref="GameplaySettingsDefinition.PerAgencyKerbalRoster"/> is true
+        /// regardless of universe state or override flags. Phase 6.4 ships only
+        /// the READ-path per-agency routing (<see cref="KerbalSystem.HandleKerbalsRequest"/>);
+        /// the WRITE-path counterparts (<see cref="KerbalSystem.HandleKerbalProto"/> +
+        /// <see cref="KerbalSystem.HandleKerbalRemove"/>) still pool to legacy
+        /// <c>Universe/Kerbals/</c>. An operator who flips the gate between
+        /// Phase 6.4 and Phase 6.5 would see silent state divergence — clients
+        /// receive their per-agency seeded stock 4 on connect, but every
+        /// subsequent <c>KerbalProto</c> mutation writes to the legacy dir
+        /// where no one will read it back. Phase 6.4 cannot be safely opted
+        /// into in production until Phase 6.5 closes the write loop.
+        ///
+        /// <para><b>Remove this predicate + its call sites in the Phase 6.5
+        /// commit.</b> When the write-path lands, the combined gate becomes
+        /// fully functional and operator-controlled. The existing Phase 6.2
+        /// boot-refusals (<see cref="RefuseStartupIfKerbalHazardWithoutOverride"/>)
+        /// continue to gate the upgrade-in-place hazard independently.</para>
+        ///
+        /// <para>Independent of <see cref="GameplaySettingsDefinition.AllowEnablePerAgencyKerbalsOnExistingUniverse"/>
+        /// — that override accepts the "kerbals get stuck in legacy dir" outcome
+        /// on a populated universe upgrade; this refusal blocks an entirely
+        /// different hazard (mid-session state drift between read + write paths
+        /// regardless of universe age).</para>
+        /// </summary>
+        private static void RefuseStartupIfKerbalWriteRoutingNotYetShipped()
+        {
+            if (!GameplaySettings.SettingsStore.PerAgencyKerbalRoster)
+                return; // Gate off; nothing to refuse.
+
+            LunaLog.Fatal(
+                "[fix:per-agency-kerbal-roster-routing] BOOT REFUSED: PerAgencyKerbalRoster=true but Stage 6 " +
+                "Phase 6.5 (per-agency KerbalProto + KerbalRemove write-path routing) has not yet shipped on " +
+                "this fork build. Phase 6.4 only routes the initial-sync read path per-agency — every " +
+                "subsequent kerbal-state mutation (level-up, EVA, hire, KIA) still writes to the legacy " +
+                "Universe/Kerbals/ directory. Enabling the gate now would cause silent state divergence: " +
+                "clients receive their per-agency seeded stock 4 on connect, but the actual mutations during " +
+                "play accumulate in a directory the request handler never reads back. Set " +
+                "PerAgencyKerbalRoster=false in Settings/GameplaySettings.xml and wait for Phase 6.5 to ship " +
+                "(see docs/research/10-stage6-per-agency-kerbals-spec.md). The server will now shut down.");
             ServerContext.ServerRunning = false;
         }
 

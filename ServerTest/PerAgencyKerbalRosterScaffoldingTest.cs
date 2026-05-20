@@ -232,12 +232,18 @@ namespace ServerTest
         }
 
         [TestMethod]
-        public void LoadExistingAgencies_AllowsBoot_OnLegacyKerbals_WhenOverrideOn()
+        public void LoadExistingAgencies_RefusesBoot_OnLegacyKerbals_WhenOverrideOn_UntilPhase65Ships()
         {
-            // Operator opt-in: the kerbal override is independent of the career
-            // override. With AllowEnablePerAgencyKerbalsOnExistingUniverse=true,
-            // the refusal short-circuits and boot proceeds (legacy kerbals stay
-            // as frozen reference set per spec §Q-Migration).
+            // [Phase 6.4 amendment] Operator opt-in via AllowEnablePerAgencyKerbalsOnExistingUniverse=true
+            // short-circuits the Phase 6.2 RefuseStartupIfKerbalHazardWithoutOverride
+            // predicate — but Phase 6.4 introduces a TEMPORARY second refusal,
+            // RefuseStartupIfKerbalWriteRoutingNotYetShipped, that fires
+            // unconditionally under PerAgencyKerbalRoster=true regardless of the
+            // hazard override. The temporary refusal blocks the half-shipped
+            // state where reads route per-agency but writes still pool to
+            // Universe/Kerbals/. **When Phase 6.5 ships and removes the temporary
+            // refusal, flip this assertion back to IsTrue + restore the original
+            // test name.**
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
             GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
             GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = true;
@@ -245,8 +251,9 @@ namespace ServerTest
 
             AgencySystem.LoadExistingAgencies();
 
-            Assert.IsTrue(ServerContext.ServerRunning,
-                "RefuseStartupIfKerbalHazardWithoutOverride must respect AllowEnablePerAgencyKerbalsOnExistingUniverse=true.");
+            Assert.IsFalse(ServerContext.ServerRunning,
+                "Phase 6.4 RefuseStartupIfKerbalWriteRoutingNotYetShipped must fire under " +
+                "PerAgencyKerbalRoster=true regardless of override — write-path not yet shipped.");
         }
 
         [TestMethod]
@@ -266,10 +273,15 @@ namespace ServerTest
         }
 
         [TestMethod]
-        public void LoadExistingAgencies_AllowsBoot_WhenLegacyKerbalsDirIsEmpty()
+        public void LoadExistingAgencies_RefusesBoot_WhenLegacyKerbalsDirIsEmpty_UntilPhase65Ships()
         {
-            // Gate on, override off, but the legacy directory is empty (fresh
-            // universe). No refusal — there's no data to lose.
+            // [Phase 6.4 amendment] Empty legacy dir would normally short-circuit
+            // the Phase 6.2 hazard refusal (no data to freeze), but the Phase 6.4
+            // temporary RefuseStartupIfKerbalWriteRoutingNotYetShipped fires on
+            // PerAgencyKerbalRoster=true regardless of legacy state — blocking the
+            // half-shipped read-only mode that would silently diverge on fresh-mint
+            // universes too (KerbalProto writes still pool to Universe/Kerbals/).
+            // **Flip back to IsTrue + restore the test name when Phase 6.5 ships.**
             GameplaySettings.SettingsStore.PerAgencyCareer = true;
             GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
             GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = false;
@@ -278,8 +290,9 @@ namespace ServerTest
 
             AgencySystem.LoadExistingAgencies();
 
-            Assert.IsTrue(ServerContext.ServerRunning,
-                "Kerbal refusal must NOT fire on an empty legacy kerbal directory — no data to freeze.");
+            Assert.IsFalse(ServerContext.ServerRunning,
+                "Phase 6.4 RefuseStartupIfKerbalWriteRoutingNotYetShipped must fire on PerAgencyKerbalRoster=true " +
+                "even with an empty legacy dir — write-path not yet shipped.");
         }
 
         [TestMethod]
@@ -300,6 +313,40 @@ namespace ServerTest
             Assert.IsFalse(ServerContext.ServerRunning,
                 "Career override must NOT bypass the kerbal refusal — overrides are orthogonal " +
                 "operator decisions per spec §Q-Migration.");
+        }
+
+        // ---------- Phase 6.4 temporary refusal ----------
+
+        [TestMethod]
+        public void LoadExistingAgencies_RefusesBoot_OnPerAgencyKerbalRosterTrue_RegardlessOfHazardOverride()
+        {
+            // [Phase 6.4] The temporary RefuseStartupIfKerbalWriteRoutingNotYetShipped
+            // predicate fires on PerAgencyKerbalRoster=true REGARDLESS of:
+            //   - legacy Kerbals dir state (empty / populated / absent)
+            //   - AllowEnablePerAgencyKerbalsOnExistingUniverse override
+            //   - AllowEnablePerAgencyOnExistingUniverse override
+            //   - GameMode (Career / Sandbox / Science)
+            //   - Agencies count
+            //
+            // The refusal exists because Phase 6.4 only ships read-path per-agency
+            // routing; KerbalProto + KerbalRemove writes still pool to legacy.
+            // Enabling the gate would cause silent state divergence on EVERY
+            // universe shape, not just upgraded ones. **Phase 6.5 removes this
+            // predicate; this test must be deleted in the Phase 6.5 commit.**
+            GameplaySettings.SettingsStore.PerAgencyCareer = true;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+            // Maximally-permissive override set: every operator opt-in active.
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyKerbalsOnExistingUniverse = true;
+            GameplaySettings.SettingsStore.AllowEnablePerAgencyOnExistingUniverse = true;
+            // Fresh universe — no legacy Kerbals dir, no agencies on disk.
+            Assert.IsFalse(Directory.Exists(KerbalSystem.KerbalsPath),
+                "Test precondition: legacy Kerbals dir should not exist before LoadExistingAgencies.");
+
+            AgencySystem.LoadExistingAgencies();
+
+            Assert.IsFalse(ServerContext.ServerRunning,
+                "Phase 6.4 RefuseStartupIfKerbalWriteRoutingNotYetShipped must refuse boot even with " +
+                "every override on + a pristine universe — write-path not yet shipped.");
         }
 
         // ---------- Helpers ----------
