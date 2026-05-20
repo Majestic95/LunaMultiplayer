@@ -65,10 +65,17 @@ public class GeneralSettingsDefinition
     [XmlComment(Value = "Specify the game Type. Values: Sandbox, Career, Science")]
     public GameMode GameMode { get; set; } = GameMode.Sandbox;
 
-    [XmlComment(Value = "Enable mod control. WARNING: Only consider turning off mod control for private servers. " +
-                        "The game will constantly complain about missing parts if there are missing mods. " +
-                        "Read this wiki page: https://github.com/LunaMultiplayer/LunaMultiplayer/wiki/Mod-file to understand how it works")]
-    public bool ModControl { get; set; } = true;
+    [XmlComment(Value = "Enable mod-control (modlist enforcement + parts/resources allowlist). " +
+                        "Default is FALSE on this fork. Rationale: the hand-curated AllowedParts list in " +
+                        "LMPModControl.xml is generated from LmpCommon.ModFile.Structure.ModControlStructure.SetDefaultAllowedParts " +
+                        "which was last meaningfully refreshed around KSP 1.10. Every stock part Squad has added since " +
+                        "(Engineer7500, recent EVA suits, modern probe cores, etc.) silently triggers the banned-parts " +
+                        "dialog on every joiner, blocking even mk1pod-class craft. Public servers wanting strict " +
+                        "modlist enforcement should set this true and either (a) regenerate LMPModControl.xml in-game " +
+                        "against their target KSP build, or (b) clear AllowedParts to an empty list to fall back on " +
+                        "the wildcard semantics (any part allowed). " +
+                        "Read https://github.com/LunaMultiplayer/LunaMultiplayer/wiki/Mod-file for the original design.")]
+    public bool ModControl { get; set; } = false;
 
     [XmlComment(Value = "How many untracked asteroids to spawn into the universe. 0 = Disabled")]
     public int NumberOfAsteroids { get; set; } = 5;

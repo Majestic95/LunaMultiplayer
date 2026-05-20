@@ -29,13 +29,21 @@ namespace LmpClient.Extensions
         /// </summary>
         public static bool HasInvalidParts(this ProtoVessel pv, bool verboseErrors)
         {
+            // Wildcard semantics: ModSystem.IsPartAllowed / IsResourceAllowed return true when the
+            // server-side allowlist is empty/null, so operators who want strict mod-control but no
+            // parts allowlist can clear AllowedParts in LMPModControl.xml. See ModSystem.IsPartAllowed
+            // for the rationale (drift against KSP stock parts).
             foreach (var pps in pv.protoPartSnapshots)
             {
-                if (ModSystem.Singleton.ModControl && !ModSystem.Singleton.AllowedParts.Contains(pps.partName))
+                if (ModSystem.Singleton.ModControl && !ModSystem.Singleton.IsPartAllowed(pps.partName))
                 {
                     if (verboseErrors)
                     {
-                        var msg = $"Protovessel {pv.vesselID} ({pv.vesselName}) contains the BANNED PART '{pps.partName}'. Skipping load.";
+                        // [client-validation:banned-parts] tag matches FlightDriver_SetStartupNewVessel
+                        // so operators grep one prefix for both the assembly-time dialog and the
+                        // relay-time drop. Telemetry intent: operator sees the tally on /log without
+                        // depending on a player to file a complaint.
+                        var msg = $"[client-validation:banned-parts] Protovessel {pv.vesselID} ({pv.vesselName}) contains the BANNED PART '{pps.partName}'. Skipping load.";
                         LunaLog.LogWarning(msg);
                         ChatSystem.Singleton.PmMessageServer(msg);
                     }
@@ -44,7 +52,7 @@ namespace LmpClient.Extensions
                 }
 
                 var nonWhitelistedResources = pps.resources.Select(r => r.resourceName)
-                    .Except(ModSystem.Singleton.AllowedResources)
+                    .Where(r => !ModSystem.Singleton.IsResourceAllowed(r))
                     .Where(r => PartResourceLibrary.Instance.resourceDefinitions.Contains(r))
                     .Distinct()
                     .ToArray();

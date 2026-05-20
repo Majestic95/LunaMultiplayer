@@ -1,4 +1,5 @@
 ﻿using HarmonyLib;
+using LmpClient.Systems.Chat;
 using LmpClient.Systems.Mod;
 using LmpClient.Systems.SettingsSys;
 using LmpClient.Windows.BannedParts;
@@ -42,6 +43,15 @@ namespace LmpClient.Harmony
                     if (bannedResources.Any())
                         LunaLog.LogError($"Vessel {shipName} Contains the following banned resources: {string.Join(", ", bannedResources)}");
 
+                    // Telemetry: surface the dialog to the server log so an operator sees the failure
+                    // tally without depending on a player to file a complaint. Same channel
+                    // ProtoVesselExtension.HasInvalidParts already uses for the relay-side drop.
+                    // Tagged [client-validation:banned-parts] so /log can grep for the class of event.
+                    var telemetry = $"[client-validation:banned-parts] Vessel '{shipName}' blocked by banned-parts dialog. " +
+                                    (bannedParts.Any() ? $"Parts: {string.Join(",", bannedParts)}. " : string.Empty) +
+                                    (bannedResources.Any() ? $"Resources: {string.Join(",", bannedResources)}." : string.Empty);
+                    ChatSystem.Singleton.PmMessageServer(telemetry);
+
                     BannedPartsResourcesWindow.Singleton.DisplayBannedPartsResourcesDialog(shipName, bannedParts, bannedResources);
                     HighLogic.LoadScene(GameScenes.SPACECENTER);
                     VesselAssemblyEvent.onVesselValidationBeforAssembly.Fire(false);
@@ -52,6 +62,8 @@ namespace LmpClient.Harmony
             if (partCount > SettingsSystem.ServerSettings.MaxVesselParts)
             {
                 LunaLog.LogError($"Vessel {shipName} has {partCount} parts and the max allowed in the server is: {SettingsSystem.ServerSettings.MaxVesselParts}");
+                ChatSystem.Singleton.PmMessageServer(
+                    $"[client-validation:over-part-cap] Vessel '{shipName}' has {partCount} parts (server cap: {SettingsSystem.ServerSettings.MaxVesselParts}).");
                 BannedPartsResourcesWindow.Singleton.DisplayBannedPartsResourcesDialog(shipName, new string[0], new string[0], partCount);
                 HighLogic.LoadScene(GameScenes.SPACECENTER);
                 VesselAssemblyEvent.onVesselValidationBeforAssembly.Fire(false);

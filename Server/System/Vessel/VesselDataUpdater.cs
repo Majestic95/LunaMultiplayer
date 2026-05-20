@@ -80,10 +80,21 @@ namespace Server.System.Vessel
                 try
                 {
                     var vessel = new Classes.Vessel(vesselDataInConfigNodeFormat);
-                    if (GeneralSettings.SettingsStore.ModControl)
+                    // Server-side parts-allowlist gate. Mirrors the client-side IsPartAllowed
+                    // wildcard semantics (LmpClient/Systems/Mod/ModSystem.cs):
+                    //   - Skip entirely if ModControl=false (the new default — drift-class fix
+                    //     described in GeneralSettingsDefinition.ModControl XmlComment).
+                    //   - Skip when ModFileSystem.ModControl is null (operator flipped ModControl=true
+                    //     at runtime via /changesettings without restart → LoadModFile never ran).
+                    //   - Skip when AllowedParts is null/empty (operator cleared <AllowedParts/> in
+                    //     LMPModControl.xml for wildcard-via-mod-control semantics). The prior
+                    //     .Except(emptyList) call returned ALL inputs → rejected every vessel-proto
+                    //     under that recovery path. Caught by upgrade-lens review on 2026-05-20.
+                    var allowedParts = ModFileSystem.ModControl?.AllowedParts;
+                    if (GeneralSettings.SettingsStore.ModControl && allowedParts != null && allowedParts.Count > 0)
                     {
                         var vesselParts = vessel.Parts.GetAllValues().Select(p => p.Fields.GetSingle("name").Value);
-                        var bannedParts = vesselParts.Except(ModFileSystem.ModControl.AllowedParts);
+                        var bannedParts = vesselParts.Except(allowedParts);
                         if (bannedParts.Any())
                         {
                             LunaLog.Warning($"Received a vessel with BANNED parts! {vesselId}");

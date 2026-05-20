@@ -126,3 +126,36 @@ Items #4 + #5 + #6 are independent low-hanging fruit; pick them up opportunistic
 ## Status
 
 Workstream is **NOT scheduled** as of this writing — these are recommendations from the 2026-05-20 post-incident review. Schedule when v6 soak completes and `feature/per-agency` either ships or absorbs the next round of soak findings. Revisit this doc when picking up the next per-agency / mod-compat workstream.
+
+---
+
+## 2026-05-20 follow-up — banned-parts recurrence + items 4 + 4b + 3 partially shipped
+
+Bug #1 ("Banned Parts" on beginner items) recurred the same day. Different specific parts than the v6 hit (Engineer7500), same root cause class: hand-curated `SetDefaultAllowedParts` list drift against KSP's actual stock part set. Shipped a structural fix that makes the failure mode no longer reachable on the default config:
+
+**Code changes (this commit):**
+
+- **Item 4a (wildcard / default-off):** `GeneralSettingsDefinition.ModControl` default flipped from `true` → `false` on both [Server/Settings/Definition/GeneralSettingsDefinition.cs](../../Server/Settings/Definition/GeneralSettingsDefinition.cs) and the AdminGui mirror [Tools/AdminGui/LunaServerGui/SettingsCatalog/Definitions/GeneralSettingsDefinition.cs](../../Tools/AdminGui/LunaServerGui/SettingsCatalog/Definitions/GeneralSettingsDefinition.cs). New `XmlComment` documents the rationale (drift) and the wildcard fallback so an operator opting back in has a path forward.
+- **Wildcard semantics in the part-check itself** (defense in depth): [ModSystem.IsPartAllowed](../../LmpClient/Systems/Mod/ModSystem.cs) + `IsResourceAllowed` return true when `ModControlData.AllowedParts` is empty/null, so an operator who wants strict modlist enforcement (`ModControl=true`) but no part-name restriction can clear `<AllowedParts/>` in `LMPModControl.xml` to fall back on wildcard. `GetBannedPartsFromPartNames` + `GetBannedResourcesFromResourceNames` short-circuit empty too. [ProtoVesselExtension.HasInvalidParts](../../LmpClient/Extensions/ProtoVesselExtension.cs) rewired to use the new helpers.
+- **Item 4b (CI drift sentinel):** New [LmpCommonTest/ModControlDefaultsTest.cs](../../LmpCommonTest/ModControlDefaultsTest.cs) pins a small set of stock beginner parts (mk1pod, parachuteSingle, basicFin, GooExperiment, kerbalEVA, etc.) and stock resources (LiquidFuel, MonoPropellant, …) in `SetDefaultAllowedParts` / `SetDefaultAllowedResources`. Catches accidental wholesale removal regressions (a refactor breaking the curated list for operators who DO opt in to `ModControl=true`). With the structural fix, this is a backstop not a hot path.
+- **Item 3 (telemetry) — minimum-viable variant:** Wired existing `ChatSystem.PmMessageServer` into [FlightDriver_SetStartupNewVessel](../../LmpClient/Harmony/FlightDriver_SetStartupNewVessel.cs) and tagged the message with `[client-validation:banned-parts]` (banned-parts dialog) / `[client-validation:over-part-cap]` (max-vessel-parts dialog). [ProtoVesselExtension.HasInvalidParts](../../LmpClient/Extensions/ProtoVesselExtension.cs) was already piping the relay-side drop through `PmMessageServer`; the tag prefix unifies the two so a `grep '\[client-validation:' Logs/*.log` on the server surfaces every joiner's validation failure in one query. **Grep prefix availability is gated on `ModControl=true`:** under the new default `ModControl=false`, the banned-parts surface never fires so `[client-validation:banned-parts]` events never reach `/log`. The `[client-validation:over-part-cap]` events DO still fire under default-off (the max-vessel-parts check is independent of the mod-control system). The full `ClientValidationErrorMsgData` + LogRingBuffer integration from item #3 above remains queued — bigger structural surface (new wire message type, server-side handler, ring-buffer aggregation), worth a dedicated commit when there's appetite. The chat-channel variant gets us 80% of the diagnostic value for 10% of the work.
+
+- **Server-side mirror of the wildcard fix in [VesselDataUpdater.cs:83-101](../../Server/System/Vessel/VesselDataUpdater.cs#L83-L101):** caught by the upgrade-lens review on this commit. The server-side parts-check originally used `vesselParts.Except(ModFileSystem.ModControl.AllowedParts)` which had the same `.Except(empty) = all-inputs` semantic bug as the client-side `HasInvalidParts`. Recovery path (b) advertised in the new XmlComment ("clear `<AllowedParts/>` to fall back on wildcard semantics") would have silently bricked vessel ingest because the server would reject every vessel-proto. Fix: null/empty short-circuit on `ModFileSystem.ModControl?.AllowedParts` BEFORE the `.Except` runs. Also closes a latent NRE path where an operator flipping `ModControl=true` at runtime via `/changesettings` (without restart) hits the next `HandleVesselProto` against a still-null `ModFileSystem.ModControl` (the initial `LoadModFile` is gated on `ModControl=true` at boot — see [MainServer.cs:180](../../Server/MainServer.cs#L180)).
+
+**Items still queued:**
+
+- **Item 1** (fresh-mint + first-vessel smoke test) — was about per-agency start-tech, not parts allowlist. Independent of this commit.
+- **Item 2** (boot-time per-agency invariant audit + auto-heal) — independent of this commit.
+- **Item 3 full ClientValidationErrorMsg** — deferred, see above. The chat-channel variant in this commit may make the full wire message unnecessary; revisit if the chat tag proves insufficient for aggregation.
+- **Item 4a regen-from-KSP-1.12.5** — not done. The hand-curated list is left in place because the runtime wildcard + default-off makes it no longer the hot path. Operators opting in via `ModControl=true` get the curated list as a "1.10-era stock parts" baseline; they can regenerate it in-game via the existing "Generate LMPModControl" UI if they need a current set.
+- **Item 5** (server installation identity) — independent of this commit; defer.
+- **Item 6** (pre-spec call-graph lens) — already in playbook, no code change.
+
+**Operator deployment steps for the recurrence:**
+
+Either path unblocks an existing server:
+
+1. **Config-only (fastest, no rebuild)** — edit `<server-install-dir>/Settings/GeneralSettings.xml`, change `<ModControl>true</ModControl>` to `<ModControl>false</ModControl>`, restart. No new binary needed.
+2. **Code-update path** — deploy the new server binary built from this commit. Fresh installs get the new default automatically. Existing installs with a `GeneralSettings.xml` already on disk retain the prior value (XML round-trip preserves it), so even after redeploying the binary the operator still needs to either (a) edit the file as in path 1, or (b) delete the file so the server regenerates it with the new default.
+
+The wildcard runtime fallback means even an operator who keeps `ModControl=true` can recover by clearing `<AllowedParts/>` to an empty `<AllowedParts />` in `LMPModControl.xml`.

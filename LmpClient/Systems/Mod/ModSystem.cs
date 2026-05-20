@@ -151,14 +151,41 @@ namespace LmpClient.Systems.Mod
             }
         }
 
+        /// <summary>
+        /// Empty / null <see cref="ModControlStructure.AllowedParts"/> = wildcard (no part restriction).
+        /// Defense-in-depth against the drift problem documented in GeneralSettingsDefinition.ModControl:
+        /// the hand-curated default list ages out of step with KSP stock parts on every KSP update,
+        /// and the symptom is a generic "Banned Parts" KSP dialog on every joiner with no telemetry.
+        /// Operators who want strict modlist enforcement (mandatory plugins / forbidden plugins / required
+        /// expansions) but no part-name restriction can keep ModControl=true and clear AllowedParts in
+        /// LMPModControl.xml to fall back to wildcard semantics. Returns true for the wildcard case.
+        /// </summary>
+        public bool IsPartAllowed(string partName)
+        {
+            if (ModControlData?.AllowedParts == null || ModControlData.AllowedParts.Count == 0)
+                return true;
+            return ModControlData.AllowedParts.Contains(partName);
+        }
+
+        public bool IsResourceAllowed(string resourceName)
+        {
+            if (ModControlData?.AllowedResources == null || ModControlData.AllowedResources.Count == 0)
+                return true;
+            return ModControlData.AllowedResources.Contains(resourceName);
+        }
+
         public IEnumerable<string> GetBannedPartsFromPartNames(IEnumerable<string> partNames)
         {
+            if (ModControlData?.AllowedParts == null || ModControlData.AllowedParts.Count == 0)
+                return Enumerable.Empty<string>();
             var bannedParts = partNames.Where(p => !ModControlData.AllowedParts.Contains(p)).ToList();
             return bannedParts.Distinct();
         }
 
         public IEnumerable<string> GetBannedResourcesFromResourceNames(IEnumerable<string> resourceNames)
         {
+            if (ModControlData?.AllowedResources == null || ModControlData.AllowedResources.Count == 0)
+                return Enumerable.Empty<string>();
             var bannedResources = resourceNames.Where(r => !ModControlData.AllowedResources.Contains(r)).ToList();
             return bannedResources.Distinct();
         }
