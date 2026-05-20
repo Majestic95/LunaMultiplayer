@@ -1333,7 +1333,19 @@ namespace Server.System.Agency
                         // string is at routeNode.GetValue("FlightStatus").
                         var routeNode = crEntry.Value.GetNode("ROUTE")?.Value ?? crEntry.Value;
                         var status = routeNode.GetValue("FlightStatus")?.Value ?? string.Empty;
-                        if (status == "Boarding" || status == "Enroute")
+                        // Mid-flight = passengers in RosterStatus.Missing. Per WOLF source
+                        // (F:/tmp/mks-external/MKS/Source/WOLF/WOLF/Modules/WOLF_CrewTransferScenario.cs:586-590
+                        // + :155 + CrewRoute.cs:105-121): Launch flips Boarding→Enroute and
+                        // sets rosterStatus=Missing; CheckArrived flips Enroute→Arrived but
+                        // does NOT touch rosterStatus; Disembark requires Arrived and is the
+                        // only path that restores Available. So passengers are Missing in
+                        // {Enroute, Arrived}, NOT {Boarding}. Boarding passengers are still
+                        // on their source vessel as normal Assigned crew and don't need
+                        // rescue. Slice F's AgencyWolfMigration.IsInFlightForRestoration
+                        // uses the same {Enroute, Arrived} scope — these two predicates
+                        // MUST agree or the diagnostic and the cascade disagree on what
+                        // counts as "needs rescue" (integration-lens MUST FIX #2 on Slice F).
+                        if (status == "Enroute" || status == "Arrived")
                             midFlightCrewRoutes++;
                     }
                 }

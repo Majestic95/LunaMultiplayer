@@ -114,6 +114,38 @@ namespace Server.Command.Command
     /// state caches for V. Operators wanting an instant client-side
     /// convergence can <c>/kick</c> the source owner; on reconnect they get
     /// fresh per-agency catch-up.</para>
+    ///
+    /// <para><b>Phase 4 Slice F — WOLF entities are NOT vessel-keyed; this
+    /// command is a NO-OP for the 5 WOLF dicts.</b>
+    /// <list type="bullet">
+    ///   <item><b>WolfDepots / WolfRoutes / WolfHoppers / WolfTerminals</b>
+    ///         are body+biome keyed (<c>$"{Body}|{Biome}"</c>) or
+    ///         metadata-Guid keyed (HopperMetadata.Id / TerminalMetadata.Id).
+    ///         None of them reference a vessel id; reassigning a vessel from
+    ///         agency A to agency B leaves these dicts entirely untouched in
+    ///         both agencies.</item>
+    ///   <item><b>WolfCrewRoutes</b> is Guid-keyed by
+    ///         <c>CrewRoute.UniqueId</c>; passengers are referenced by kerbal
+    ///         name, not by the kerbal's currently-aboard vessel id. The
+    ///         non-obvious corollary: <c>/setvesselagency</c> on a vessel
+    ///         currently carrying a kerbal who is also enrolled in an Enroute
+    ///         CrewRoute is ALSO a NO-OP for the CrewRoute record — the
+    ///         passenger list is fixed at Launch time per WOLF source
+    ///         contract. Pre-Launch (FlightStatus == Boarding) the list is
+    ///         mutable: <c>CrewRoute.cs:141-184</c> Embark adds passengers
+    ///         and Disembark removes them. Post-Launch (Enroute / Arrived)
+    ///         the list is immutable until <c>Disembark</c> requires
+    ///         <c>FlightStatus == Arrived</c> AND operator click, OR the
+    ///         Slice F cascade restores passengers on <c>/deleteagency</c>.
+    ///         Vessel-reassignment never moves the kerbal between agencies'
+    ///         CrewRoute partitions regardless of FlightStatus.</item>
+    /// </list>
+    /// Operators who want to migrate WOLF state from one agency to another
+    /// would need to hand-edit <c>Universe/Agencies/{guid}.txt</c>; there is
+    /// no in-band command for that today (and no design surface for one —
+    /// WOLF entities are per-agency by design, not per-vessel). <b>Do NOT add
+    /// a WOLF migration walk here</b> — the dicts have no FK to the moved
+    /// vessel and a migration walk would produce no observable change.</para>
     /// </summary>
     public class SetVesselAgencyCommand : SimpleCommand
     {

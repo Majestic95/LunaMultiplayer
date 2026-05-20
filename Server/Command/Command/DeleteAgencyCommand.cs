@@ -134,6 +134,49 @@ namespace Server.Command.Command
             // strictly the helper's responsibility.
             var oldOwnerClient = string.IsNullOrEmpty(oldOwnerName) ? null : ClientRetriever.GetClientByName(oldOwnerName);
 
+            // [Phase 4 Slice F — WOLF cascade] Restore in-flight CrewRoute
+            // passengers (RosterStatus.Missing + respawn-MaxValue per WOLF's
+            // Launch path) back to the AC pool BEFORE TryDeleteAgency removes
+            // the agency record. Without this, kerbals stuck mid-flight when
+            // their agency is wholesale-deleted have no in-band recovery path
+            // — the route's CrewRoute record vanishes with the agency, and
+            // the Disembark client-side code that would normally flip them
+            // back to Available can never run. The cascade is per-kerbal-
+            // isolated (a missing or malformed kerbal file doesn't abort
+            // siblings) and emits its own [fix:WOLF-R4] log lines per
+            // restored / failed kerbal. Outer try/catch ensures any cascade
+            // exception still lets TryDeleteAgency proceed — otherwise we'd
+            // leak an orphan agency file with no in-memory registry record.
+            //
+            // Multi-lens-review SHOULD FIX (upgrade/integration): initialise
+            // to a non-null empty CascadeResult so the summary emission below
+            // ALWAYS runs (even on cascade-throw). Without this the
+            // `wolfCascade != null` guard would skip the audit summary on the
+            // exact path where the operator most needs the "cascade ran?"
+            // signal. Failure of the cascade itself adds CascadeFailed=true
+            // to the summary tail (see emit block further down) and emits
+            // the Error line.
+            //
+            // The cascade runs OUTSIDE the agency lock (FileHandler's
+            // per-path lock handles kerbal-file concurrency); see
+            // AgencyWolfMigration class XML for the lock-domain contract +
+            // the narrow operator-/kick-first race window.
+            var wolfCascade = new AgencyWolfMigration.CascadeResult();
+            var wolfCascadeFailed = false;
+            try
+            {
+                wolfCascade = AgencyWolfMigration.CascadeOnDelete(source);
+            }
+            catch (Exception e)
+            {
+                wolfCascadeFailed = true;
+                LunaLog.Error(
+                    $"[fix:WOLF-R4] deleteagency {agencyId:N} WOLF cascade failed: {e.GetType().Name}: " +
+                    $"{e.Message}. Proceeding with agency-record deletion; mid-flight kerbals may " +
+                    "require manual recovery (edit Universe/Kerbals/{name}.txt — set " +
+                    "'state = Available' + 'ToD = 0').");
+            }
+
             if (!AgencySystem.TryDeleteAgency(source, out var demotedVesselIds, out var failureReason))
             {
                 LunaLog.Error($"deleteagency: {failureReason}");
@@ -211,6 +254,24 @@ namespace Server.Command.Command
                 LunaLog.Normal(
                     $"[fix:per-agency-career] deleteagency {agencyId:N} demoted vessel={vesselId:N} to Unassigned");
             }
+
+            // [Phase 4 Slice F] WOLF-cascade summary. Per-restored / per-
+            // failed kerbal log lines are emitted inside AgencyWolfMigration
+            // (each tagged with the agencyId so a GUI launcher's
+            // `[fix:WOLF-R4] deleteagency {agencyId:N}` grep gathers them
+            // alongside the summary line). This line is the deterministic
+            // "cascade ran?" anchor — always emitted, including under the
+            // cascade-throw path (wolfCascade was initialised to an empty
+            // CascadeResult above; cascade-failed=true distinguishes the
+            // exception path from a happy zero-work cascade). The
+            // failed-kerbals count carries the failure signal; the per-name
+            // detail lives in the per-kerbal Warning lines (with manual-
+            // recovery path inlined) so we don't re-emit it as an aggregate
+            // here — operators grep by agencyId.
+            LunaLog.Normal(
+                $"[fix:WOLF-R4] deleteagency {agencyId:N} wolf-cascade in-flight-routes={wolfCascade.InFlightRoutesScanned} " +
+                $"restored-kerbals={wolfCascade.RestoredKerbalCount} failed-kerbals={wolfCascade.FailedKerbalNames.Count} " +
+                $"cascade-failed={wolfCascadeFailed}");
 
             // Connected-prior-owner Warning + /kick recommendation. Mirrors
             // slice (e) /transferagency's connected-old-owner Warning + adds the

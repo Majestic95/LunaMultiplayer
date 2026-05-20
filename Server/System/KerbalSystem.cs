@@ -14,7 +14,16 @@ namespace Server.System
 {
     public class KerbalSystem
     {
-        public static readonly string KerbalsPath = Path.Combine(ServerContext.UniverseDirectory, "Kerbals");
+        // Expression-bodied property (not a `static readonly` field) so the path
+        // re-resolves whenever `ServerContext.UniverseDirectory` is mutated —
+        // required for ServerTest's per-test temp UniverseDirectory pattern
+        // (`Path.GetTempPath() + "/lmp-<guid>"`). A `static readonly` field
+        // would lock in the first value at type-init time, leaving tests
+        // writing to a stale path AND breaking any future production code path
+        // that reassigns UniverseDirectory at runtime. Mirrors the
+        // <see cref="Server.System.Agency.AgencyState.AgenciesPath"/>
+        // expression-bodied property pattern.
+        public static string KerbalsPath => Path.Combine(ServerContext.UniverseDirectory, "Kerbals");
 
         public static void GenerateDefaultKerbals()
         {

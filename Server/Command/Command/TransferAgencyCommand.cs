@@ -93,6 +93,26 @@ namespace Server.Command.Command
     /// <see cref="GameplaySettingsDefinition.StartingReputation"/>. They do NOT
     /// inherit any state from the renamed agency. Operators rebalancing for
     /// this UX should use <c>/setagency</c> on the fresh agency post-mint.</para>
+    ///
+    /// <para><b>Phase 4 Slice F — WOLF state is preserved unchanged.</b> All
+    /// five per-agency WOLF dicts
+    /// (<see cref="Server.System.Agency.AgencyState.WolfDepots"/> /
+    /// <see cref="Server.System.Agency.AgencyState.WolfRoutes"/> /
+    /// <see cref="Server.System.Agency.AgencyState.WolfHoppers"/> /
+    /// <see cref="Server.System.Agency.AgencyState.WolfTerminals"/> /
+    /// <see cref="Server.System.Agency.AgencyState.WolfCrewRoutes"/>) survive
+    /// <c>/transferagency</c> intact. Rationale: this command is an OWNER-RENAME
+    /// — the agency's <see cref="Server.System.Agency.AgencyState.AgencyId"/>
+    /// is stable across the rename (Phase 3 Slice E precedent). The WOLF dicts
+    /// are body+biome / Guid keyed, NOT
+    /// <see cref="Server.System.Agency.AgencyState.OwningPlayerName"/> keyed,
+    /// so they have no FK to mutate. <b>Do NOT add a WOLF migration walk
+    /// here</b> — it would be a redundant no-op at best and a stale-data
+    /// dropper at worst. The vessel-level reassignment command
+    /// <see cref="SetVesselAgencyCommand"/> ALSO has no WOLF migration (WOLF
+    /// entities aren't vessel-keyed); only <see cref="DeleteAgencyCommand"/>
+    /// runs a WOLF cascade (kerbal restoration before the agency record
+    /// vanishes — see <see cref="Server.System.Agency.AgencyWolfMigration.CascadeOnDelete"/>).</para>
     /// </summary>
     public class TransferAgencyCommand : SimpleCommand
     {
