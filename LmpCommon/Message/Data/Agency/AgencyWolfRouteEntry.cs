@@ -16,11 +16,30 @@ namespace LmpCommon.Message.Data.Agency
     /// (Ordinal compare). The 4-string composite mirrors WOLF's own
     /// <c>ScenarioPersister.GetRoute</c> + <c>HasRoute</c> lookup semantics.</para>
     ///
-    /// <para><b>Persisted form (in <c>{guid}.txt</c>):</b> one <c>WOLF_ROUTE</c>
-    /// sub-node per entry under the parent <c>WOLF_ROUTES</c> node, with
-    /// <see cref="Resources"/> emitted as a nested <c>WOLF_ROUTE_RESOURCES</c>
-    /// child containing one <c>WOLF_ROUTE_RESOURCE</c> sub-node per entry.
-    /// Fields verified at pre-spec §2.f.iii.</para>
+    /// <para><b>Two distinct ConfigNode shapes — DO NOT CONFLATE</b>:
+    /// <list type="bullet">
+    ///   <item><b>Disk-side (in <c>Universe/Agencies/{guid}.txt</c>):</b>
+    ///        one <c>WOLF_ROUTE</c> sub-node per entry under the parent
+    ///        <c>WOLF_ROUTES</c> node; <see cref="Resources"/> emit as a
+    ///        nested <c>WOLF_ROUTE_RESOURCES</c> child containing one
+    ///        <c>WOLF_ROUTE_RESOURCE</c> sub-node per entry. See
+    ///        <c>AgencyState.SaveAgency</c> / <c>LoadAgency</c>.</item>
+    ///   <item><b>Wire/scenario-projection side (in the
+    ///        <c>WOLF_ScenarioModule</c> blob emitted by
+    ///        <c>AgencyScenarioProjector.SpliceAgencyWolfState</c>):</b> the
+    ///        nesting tags MUST match what WOLF's <c>Route.OnLoad</c> at
+    ///        <c>Route.cs:164-186</c> reads — namely <c>ROUTE</c> sub-nodes
+    ///        under a <c>ROUTES</c> parent, with <see cref="Resources"/>
+    ///        emitted as nested <c>RESOURCE</c> children directly under
+    ///        each ROUTE (no intermediate RESOURCES wrapper). Field names
+    ///        are 1:1 PascalCase on both sides
+    ///        (<c>OriginBody</c>/<c>OriginBiome</c>/<c>DestinationBody</c>/
+    ///        <c>DestinationBiome</c>/<c>Payload</c> on the route;
+    ///        <c>ResourceName</c>/<c>Quantity</c> on each resource).</item>
+    /// </list>
+    /// The disk format is internal to LMP; the wire/projection format
+    /// satisfies WOLF's parse contract. Fields verified at pre-spec
+    /// §2.f.iii against WOLF SHA <c>ed0f6aa6</c>.</para>
     /// </summary>
     public class AgencyWolfRouteEntry
     {

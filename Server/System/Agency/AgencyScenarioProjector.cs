@@ -1662,21 +1662,25 @@ namespace Server.System.Agency
         /// </code>
         ///
         /// <para><b>Strip ALL 5 child node families first</b> (clean the
-        /// slate) — Slices C-E will extend this method to also emit
-        /// ROUTES / HOPPERS / TERMINALS / CREWROUTES from
-        /// <c>agency.WolfRoutes</c> / etc. Until then, the missing 4 child
-        /// nodes load as empty in WOLF (per <c>ScenarioPersister.OnLoad</c>'s
-        /// <c>HasNode</c> guards at lines 289/303/314/332/343).</para>
+        /// slate) — Slice B-2 strips and emits DEPOTS; Slice C strips and
+        /// emits ROUTES (with FK sweep — see below); Slices D-E will
+        /// extend this method to also emit HOPPERS / TERMINALS /
+        /// CREWROUTES from <c>agency.WolfHoppers</c> / etc. Until then,
+        /// the missing 3 child nodes load as empty in WOLF (per
+        /// <c>ScenarioPersister.OnLoad</c>'s <c>HasNode</c> guards at
+        /// lines 289/303/314/332/343).</para>
         ///
         /// <para><b>Emit ORDER: DEPOTS FIRST</b> (pre-spec §2.c) because
         /// WOLF's <c>ScenarioPersister.OnLoad</c> at line 288-302 loads
         /// depots first and other entity types call
-        /// <c>_registry.GetDepot</c> during their <c>OnLoad</c>. Slices
-        /// C-E inserting their emit calls must place them AFTER the depot
-        /// emit + must include the foreign-key integrity sweep
-        /// (pre-spec §2.c) to drop entries that reference depots not in
-        /// the agency's pool — otherwise WOLF's OnLoad throws
-        /// <c>DepotDoesNotExistException</c> and the scene load hangs.</para>
+        /// <c>_registry.GetDepot</c> during their <c>OnLoad</c>. Slice C
+        /// emits ROUTES AFTER the depot emit + runs the foreign-key
+        /// integrity sweep (pre-spec §2.c) to drop routes that reference
+        /// depots not in the agency's pool — otherwise WOLF's OnLoad
+        /// throws <c>DepotDoesNotExistException</c> and the scene load
+        /// hangs. Slices D-E inserting their emit calls must mirror the
+        /// AFTER-DEPOTS placement (Hoppers + CrewRoutes also reference
+        /// depots).</para>
         ///
         /// <para><b>Per-entry isolation</b>: a malformed entry's failure
         /// is logged + skipped, siblings continue. Whole-scenario parse
@@ -1717,20 +1721,34 @@ namespace Server.System.Agency
                     node.RemoveNode(existing.Value);
             }
 
-            // Snapshot agency WOLF state under the per-agency lock so a
-            // concurrent router upsert can't tear our iteration.
+            // Snapshot agency WOLF state under a SINGLE per-agency lock
+            // acquisition so a concurrent router upsert across either depot
+            // or route can't tear our iteration AND so the depot/route view
+            // is internally consistent (route FK sweep relies on the snapshot
+            // pair being from the same moment in time).
             AgencyWolfDepotEntry[] depotSnapshot;
+            AgencyWolfRouteEntry[] routeSnapshot;
             lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
             {
                 depotSnapshot = new AgencyWolfDepotEntry[targetAgency.WolfDepots.Count];
-                var i = 0;
+                var di = 0;
                 foreach (var kvp in targetAgency.WolfDepots)
                 {
                     if (kvp.Value == null) continue;
-                    depotSnapshot[i++] = kvp.Value;
+                    depotSnapshot[di++] = kvp.Value;
                 }
-                if (i < depotSnapshot.Length)
-                    Array.Resize(ref depotSnapshot, i);
+                if (di < depotSnapshot.Length)
+                    Array.Resize(ref depotSnapshot, di);
+
+                routeSnapshot = new AgencyWolfRouteEntry[targetAgency.WolfRoutes.Count];
+                var ri = 0;
+                foreach (var kvp in targetAgency.WolfRoutes)
+                {
+                    if (kvp.Value == null) continue;
+                    routeSnapshot[ri++] = kvp.Value;
+                }
+                if (ri < routeSnapshot.Length)
+                    Array.Resize(ref routeSnapshot, ri);
             }
 
             // Emit DEPOTS first (WOLF OnLoad ordering invariant). Slices
@@ -1779,11 +1797,144 @@ namespace Server.System.Agency
                 }
             }
 
-            // [Phase 4 Slices C-E insertion point]
-            // Slice C inserts WOLF_ROUTES emit here (after FK sweep against
-            //   the just-emitted depot pool).
+            // [Phase 4 Slice C] WOLF_ROUTES emit with FK integrity sweep
+            // against the just-emitted depot pool. WOLF's Route.OnLoad at
+            // Route.cs:172-173 calls _depotRegistry.GetDepot(OriginBody,
+            // OriginBiome) — which throws DepotDoesNotExistException when
+            // the depot is missing. That throw would kill OnLoad for the
+            // whole scenario, so any route whose origin OR destination
+            // composite key isn't in the depotSnapshot MUST be dropped from
+            // the outgoing blob. This decouples the disk-side persistence
+            // (router accepts routes regardless of depot presence — message
+            // arrival ordering is not guaranteed) from the wire-side
+            // projection (strict referential integrity for WOLF's parse
+            // contract).
+            //
+            // FK sweep semantics: "depot EXISTENCE" — NOT stream-consistency.
+            // The Slice B-3 Depot Negotiate path is debounced through
+            // WolfDepotDebouncer (~1s flush); a Route.AddResource fires
+            // internal Depot.Negotiate*, so a route message can arrive
+            // before the debounced depot stream update lands. This is
+            // tolerable because WOLF's Route.OnLoad does NOT read depot
+            // stream state from route nodes — only depot existence. The
+            // FK gate enforces that, and only that.
+            //
+            // Recovery-window scope: when arrival ordering produces a
+            // transient FK miss (route arrives before its depot), the
+            // route drops from THIS projection tick only and reappears on
+            // the next tick once the depot lands. The owner's LOCAL
+            // KSP-side WOLF already has the route (CreateRoute ran fully
+            // local before the postfix fired); the window only affects
+            // (a) the OWNER's reconnect / catchup if disconnect lands
+            // mid-sequence, and (b) post-server-restart scenario load
+            // before the next tick. Self-healing across ticks.
+            //
+            // FK key set is built from the just-emitted depot pool using
+            // the per-depot composite "Body|Biome" — matches WOLF's
+            // GetDepot lookup at ScenarioPersister.cs:177-189. Slices D
+            // (Hoppers — single-depot FK) and E (CrewRoutes — origin/dest
+            // FK like routes) MUST reuse this same depotKeySet from the
+            // current scope; build-once-per-projection is intentional. The
+            // HashSet is declared at the WOLF-emit-method scope (here, not
+            // inside the routes block) and built lazily — null until first
+            // FK consumer; subsequent consumers (Hopper FK in Slice D,
+            // CrewRoute FK in Slice E) reuse the populated instance.
+            HashSet<string> depotKeySet = null;
+
+            if (routeSnapshot.Length > 0)
+            {
+                if (depotKeySet == null && depotSnapshot.Length > 0)
+                {
+                    depotKeySet = new HashSet<string>(StringComparer.Ordinal);
+                    foreach (var d in depotSnapshot)
+                    {
+                        if (d == null) continue;
+                        depotKeySet.Add($"{d.Body ?? string.Empty}|{d.Biome ?? string.Empty}");
+                    }
+                }
+
+                ConfigNode routesContainer = null;
+                foreach (var entry in routeSnapshot)
+                {
+                    if (entry == null)
+                        continue;
+                    try
+                    {
+                        if (string.IsNullOrEmpty(entry.OriginBody) || string.IsNullOrEmpty(entry.OriginBiome)
+                            || string.IsNullOrEmpty(entry.DestinationBody) || string.IsNullOrEmpty(entry.DestinationBiome))
+                        {
+                            // Malformed entry — drop, keep siblings.
+                            continue;
+                        }
+
+                        // FK sweep: both origin AND destination depot must
+                        // be in the emitted pool. The router accepts routes
+                        // out-of-order; the projector enforces the lookup
+                        // contract WOLF expects.
+                        var originKey = $"{entry.OriginBody}|{entry.OriginBiome}";
+                        var destKey = $"{entry.DestinationBody}|{entry.DestinationBiome}";
+                        if (depotKeySet == null
+                            || !depotKeySet.Contains(originKey)
+                            || !depotKeySet.Contains(destKey))
+                        {
+                            LunaLog.Debug($"[fix:WOLF-R4] Route {originKey}→{destKey} dropped from projection (agency {targetAgency.AgencyId:N}): origin or destination depot missing from per-agency pool — will reappear once both depots' postfixes have routed.");
+                            continue;
+                        }
+
+                        // Lazy-allocate the ROUTES container so an FK-sweep-
+                        // empty result emits no container node at all.
+                        // Slices D/E will use the same lazy-allocate pattern
+                        // for their FK-swept families.
+                        if (routesContainer == null)
+                        {
+                            routesContainer = new ConfigNode("") { Name = "ROUTES" };
+                            node.AddNode(routesContainer);
+                        }
+
+                        var rNode = new ConfigNode("") { Name = "ROUTE" };
+                        rNode.CreateValue(new CfgNodeValue<string, string>("OriginBody", entry.OriginBody));
+                        rNode.CreateValue(new CfgNodeValue<string, string>("OriginBiome", entry.OriginBiome));
+                        rNode.CreateValue(new CfgNodeValue<string, string>("DestinationBody", entry.DestinationBody));
+                        rNode.CreateValue(new CfgNodeValue<string, string>("DestinationBiome", entry.DestinationBiome));
+                        rNode.CreateValue(new CfgNodeValue<string, string>("Payload", entry.Payload.ToString(CultureInfo.InvariantCulture)));
+
+                        if (entry.Resources != null)
+                        {
+                            foreach (var resource in entry.Resources)
+                            {
+                                if (resource == null || string.IsNullOrEmpty(resource.ResourceName))
+                                    continue;
+                                // Per WOLF Route.cs:188-205, route resources
+                                // persist as RESOURCE child nodes (NOT
+                                // WOLF_ROUTE_RESOURCE — that's our disk-side
+                                // name). Wire format MUST match WOLF's OnLoad
+                                // parse contract at Route.cs:175-185.
+                                var resNode = new ConfigNode("") { Name = "RESOURCE" };
+                                resNode.CreateValue(new CfgNodeValue<string, string>("ResourceName", resource.ResourceName));
+                                resNode.CreateValue(new CfgNodeValue<string, string>("Quantity", resource.Quantity.ToString(CultureInfo.InvariantCulture)));
+                                rNode.AddNode(resNode);
+                            }
+                        }
+                        routesContainer.AddNode(rNode);
+                    }
+                    catch (Exception)
+                    {
+                        // Per-entry isolation — drop this route, keep others.
+                    }
+                }
+            }
+
+            // [Phase 4 Slices D-E insertion point]
             // Slice D inserts WOLF_HOPPERS + WOLF_TERMINALS emit here.
-            // Slice E inserts WOLF_CREWROUTES emit here (after FK sweep).
+            //   Hoppers reference one depot — reuse the depotKeySet HashSet
+            //   declared above (build it lazily if routeSnapshot was empty;
+            //   the null-check + populate is one line: see the routes block
+            //   above for the canonical shape).
+            // Slice E inserts WOLF_CREWROUTES emit here — reuse depotKeySet
+            //   (CrewRoutes have origin + destination FK like routes).
+            //   Slice E additionally consults the K1 kerbal-authority guard
+            //   per pre-spec §8 (separate from depotKeySet — kerbals are
+            //   tracked via their own per-vessel lmpOwningAgency stamps).
 
             return node.ToString();
         }

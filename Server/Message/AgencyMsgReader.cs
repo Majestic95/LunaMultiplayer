@@ -116,6 +116,19 @@ namespace Server.Message
                     // AgencySystemSender.SendWolfDepotStateToOwner.
                     AgencyWolfDepotRouter.TryRoute(client, (AgencyWolfDepotStateMsgData)data);
                     break;
+                case AgencyMessageType.WolfRouteState:
+                    // [Phase 4 Slice C] MKS WOLF cargo-route per-agency routing.
+                    // Inbound from client postfixes on
+                    // ScenarioPersister.CreateRoute + Route.AddResource /
+                    // RemoveResource (Slice C client-side). Routes are
+                    // 4-string-composite-keyed (Origin/Destination
+                    // Body+Biome); two agencies can have routes between the
+                    // same endpoints in separate per-agency dicts. No
+                    // cross-agency vessel-proxy check (routes are not vessel-
+                    // keyed). Owner-only echo via
+                    // AgencySystemSender.SendWolfRouteStateToOwner.
+                    AgencyWolfRouteRouter.TryRoute(client, (AgencyWolfRouteStateMsgData)data);
+                    break;
                 case AgencyMessageType.Handshake:
                 case AgencyMessageType.CreateReply:
                 case AgencyMessageType.State:

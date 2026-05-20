@@ -34,6 +34,7 @@ namespace LmpClient.Base
             PatchModulePlanetaryLogistics();
             PatchOrbitalLogisticsTransferRequest();
             PatchWolfDepot();
+            PatchWolfRoute();
         }
 
         /// <summary>
@@ -453,6 +454,111 @@ namespace LmpClient.Base
             catch (Exception e)
             {
                 LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF depot methods: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice C] WOLF-R4 — Patches three WOLF entry points with
+        /// per-agency cargo-route mutation postfixes:
+        /// <list type="bullet">
+        ///   <item><c>WOLF.ScenarioPersister.CreateRoute(string, string, string, string, int)</c>
+        ///        — emits the new (or existing-idempotent) route's snapshot.</item>
+        ///   <item><c>WOLF.Route.AddResource(string, int)</c> — emits the
+        ///        post-mutation route snapshot when an operator allocates a
+        ///        resource to the route.</item>
+        ///   <item><c>WOLF.Route.RemoveResource(string, int)</c> — symmetric
+        ///        counterpart for resource removal.</item>
+        /// </list>
+        ///
+        /// <para><b>Brittleness mitigation</b> (pre-spec §6 + per-postfix XML
+        /// notes): WOLF type resolution via
+        /// <see cref="HarmonyLib.AccessTools.TypeByName"/> at boot. A single
+        /// <c>[fix:WOLF-R4]</c> warning fires on missing-type or signature-
+        /// rename and all three patches become no-ops for the session.
+        /// Graceful no-op when WOLF isn't installed — matches the MKS-R0 /
+        /// R1 / R2 + Slice B-2/B-3 self-disable pattern + single grep
+        /// namespace.</para>
+        ///
+        /// <para><b>All-or-nothing on the three method resolves.</b> If
+        /// <c>CreateRoute</c> resolves but <c>AddResource</c> doesn't,
+        /// resource allocations would silently disappear and operators
+        /// would see routes register on creation but never update with
+        /// resource allocations under gate=on (because the legacy SHA pass
+        /// is suppressed for <c>WOLF_ScenarioModule</c>). Fail the entire
+        /// patch group on any miss so the operator's signal is a single
+        /// Warning instead of "routes are missing resources, why?"</para>
+        ///
+        /// <para><b>Cadence vs Slice B-3.</b> Route mutations are operator-
+        /// driven UI clicks. Per-route hot-path (Negotiate-style 50 Hz)
+        /// already lives on the depot side via Slice B-3's
+        /// <see cref="LmpClient.Systems.Agency.WolfDepotDebouncer"/>.
+        /// No debouncer for the route path.</para>
+        ///
+        /// <para><b>Slice D / E mirror.</b> Slice D will add
+        /// <c>PatchWolfHopper</c> / <c>PatchWolfTerminal</c> and Slice E
+        /// will add <c>PatchWolfCrewRoute</c> following the same all-or-
+        /// nothing 3-method resolve + single-Warning operator-signal
+        /// pattern. Slice E additionally carries the cross-agency-kerbal
+        /// gate (spec §10 Q3) — the resolve list will include the kerbal-
+        /// authority lookup site identified during Slice E source re-walk.
+        /// All four WOLF patchers stay siblings under <c>PatchOptionalMods</c>
+        /// for a single grep namespace.</para>
+        /// </summary>
+        internal static void PatchWolfRoute()
+        {
+            try
+            {
+                var routeType = HarmonyLib.AccessTools.TypeByName("WOLF.Route");
+                var persisterType = HarmonyLib.AccessTools.TypeByName("WOLF.ScenarioPersister");
+                if (routeType == null || persisterType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:WOLF-R4] WOLF.Route / ScenarioPersister types not found — WOLF (MKS WOLF) not installed, skipping per-agency route postfixes.");
+                    return;
+                }
+
+                var createRouteMethod = HarmonyLib.AccessTools.Method(persisterType, "CreateRoute",
+                    new[] { typeof(string), typeof(string), typeof(string), typeof(string), typeof(int) });
+                var addResourceMethod = HarmonyLib.AccessTools.Method(routeType, "AddResource",
+                    new[] { typeof(string), typeof(int) });
+                var removeResourceMethod = HarmonyLib.AccessTools.Method(routeType, "RemoveResource",
+                    new[] { typeof(string), typeof(int) });
+
+                if (createRouteMethod == null || addResourceMethod == null || removeResourceMethod == null)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: [fix:WOLF-R4] WOLF route method resolve failed " +
+                        $"(CreateRoute={(createRouteMethod != null ? "OK" : "MISSING")}, " +
+                        $"AddResource={(addResourceMethod != null ? "OK" : "MISSING")}, " +
+                        $"RemoveResource={(removeResourceMethod != null ? "OK" : "MISSING")}) — " +
+                        "WOLF version mismatch? Per-agency WOLF route routing NOT active; " +
+                        "under gate=on the legacy 30s SHA broadcast for WOLF_ScenarioModule is " +
+                        "suppressed so route state will not propagate at all (sync lag = infinite). " +
+                        "Under gate=off the shared-mode broadcast continues unchanged.");
+                    return;
+                }
+
+                var createRoutePostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ScenarioPersister_CreateRoutePostfix),
+                    nameof(LmpClient.Harmony.ScenarioPersister_CreateRoutePostfix.Postfix));
+                var addResourcePostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.Route_AddResourcePostfix),
+                    nameof(LmpClient.Harmony.Route_AddResourcePostfix.Postfix));
+                var removeResourcePostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.Route_RemoveResourcePostfix),
+                    nameof(LmpClient.Harmony.Route_RemoveResourcePostfix.Postfix));
+
+                HarmonyInstance.Patch(createRouteMethod, postfix: createRoutePostfix);
+                HarmonyInstance.Patch(addResourceMethod, postfix: addResourcePostfix);
+                HarmonyInstance.Patch(removeResourceMethod, postfix: removeResourcePostfix);
+
+                LunaLog.Log(
+                    "[LMP]: [fix:WOLF-R4] Patched WOLF.ScenarioPersister.CreateRoute + " +
+                    "WOLF.Route.AddResource + RemoveResource — " +
+                    "per-agency route routing active under PerAgencyCareerEnabled.");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF route methods: {e.Message}");
             }
         }
 

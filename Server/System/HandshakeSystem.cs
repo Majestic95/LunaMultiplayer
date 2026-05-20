@@ -104,11 +104,21 @@ namespace Server.System
                         // reconnecting owner before any mid-session mutation.
                         // Unconditional under gate=on so the empty-dict case is
                         // observable by the pre-Slice-B client mirror author.
-                        // Slices C-E will append SendWolfRouteCatchupTo /
-                        // SendWolfHopperCatchupTo / SendWolfTerminalCatchupTo /
-                        // SendWolfCrewRouteCatchupTo here as the per-router
-                        // surfaces land.
+                        // Slices D-E will append SendWolfHopperCatchupTo /
+                        // SendWolfTerminalCatchupTo / SendWolfCrewRouteCatchupTo
+                        // here as the per-router surfaces land.
                         AgencySystemSender.SendWolfDepotCatchupTo(client, assignedState);
+                        // [Phase 4 Slice C] MKS WOLF cargo-route catch-up.
+                        // Ordering: depots-then-routes mirrors WOLF's own
+                        // OnLoad ordering invariant at
+                        // ScenarioPersister.cs:288-302 — routes look up their
+                        // origin/destination depots via
+                        // _depotRegistry.GetDepot during OnLoad; depots must
+                        // be present first or the lookup throws
+                        // DepotDoesNotExistException. The wire ordering here
+                        // protects a future Slice (C+) client mirror that
+                        // applies the same OnLoad-equivalent sequence.
+                        AgencySystemSender.SendWolfRouteCatchupTo(client, assignedState);
                     }
 
                     // [Mod-compat / Path B D2 catch-up] Synchronous connect-

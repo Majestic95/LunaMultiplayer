@@ -179,7 +179,11 @@
     <Compile Include="Harmony\ModulePlanetaryLogistics_LevelResourcesPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsReflection.cs" />
     <Compile Include="Harmony\ScenarioPersister_CreateDepotPostfix.cs" />
+    <Compile Include="Harmony\ScenarioPersister_CreateRoutePostfix.cs" />
+    <Compile Include="Harmony\Route_AddResourcePostfix.cs" />
+    <Compile Include="Harmony\Route_RemoveResourcePostfix.cs" />
     <Compile Include="Harmony\WolfDepotReflection.cs" />
+    <Compile Include="Harmony\WolfRouteReflection.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_AbortPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPrefix.cs" />
@@ -300,6 +304,7 @@
     <Compile Include="Systems\Agency\AgencyLabelFormatter.cs" />
     <Compile Include="Systems\Agency\AgencyKolonySender.cs" />
     <Compile Include="Systems\Agency\AgencyWolfDepotSender.cs" />
+    <Compile Include="Systems\Agency\AgencyWolfRouteSender.cs" />
     <Compile Include="Systems\Agency\AgencyOrbitalSender.cs" />
     <Compile Include="Systems\Agency\AgencyPlanetarySender.cs" />
     <Compile Include="Systems\Agency\AgencyMembership.cs" />

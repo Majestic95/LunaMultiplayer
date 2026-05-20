@@ -1351,6 +1351,11 @@ namespace Server.System.Agency
                 midFlightSuffix + ". " +
                 "The Phase 4 projector strips ALL 5 WOLF child node families on first per-agency " +
                 "connect; accumulated WOLF logistics graph is NOT migrated. " +
+                "EVEN THE ROUTED FAMILIES LOSE THEIR PRE-UPGRADE STATE: Slice B-2 (depots) and " +
+                "Slice C (routes) route fresh mutations into per-agency AgencyState, but the " +
+                "stripper has no migration path for pre-existing shared entries — only mutations " +
+                "made AFTER gate=on populate WolfDepots / WolfRoutes. Hoppers / Terminals / " +
+                "CrewRoutes remain fully stripped (Slices D-E pending). " +
                 "RECOVERY OPTIONS: " +
                 "(1) BEFORE upgrade: ensure no CrewRoutes are mid-flight (let in-flight routes " +
                 "complete to Arrived OR Disembark passengers OR delete routes via in-game UI). " +
