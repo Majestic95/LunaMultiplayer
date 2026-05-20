@@ -61,7 +61,13 @@ namespace Server.Command.Command
 
         public override bool Execute(string commandArgs)
         {
-            if (!DeleteAgencyCommandParser.TryParse(commandArgs, out var sourceToken, out var confirmed, out var parseError))
+            if (!DeleteAgencyCommandParser.TryParse(
+                    commandArgs,
+                    out var sourceToken,
+                    out var confirmed,
+                    out var restoreToToken,
+                    out var restoreToNone,
+                    out var parseError))
             {
                 LunaLog.Error(parseError);
                 LunaLog.Normal(DeleteAgencyCommandParser.UsageBanner);
@@ -83,6 +89,25 @@ namespace Server.Command.Command
                     "GameMode=Career in Settings/GeneralSettings.xml to activate, or set PerAgencyCareer=false in " +
                     "Settings/GameplaySettings.xml to disable per-agency cleanly (may flip GameDifficulty to Custom " +
                     "— see CLAUDE.md Settings caveat).");
+                return false;
+            }
+
+            // [Phase 6.7] --restore-to / --restore-to-none gate-off rejection.
+            // Under PerAgencyKerbalRoster=false the cascade writes to the
+            // legacy shared Universe/Kerbals/ directory unchanged — neither
+            // flag has any semantic effect. Reject early so operators learn
+            // that these flags are gate=on concerns. Silent acceptance would
+            // train operators to type flags that don't do what they appear
+            // to say. (Operator-confirmed 2026-05-20.)
+            var kerbalRosterGateOn = AgencySystem.PerAgencyKerbalRosterEnabled;
+            if (!kerbalRosterGateOn && (!string.IsNullOrEmpty(restoreToToken) || restoreToNone))
+            {
+                LunaLog.Error(
+                    "deleteagency: --restore-to / --restore-to-none have no effect under " +
+                    "PerAgencyKerbalRoster=false (shared-roster mode). The cascade writes restored " +
+                    "kerbals to the shared Universe/Kerbals/ directory unchanged. Remove the flag and " +
+                    "re-run; or enable PerAgencyKerbalRoster in Settings/GameplaySettings.xml first " +
+                    "(see CLAUDE.md Stage 6 + spec §Q-Migration for the upgrade workflow).");
                 return false;
             }
 
@@ -117,6 +142,75 @@ namespace Server.Command.Command
                     "will be PERMANENTLY removed). Re-run with --confirm to proceed.");
                 LunaLog.Normal(DeleteAgencyCommandParser.UsageBanner);
                 return false;
+            }
+
+            // [Phase 6.7] In-flight kerbal disposition check under gate=on.
+            // The WOLF cascade rescues passengers in {Enroute, Arrived} state,
+            // but their kerbal files cannot land in the deleted agency's own
+            // per-agency subdir (that subdir is cascade-deleted by
+            // TryDeleteAgency seconds later). The operator must explicitly
+            // pick a disposition: --restore-to <agency> writes to that agency's
+            // subdir; --restore-to-none accepts the loss. Without either flag
+            // we'd silently lose kerbals on disk; refuse instead.
+            //
+            // The pre-scan is a separate walk from the cascade's snapshot
+            // (cascade re-locks + re-walks to get the names), but it's
+            // O(routes) per /deleteagency under gate=on with non-empty
+            // WolfCrewRoutes — cheap.
+            AgencyState destination = null;
+            if (kerbalRosterGateOn)
+            {
+                var inFlightPassengerCount = AgencyWolfMigration.CountInFlightPassengersForRefusalCheck(source);
+                if (inFlightPassengerCount > 0 && string.IsNullOrEmpty(restoreToToken) && !restoreToNone)
+                {
+                    LunaLog.Error(
+                        $"deleteagency: refusing — agency {source.AgencyId:N} owner='{source.OwningPlayerName}' " +
+                        $"has {inFlightPassengerCount} WOLF CrewRoute passenger(s) currently in-flight " +
+                        "(states Enroute or Arrived). Under PerAgencyKerbalRoster=true their rescued kerbal files " +
+                        "cannot stay in the deleted agency's own subdir (it's removed by the cascade). " +
+                        "Pick a disposition and re-run (use /listagencies to see valid destination tokens):\n" +
+                        "  /deleteagency " + sourceToken + " --confirm --restore-to <agency-id|owner>\n" +
+                        "      Land restored kerbals in the named agency's subdir.\n" +
+                        "  /deleteagency " + sourceToken + " --confirm --restore-to-none\n" +
+                        "      Accept the kerbal loss; cascade writes no files.\n" +
+                        "Note: passengers in Boarding state are NOT counted here — they stay Assigned to the " +
+                        "carrier vessel (which demotes to Unassigned on delete) and need no separate disposition.\n" +
+                        "v6/v7-era admin scripts that piped '/deleteagency $token --confirm' without a disposition " +
+                        "flag need updating: append '--restore-to-none' to preserve the pre-Phase-6.7 silent-loss " +
+                        "behaviour, or '--restore-to <pool-agency>' for the safer routing.");
+                    return false;
+                }
+
+                // Resolve --restore-to destination if specified. Refuse on
+                // unknown token (operator typo) or same-as-source (operator
+                // typed the agency being deleted).
+                if (!string.IsNullOrEmpty(restoreToToken))
+                {
+                    if (!AgencySystem.TryResolveAgencyToken(restoreToToken, out destination))
+                    {
+                        // Include source-agency context so an operator
+                        // scrolling back through console history can pair
+                        // this error to its /deleteagency invocation
+                        // (consumer-lens v1 finding #3).
+                        LunaLog.Error(
+                            $"deleteagency: agency {source.AgencyId:N} owner='{source.OwningPlayerName}' " +
+                            $"— --restore-to token '{restoreToToken}' does not match any registered agency. " +
+                            "Run /listagencies to see valid agency tokens. (Note: an orphaned agency-id " +
+                            "from a boot warning has no in-memory AgencyState and is not a valid " +
+                            "restoration destination.)");
+                        return false;
+                    }
+                    if (destination.AgencyId == source.AgencyId)
+                    {
+                        LunaLog.Error(
+                            $"deleteagency: --restore-to resolves to the SAME agency being deleted " +
+                            $"({source.AgencyId:N} owner='{source.OwningPlayerName}'). That subdir is " +
+                            "removed by the cascade seconds later — pick a DIFFERENT agency (run " +
+                            "/listagencies to see valid alternatives) or use --restore-to-none to " +
+                            "accept the kerbal loss.");
+                        return false;
+                    }
+                }
             }
 
             // Snapshot identity fields BEFORE mutation — TryDeleteAgency wipes
@@ -165,21 +259,58 @@ namespace Server.Command.Command
             var wolfCascadeFailed = false;
             try
             {
-                wolfCascade = AgencyWolfMigration.CascadeOnDelete(source);
+                wolfCascade = AgencyWolfMigration.CascadeOnDelete(source, destination);
             }
             catch (Exception e)
             {
                 wolfCascadeFailed = true;
+                // [Phase 6.7 consumer-lens v1 finding #7] Under gate=on the
+                // source-side kerbal subdir is removed by TryDeleteAgency's
+                // recursive delete moments AFTER this Error emits — there's
+                // no realistic operator window to hand-copy from there.
+                // Under gate=off the legacy Universe/Kerbals/ files are NOT
+                // touched by TryDeleteAgency, so hand-recovery there is real.
                 LunaLog.Error(
                     $"[fix:WOLF-R4] deleteagency {agencyId:N} WOLF cascade failed: {e.GetType().Name}: " +
-                    $"{e.Message}. Proceeding with agency-record deletion; mid-flight kerbals may " +
-                    "require manual recovery (edit Universe/Kerbals/{name}.txt — set " +
-                    "'state = Available' + 'ToD = 0').");
+                    $"{e.Message}. Proceeding with agency-record deletion; mid-flight kerbals " +
+                    (kerbalRosterGateOn
+                        ? $"are likely LOST — Universe/Agencies/{agencyId:N}/Kerbals/ is removed " +
+                          "by TryDeleteAgency's recursive delete immediately after this message. " +
+                          "If the cascade exception was thrown BEFORE TryDeleteAgency runs (rare), " +
+                          "check whether the subdir still exists and hand-copy needed kerbal files " +
+                          $"to the intended destination's Universe/Agencies/{{destGuid:N}}/Kerbals/ " +
+                          "within seconds; setting 'state = Available' + 'ToD = 0' on each."
+                        : "may require manual recovery — edit Universe/Kerbals/{name}.txt and set " +
+                          "'state = Available' + 'ToD = 0'."));
             }
 
             if (!AgencySystem.TryDeleteAgency(source, out var demotedVesselIds, out var failureReason))
             {
                 LunaLog.Error($"deleteagency: {failureReason}");
+                // [Phase 6.7 integration-lens v1 finding #8] If the cascade
+                // already wrote restored kerbal files to the destination
+                // subdir AND TryDeleteAgency then fails, the destination
+                // has acquired files that don't belong to its WolfCrewRoutes
+                // record (the source agency still exists; its WolfCrewRoutes
+                // still references kerbals whose source files are unchanged).
+                // The realistic trigger is narrow (PerAgencyEnabled flipping
+                // false between line 85's gate-check and TryDeleteAgency's
+                // own at AgencySystem.cs:2188) but operators need a clean
+                // audit + recovery hint, not silent destination-side data
+                // pollution.
+                if (wolfCascade.WroteToDestinationSubdir)
+                {
+                    LunaLog.Error(
+                        $"[fix:WOLF-R4] deleteagency {agencyId:N} POST-CASCADE-LEAK: " +
+                        $"the WOLF cascade wrote {wolfCascade.RestoredKerbalCount} kerbal file(s) to " +
+                        $"destination agency {wolfCascade.DestinationAgencyId:N} BEFORE the source-delete " +
+                        $"failed. Restored kerbal names: {string.Join(", ", wolfCascade.RestoredKerbalNames)}. " +
+                        "Manual recovery: either retry /deleteagency to retire the source agency (the " +
+                        "cascade's per-kerbal collision check will skip already-restored kerbals at the " +
+                        "destination so no double-write), or run /setvesselagency on the destination's " +
+                        "vessels to clean up the unintended kerbal files in " +
+                        $"Universe/Agencies/{wolfCascade.DestinationAgencyId:N}/Kerbals/.");
+                }
                 return false;
             }
 
@@ -268,9 +399,28 @@ namespace Server.Command.Command
             // detail lives in the per-kerbal Warning lines (with manual-
             // recovery path inlined) so we don't re-emit it as an aggregate
             // here — operators grep by agencyId.
+            // [Phase 6.7] Cascade summary extended with destination + collision
+            // count + operator-disposition. Collision count is separate from
+            // failed-kerbals because the operator may want to react differently
+            // (different --restore-to + retry on a backup vs hand-edit the
+            // malformed file). The operator-disposition token surfaces the
+            // operator's CHOICE distinctly from the cascade's OUTCOME — a
+            // /deleteagency with no in-flight passengers shows
+            // operator-disposition=default; --restore-to-none shows
+            // operator-disposition=restore-to-none; --restore-to <X> shows
+            // operator-disposition=restore-to. Per consumer-lens v1 finding
+            // #10 (GUI launcher's audit panel needs evidence that the
+            // operator chose to lose data when they typed --restore-to-none).
+            var disposition = restoreToNone
+                ? "restore-to-none"
+                : !string.IsNullOrEmpty(restoreToToken)
+                    ? "restore-to"
+                    : "default";
             LunaLog.Normal(
                 $"[fix:WOLF-R4] deleteagency {agencyId:N} wolf-cascade in-flight-routes={wolfCascade.InFlightRoutesScanned} " +
                 $"restored-kerbals={wolfCascade.RestoredKerbalCount} failed-kerbals={wolfCascade.FailedKerbalNames.Count} " +
+                $"collided-kerbals={wolfCascade.CollidedKerbalNames.Count} " +
+                $"destination={wolfCascade.DestinationAgencyId:N} operator-disposition={disposition} " +
                 $"cascade-failed={wolfCascadeFailed}");
 
             // Connected-prior-owner Warning + /kick recommendation. Mirrors
@@ -294,6 +444,32 @@ namespace Server.Command.Command
                     "every other client under gate=on. This is a temporary cross-agency leak window. /kick " +
                     oldOwnerName + " IMMEDIATELY to close it; on reconnect their handshake mints a fresh agency " +
                     "(seeded from GameplaySettings.Starting*) and the router resumes routing per-agency.");
+            }
+
+            // [Phase 6.7 integration-lens v1 finding #4] If --restore-to <dest>
+            // was used AND the destination's owner is currently online, their
+            // concurrent KerbalProto writes can silently clobber freshly-
+            // restored kerbal files (cascade-wins-then-bob-clobbers path — no
+            // collision Warning fires because by the time bob's proto arrives
+            // the destination subdir's existing file is OUR just-written one,
+            // not a pre-existing one). Recommend kicking destination's owner
+            // too so the cascade's restoration sticks until they reconnect.
+            if (destination != null && wolfCascade.WroteToDestinationSubdir)
+            {
+                var destOwnerName = destination.OwningPlayerName ?? string.Empty;
+                var destOwnerClient = string.IsNullOrEmpty(destOwnerName) ? null : ClientRetriever.GetClientByName(destOwnerName);
+                if (destOwnerClient != null)
+                {
+                    LunaLog.Warning(
+                        $"[fix:WOLF-R4] deleteagency {agencyId:N} WARNING: destination agency " +
+                        $"{destination.AgencyId:N} owner='{destOwnerName}' is currently online AND " +
+                        $"{wolfCascade.RestoredKerbalCount} kerbal file(s) were just restored into their " +
+                        "subdir. Their client's next KerbalProto write for the same kerbal name(s) will " +
+                        "OVERWRITE the freshly-restored Available state without any cascade-emitted " +
+                        $"Warning. /kick {destOwnerName} until they're ready to receive the new kerbals; " +
+                        "on reconnect their handshake replays their roster (per-agency request filter " +
+                        "will deliver the restored kerbals as theirs).");
+                }
             }
 
             return true;

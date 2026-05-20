@@ -63,6 +63,7 @@ namespace ServerTest
         {
             AgencySystem.Reset();
             GameplaySettings.SettingsStore.PerAgencyCareer = false;
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = false; // [Phase 6.7] tests set this true; reset for sibling-class isolation
             GeneralSettings.SettingsStore.GameMode = GameMode.Sandbox;
 
             if (Directory.Exists(ServerContext.UniverseDirectory))
@@ -322,6 +323,23 @@ namespace ServerTest
         {
             var path = Path.Combine(KerbalSystem.KerbalsPath, kerbalName + ".txt");
             var text = File.ReadAllText(path);
+            return ReadKerbalFieldAtPath(path, field);
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — gate=on routing helpers
+        // -------------------------------------------------------------------
+
+        private static string ReadKerbalFieldFromAgencySubdir(Guid agencyId, string kerbalName, string field)
+        {
+            var path = Path.Combine(AgencySystem.GetKerbalsPathForAgency(agencyId), kerbalName + ".txt");
+            return ReadKerbalFieldAtPath(path, field);
+        }
+
+        private static string ReadKerbalFieldAtPath(string path, string field)
+        {
+            if (!File.Exists(path)) return null;
+            var text = File.ReadAllText(path);
             var lines = text.Split('\n');
             foreach (var rawLine in lines)
             {
@@ -334,6 +352,384 @@ namespace ServerTest
                 return rest.Substring(1).Trim();
             }
             return null;
+        }
+
+        private static void WriteKerbalFileToAgencySubdir(Guid agencyId, string kerbalName, string state, string tod)
+        {
+            var subdir = AgencySystem.GetKerbalsPathForAgency(agencyId);
+            Directory.CreateDirectory(subdir);
+            var text = "name = " + kerbalName + "\n" +
+                       "gender = Male\n" +
+                       "type = Crew\n" +
+                       "trait = Pilot\n" +
+                       "brave = 0.5\n" +
+                       "dumb = 0.5\n" +
+                       "badS = False\n" +
+                       "veteran = False\n" +
+                       "tour = False\n" +
+                       "state = " + state + "\n" +
+                       "inactive = False\n" +
+                       "inactiveTimeEnd = 0\n" +
+                       "gExperienced = 0\n" +
+                       "outDueToG = False\n" +
+                       "ToD = " + tod + "\n" +
+                       "idx = -1\n" +
+                       "extraXP = 0\n" +
+                       "CAREER_LOG\n" +
+                       "{\n" +
+                       "\tflight = 0\n" +
+                       "}\n" +
+                       "FLIGHT_LOG\n" +
+                       "{\n" +
+                       "\tflight = 0\n" +
+                       "}\n";
+            File.WriteAllText(Path.Combine(subdir, kerbalName + ".txt"), text);
+        }
+
+        private static AgencyState NewAgencyInRegistry(string ownerName)
+        {
+            var agency = new AgencyState
+            {
+                AgencyId = Guid.NewGuid(),
+                OwningPlayerName = ownerName,
+                DisplayName = ownerName + " Co",
+            };
+            AgencySystem.Agencies[agency.AgencyId] = agency;
+            AgencySystem.AgencyByPlayerName[agency.OwningPlayerName] = agency.AgencyId;
+            return agency;
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — CountInFlightPassengersForRefusalCheck
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void CountInFlight_NoRoutes_Zero()
+        {
+            // Empty WolfCrewRoutes — pre-cascade refusal-check should NOT
+            // require the operator to specify --restore-to / --restore-to-none.
+            Assert.AreEqual(0, AgencyWolfMigration.CountInFlightPassengersForRefusalCheck(_agency));
+        }
+
+        [TestMethod]
+        public void CountInFlight_BoardingOnly_Zero()
+        {
+            // Boarding-status routes are out of restoration scope per the
+            // {Enroute, Arrived}-only contract. Operator shouldn't be forced
+            // to pick a destination for a route whose passengers don't need
+            // rescue.
+            SeedCrewRoute(_agency, "boarding-only", "Boarding", new[] { "Some Kerman" });
+            Assert.AreEqual(0, AgencyWolfMigration.CountInFlightPassengersForRefusalCheck(_agency));
+        }
+
+        [TestMethod]
+        public void CountInFlight_MixedStates_CountsOnlyEnrouteAndArrived()
+        {
+            SeedCrewRoute(_agency, "boarding", "Boarding", new[] { "Skip-Me Kerman" });
+            SeedCrewRoute(_agency, "enroute", "Enroute", new[] { "Count-Me-1 Kerman", "Count-Me-2 Kerman" });
+            SeedCrewRoute(_agency, "arrived", "Arrived", new[] { "Count-Me-3 Kerman" });
+            Assert.AreEqual(3, AgencyWolfMigration.CountInFlightPassengersForRefusalCheck(_agency));
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — gate=on + --restore-to <dest> (happy path)
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Cascade_GateOn_WithDestination_WritesToDestinationSubdir()
+        {
+            // Two agencies; Alice is being deleted, Bob receives the rescued
+            // kerbals. Alice's per-agency subdir has the in-flight passenger's
+            // Missing/MaxValue file. Bob's subdir is empty before the cascade.
+            // After cascade: Bob's subdir has the restored Available/ToD=0
+            // file; Alice's subdir is left intact (TryDeleteAgency's recursive
+            // delete handles source-side cleanup).
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency; // re-use the Setup-minted agency as source
+            var bob = NewAgencyInRegistry("Bob");
+
+            SeedCrewRoute(alice, "alice-route", "Enroute", new[] { "Pebbles Kerman" });
+            WriteKerbalFileToAgencySubdir(alice.AgencyId, "Pebbles Kerman", state: "Missing", tod: "1.79769313486232E+308");
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, bob);
+
+            Assert.AreEqual(1, result.InFlightRoutesScanned);
+            Assert.AreEqual(1, result.RestoredKerbalCount);
+            Assert.AreEqual(0, result.FailedKerbalNames.Count);
+            Assert.AreEqual(0, result.CollidedKerbalNames.Count);
+            Assert.AreEqual(bob.AgencyId, result.DestinationAgencyId,
+                "Destination agency id must be reflected in the audit summary for the operator log.");
+            Assert.IsTrue(result.WroteToDestinationSubdir,
+                "Happy-path restoration must mark WroteToDestinationSubdir so the command summary reads correctly.");
+
+            Assert.AreEqual("Available", ReadKerbalFieldFromAgencySubdir(bob.AgencyId, "Pebbles Kerman", "state"));
+            Assert.AreEqual("0", ReadKerbalFieldFromAgencySubdir(bob.AgencyId, "Pebbles Kerman", "ToD"));
+            Assert.AreEqual("Missing", ReadKerbalFieldFromAgencySubdir(alice.AgencyId, "Pebbles Kerman", "state"),
+                "Source-side file must NOT be mutated by the cascade — TryDeleteAgency's recursive subdir delete " +
+                "is the source-side cleanup. Mutating in-place would race against operator hand-recovery workflows.");
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — gate=on + --restore-to-none (operator-accepted loss)
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Cascade_GateOn_NoDestination_AuditWithoutDiskWrite()
+        {
+            // Operator explicitly chose --restore-to-none. Cascade still walks
+            // the routes (so the summary audit is accurate) but writes nothing
+            // anywhere. Bob's subdir stays empty.
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency;
+            var bob = NewAgencyInRegistry("Bob");
+            SeedCrewRoute(alice, "doomed-route", "Enroute", new[] { "Lost Kerman" });
+            WriteKerbalFileToAgencySubdir(alice.AgencyId, "Lost Kerman", state: "Missing", tod: "1.79769313486232E+308");
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, destination: null);
+
+            Assert.AreEqual(1, result.InFlightRoutesScanned, "Routes still counted even when no restoration writes.");
+            Assert.AreEqual(0, result.RestoredKerbalCount,
+                "--restore-to-none means no successful restorations.");
+            Assert.AreEqual(0, result.FailedKerbalNames.Count);
+            Assert.AreEqual(0, result.CollidedKerbalNames.Count);
+            Assert.AreEqual(Guid.Empty, result.DestinationAgencyId,
+                "DestinationAgencyId stays Empty when operator chose --restore-to-none.");
+            Assert.IsFalse(result.WroteToDestinationSubdir);
+
+            // Source file unchanged (cascade only read it). No file in Bob's subdir.
+            Assert.AreEqual("Missing", ReadKerbalFieldFromAgencySubdir(alice.AgencyId, "Lost Kerman", "state"));
+            var bobPath = Path.Combine(AgencySystem.GetKerbalsPathForAgency(bob.AgencyId), "Lost Kerman.txt");
+            Assert.IsFalse(File.Exists(bobPath),
+                "No file should land in Bob's subdir under --restore-to-none.");
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — gate=on + destination collision (skip with Warning)
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Cascade_GateOn_DestinationHasSameNamedKerbal_CollidesAndPreserves()
+        {
+            // Alice's "Jebediah Kerman" is in-flight. Bob already has his own
+            // Jebediah Kerman.txt (per Q-Seed, each agency has its own stock 4
+            // with the same name). The cascade must NOT overwrite Bob's
+            // existing file — that would silently destroy his agency's Jeb.
+            // Collision counts toward CollidedKerbalNames (separate from
+            // FailedKerbalNames so the operator can distinguish "I picked
+            // the wrong destination" from "file was malformed").
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency;
+            var bob = NewAgencyInRegistry("Bob");
+            SeedCrewRoute(alice, "collision-route", "Enroute", new[] { "Jebediah Kerman" });
+            WriteKerbalFileToAgencySubdir(alice.AgencyId, "Jebediah Kerman", state: "Missing", tod: "1.79769313486232E+308");
+            // Bob already has HIS OWN Jeb (different career — XP=2, Available).
+            WriteKerbalFileToAgencySubdir(bob.AgencyId, "Jebediah Kerman", state: "Available", tod: "0");
+            var bobPath = Path.Combine(AgencySystem.GetKerbalsPathForAgency(bob.AgencyId), "Jebediah Kerman.txt");
+            var bobOriginalText = File.ReadAllText(bobPath);
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, bob);
+
+            Assert.AreEqual(1, result.InFlightRoutesScanned);
+            Assert.AreEqual(0, result.RestoredKerbalCount);
+            Assert.AreEqual(0, result.FailedKerbalNames.Count,
+                "Collision is a separate category from malformed/missing failure.");
+            Assert.AreEqual(1, result.CollidedKerbalNames.Count);
+            Assert.AreEqual("Jebediah Kerman", result.CollidedKerbalNames[0]);
+            Assert.IsFalse(result.WroteToDestinationSubdir,
+                "Collision skips the write; no successful destination write occurred.");
+
+            // Bob's file is byte-identical to the seed — no partial overwrite.
+            var bobAfter = File.ReadAllText(bobPath);
+            Assert.AreEqual(bobOriginalText, bobAfter,
+                "Destination's existing kerbal file must be PRESERVED byte-for-byte under collision.");
+        }
+
+        [TestMethod]
+        public void Cascade_GateOn_PartialCollision_SiblingsStillRestored()
+        {
+            // Multi-passenger CrewRoute. One passenger collides with destination;
+            // the other is restored normally. Per-kerbal isolation contract.
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency;
+            var bob = NewAgencyInRegistry("Bob");
+            SeedCrewRoute(alice, "mixed-route", "Enroute", new[] { "Jebediah Kerman", "Pebbles Kerman" });
+            WriteKerbalFileToAgencySubdir(alice.AgencyId, "Jebediah Kerman", state: "Missing", tod: "1.79769313486232E+308");
+            WriteKerbalFileToAgencySubdir(alice.AgencyId, "Pebbles Kerman", state: "Missing", tod: "1.79769313486232E+308");
+            // Bob has only Jeb pre-existing.
+            WriteKerbalFileToAgencySubdir(bob.AgencyId, "Jebediah Kerman", state: "Available", tod: "0");
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, bob);
+
+            Assert.AreEqual(1, result.RestoredKerbalCount);
+            Assert.AreEqual(1, result.CollidedKerbalNames.Count);
+            CollectionAssert.Contains(result.RestoredKerbalNames, "Pebbles Kerman");
+            CollectionAssert.Contains(result.CollidedKerbalNames, "Jebediah Kerman");
+
+            // Sibling restored to Bob's subdir.
+            Assert.AreEqual("Available", ReadKerbalFieldFromAgencySubdir(bob.AgencyId, "Pebbles Kerman", "state"));
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — destination cascade-race guard
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Cascade_GateOn_DestinationRemovedFromRegistry_DropsWriteWithoutThrow()
+        {
+            // Race window: a concurrent /deleteagency on the destination removed
+            // it from Agencies between the command's TryResolveAgencyToken and
+            // the cascade's per-kerbal write step. The cascade must NOT throw
+            // (would orphan the source agency); it must DROP the write with
+            // Warning + mark the kerbal as Failed. Same posture as Phase 6.5
+            // TryWriteKerbalProtoPerAgency.
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency;
+            var bob = NewAgencyInRegistry("Bob");
+            SeedCrewRoute(alice, "raced-route", "Enroute", new[] { "Doomed Kerman" });
+            WriteKerbalFileToAgencySubdir(alice.AgencyId, "Doomed Kerman", state: "Missing", tod: "1.79769313486232E+308");
+
+            // Simulate destination removed mid-cascade by ripping Bob out of
+            // Agencies BEFORE invoking the cascade — the per-kerbal write
+            // step's ContainsKey re-check should catch it.
+            AgencySystem.Agencies.TryRemove(bob.AgencyId, out _);
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, bob);
+
+            Assert.AreEqual(0, result.RestoredKerbalCount);
+            Assert.AreEqual(1, result.FailedKerbalNames.Count,
+                "Cascade-race against the destination registers as Failed (the kerbal couldn't be saved anywhere).");
+            CollectionAssert.Contains(result.FailedKerbalNames, "Doomed Kerman");
+            Assert.IsFalse(result.WroteToDestinationSubdir);
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — same-agency destination (defensive)
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Cascade_GateOn_DestinationIsSourceAgency_TreatedAsNoDestination()
+        {
+            // Caller is supposed to refuse same-source-and-destination upstream,
+            // but cascade is defensive: if destination.AgencyId == source.AgencyId
+            // we fall back to the --restore-to-none disposition rather than write
+            // into the cascade-doomed source subdir.
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency;
+            SeedCrewRoute(alice, "self-route", "Enroute", new[] { "Self Kerman" });
+            WriteKerbalFileToAgencySubdir(alice.AgencyId, "Self Kerman", state: "Missing", tod: "1.79769313486232E+308");
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, destination: alice);
+
+            Assert.AreEqual(0, result.RestoredKerbalCount,
+                "Self-destination must not be written to (subdir is cascade-doomed).");
+            Assert.AreEqual(Guid.Empty, result.DestinationAgencyId);
+            // The Self Kerman file in alice's subdir remains Missing — TryDeleteAgency's
+            // recursive delete will remove it. Operator-equivalent of --restore-to-none.
+            Assert.AreEqual("Missing", ReadKerbalFieldFromAgencySubdir(alice.AgencyId, "Self Kerman", "state"));
+        }
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — gate=off path is unchanged (Phase 6.5 regression guard)
+        // -------------------------------------------------------------------
+
+        // -------------------------------------------------------------------
+        // Phase 6.7 — pre-Phase-6.5 / AllowEnable... upgrade fallback
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void Cascade_GateOn_LegacyStrandedSourceFile_FallsBackAndRestoresToDestination()
+        {
+            // Upgrade hazard: an operator who ran a pre-Phase-6.5 binary with
+            // PerAgencyKerbalRoster=true, OR who used the
+            // AllowEnablePerAgencyKerbalsOnExistingUniverse=true override on a
+            // populated v0-v7 universe. The deleted agency's kerbal file
+            // exists at LEGACY Universe/Kerbals/{name}.txt rather than at
+            // Universe/Agencies/{aliceGuid:N}/Kerbals/{name}.txt. The cascade
+            // must (a) detect the legacy-stranded file, (b) read from it, (c)
+            // write to the destination subdir, (d) emit a Warning describing
+            // the upgrade hazard so operators see what happened. Without the
+            // fallback the cascade would mis-diagnose as "newly-recruited
+            // kerbal — file never made it to disk" which is wrong.
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency;
+            var bob = NewAgencyInRegistry("Bob");
+            SeedCrewRoute(alice, "legacy-stranded-route", "Enroute", new[] { "Legacy Stuart Kerman" });
+            // File exists at LEGACY path, not at alice's per-agency subdir.
+            WriteKerbalFile("Legacy Stuart Kerman", state: "Missing", tod: "1.79769313486232E+308");
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, bob);
+
+            Assert.AreEqual(1, result.RestoredKerbalCount,
+                "Cascade must rescue the legacy-stranded file via the Phase 6.7 upgrade-fallback probe.");
+            Assert.AreEqual(0, result.FailedKerbalNames.Count);
+            Assert.IsTrue(result.WroteToDestinationSubdir);
+
+            // Destination subdir receives the restored file with Available + ToD=0.
+            Assert.AreEqual("Available", ReadKerbalFieldFromAgencySubdir(bob.AgencyId, "Legacy Stuart Kerman", "state"));
+            Assert.AreEqual("0", ReadKerbalFieldFromAgencySubdir(bob.AgencyId, "Legacy Stuart Kerman", "ToD"));
+            // Legacy file at Universe/Kerbals/ is NOT removed by the cascade —
+            // operator hand-cleanup territory (documented in Warning).
+            Assert.AreEqual("Missing", ReadKerbalField("Legacy Stuart Kerman", "state"),
+                "Cascade does NOT delete the legacy-stranded source; operator decides whether to hand-remove.");
+        }
+
+        [TestMethod]
+        public void Cascade_GateOn_NoLegacyNoPerAgencyFile_FailsWithEnhancedReason()
+        {
+            // Under gate=on, when neither the per-agency path NOR the legacy
+            // path has the kerbal file, the failure Warning must mention BOTH
+            // paths were checked. Without this an operator on an upgrade
+            // universe would mis-attribute the failure to a per-agency lookup
+            // bug.
+            GameplaySettings.SettingsStore.PerAgencyKerbalRoster = true;
+
+            var alice = _agency;
+            var bob = NewAgencyInRegistry("Bob");
+            SeedCrewRoute(alice, "no-file-route", "Enroute", new[] { "Vanished Kerman" });
+            // No file written anywhere.
+
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, bob);
+
+            Assert.AreEqual(0, result.RestoredKerbalCount);
+            Assert.AreEqual(1, result.FailedKerbalNames.Count);
+            CollectionAssert.Contains(result.FailedKerbalNames, "Vanished Kerman");
+            // The Warning content (legacy probe acknowledged) is operator-
+            // observable but we don't pin the exact text — pinning at this
+            // level locks the format and future-tweaks-of-language-for-
+            // clarity would break the test for no semantic reason.
+        }
+
+        [TestMethod]
+        public void Cascade_GateOff_LegacyPathUnchanged_IgnoresDestination()
+        {
+            // Under PerAgencyKerbalRoster=false the cascade writes to legacy
+            // Universe/Kerbals/ regardless of whether a destination was passed
+            // (the parser rejects --restore-to under gate=off, but the cascade
+            // is defensive against a misuse — destination arg is silently
+            // ignored, behaviour matches Phase 6.5 baseline).
+            //
+            // PerAgencyKerbalRoster stays false (Setup doesn't set it true).
+            var alice = _agency;
+            var bob = NewAgencyInRegistry("Bob");
+            SeedCrewRoute(alice, "legacy-route", "Enroute", new[] { "Legacy Kerman" });
+            WriteKerbalFile("Legacy Kerman", state: "Missing", tod: "1.79769313486232E+308");
+
+            // Pass destination=bob — should be silently ignored under gate=off.
+            var result = AgencyWolfMigration.CascadeOnDelete(alice, bob);
+
+            Assert.AreEqual(1, result.RestoredKerbalCount);
+            Assert.AreEqual(Guid.Empty, result.DestinationAgencyId,
+                "Gate=off ignores the destination argument; DestinationAgencyId stays Empty.");
+            Assert.IsFalse(result.WroteToDestinationSubdir);
+            Assert.AreEqual("Available", ReadKerbalField("Legacy Kerman", "state"),
+                "Legacy in-place rewrite at Universe/Kerbals/{name}.txt under gate=off.");
         }
     }
 }

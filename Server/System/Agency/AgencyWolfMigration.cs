@@ -7,14 +7,34 @@ using System.Text;
 namespace Server.System.Agency
 {
     /// <summary>
-    /// Phase 4 Slice F — migration helpers that run alongside the per-agency
-    /// admin commands when WOLF (MKS Wireless Orbital Logistics Function)
-    /// state is involved. Today the only non-trivial entry point is
+    /// Phase 4 Slice F (Stage 5) — migration helpers that run alongside the
+    /// per-agency admin commands when WOLF (MKS Wireless Orbital Logistics
+    /// Function) state is involved. Today the only non-trivial entry point is
     /// <see cref="CascadeOnDelete"/>, invoked by
     /// <see cref="Server.Command.Command.DeleteAgencyCommand"/> to restore
     /// kerbals who are mid-flight in the demoted agency's WOLF CrewRoutes
     /// back to the Astronaut Complex pool before the agency record is
     /// removed.
+    ///
+    /// <para><b>Phase 6.7 closer (Stage 6).</b> Under
+    /// <see cref="AgencySystem.PerAgencyKerbalRosterEnabled"/>=true the
+    /// cascade no longer writes to the legacy shared <c>Universe/Kerbals/</c>
+    /// directory (which the per-agency request filter at
+    /// <see cref="KerbalSystem.ResolveKerbalsPathForRequester"/> never
+    /// enumerates under gate=on — restored files would be unreachable to
+    /// clients of any surviving agency). Instead the caller MUST supply a
+    /// <i>destination agency</i> (via the new <c>--restore-to</c> command
+    /// flag) and the cascade reads kerbal files from the deleted agency's
+    /// own per-agency subdir + writes the rewritten content to the
+    /// destination agency's subdir. The <c>--restore-to-none</c> flag opts
+    /// the operator out of the disk write entirely (CrewRoute audit still
+    /// emits, kerbal files are abandoned on disk inside the source subdir
+    /// that <see cref="AgencySystem.TryDeleteAgency"/> recursively deletes
+    /// seconds later). The command refuses if neither flag is supplied
+    /// and the deleted agency has in-flight CrewRoute passengers under
+    /// gate=on — see
+    /// <see cref="Server.Command.Command.DeleteAgencyCommandParser"/>
+    /// for the operator-facing usage banner.</para>
     ///
     /// <para><b>Why this helper exists.</b> WOLF's <c>WOLF_CrewTransferScenario.Launch</c>
     /// (verified s42 against MKS SHA <c>ed0f6aa6</c> at
@@ -22,7 +42,7 @@ namespace Server.System.Agency
     /// mutates each in-flight passenger's roster status to
     /// <c>ProtoCrewMember.RosterStatus.Missing</c> + calls
     /// <c>SetTimeForRespawn(double.MaxValue)</c>. Server-side this propagates
-    /// to <c>Universe/Kerbals/{name}.txt</c> via <c>KerbalSystem.HandleKerbalProto</c>
+    /// to the on-disk kerbal file via <c>KerbalSystem.HandleKerbalProto</c>
     /// as <c>state = Missing</c> + <c>ToD = double.MaxValue</c>. Recovery
     /// for the kerbal happens client-side in <c>Disembark</c> (line 155) when
     /// the operator clicks the in-game Disembark button at destination —
@@ -32,8 +52,8 @@ namespace Server.System.Agency
     /// operator clicks Disembark, that Disembark path can never run: the
     /// route's record vanishes with the agency, leaving the kerbal stuck in
     /// Missing + respawn-MaxValue forever with no in-band recovery. Manual
-    /// recovery would require hand-editing every Missing kerbal file in
-    /// <c>Universe/Kerbals/</c>. Slice F restores them automatically.</para>
+    /// recovery would require hand-editing every Missing kerbal file. Slice F
+    /// restores them automatically.</para>
     ///
     /// <para><b>Restoration scope: {Enroute, Arrived} only.</b> Per the WOLF
     /// state-machine contract (<c>CrewRoute.cs:105-180</c>):
@@ -51,23 +71,46 @@ namespace Server.System.Agency
     ///         <c>CheckArrived</c> only mutates <c>FlightStatus</c>, NOT
     ///         <c>rosterStatus</c>. Passengers are STILL in Missing.
     ///         Restore.</item>
+    /// </list></para>
+    ///
+    /// <para><b>Lock-domain discipline (Phase 6.7 update).</b> The cascade
+    /// runs in three phases now:
+    /// <list type="number">
+    ///   <item>Snapshot phase under
+    ///         <c>lock (AgencySystem.GetAgencyLock(sourceAgencyId))</c> —
+    ///         brief; reads <see cref="AgencyState.WolfCrewRoutes"/> and
+    ///         copies passenger names into a HashSet.</item>
+    ///   <item>Per-kerbal read phase WITHOUT any agency lock — reads the
+    ///         on-disk kerbal file (source path depends on gate). Disk I/O
+    ///         serializes via FileHandler's per-path lock.</item>
+    ///   <item>Per-kerbal write phase under
+    ///         <c>lock (AgencySystem.GetAgencyLock(destinationAgencyId))</c>
+    ///         (Phase 6.7 add). Holding the destination lock during write
+    ///         serialises against concurrent
+    ///         <see cref="KerbalSystem.TryWriteKerbalProtoPerAgency"/> calls
+    ///         from the destination agency's owner — without it, the
+    ///         destination owner's client could write a different version
+    ///         of the kerbal proto microseconds after our collision check
+    ///         and the cascade would silently lose either write. Same race
+    ///         model as Phase 6.5's
+    ///         <see cref="KerbalSystem.TryWriteKerbalProtoPerAgency"/>
+    ///         + Phase 6.3's TryDeleteAgency cascade.</item>
     /// </list>
-    /// The s42 pickup memo cited {Boarding, Enroute} as the restoration
-    /// scope; ground-truth source walk corrected to {Enroute, Arrived}
-    /// before implementation.</para>
+    /// Each phase's lock is released before the next acquires; we never
+    /// hold two agency locks simultaneously. Avoiding nested locks means
+    /// no risk of AB-BA deadlock with any future per-agency mutation path.</para>
     ///
-    /// <para><b>Lock-domain discipline.</b> The cascade runs in two phases:
-    /// (1) snapshot phase under <c>lock (AgencySystem.GetAgencyLock(agencyId))</c>
-    /// — brief; reads the WolfCrewRoutes dict and copies passenger names to
-    /// a local HashSet. (2) Restoration phase WITHOUT the agency lock —
-    /// kerbal-file disk I/O serializes via FileHandler's own per-path lock,
-    /// not the agency lock. Holding the agency lock across multiple disk
-    /// writes would extend the lock window unnecessarily and contradict the
-    /// established split-lock pattern from <see cref="AgencyWolfCrewRouter.BuildKerbalAgencyMap"/>
-    /// (which similarly runs the expensive vessel-text serialization
-    /// OUTSIDE the per-agency lock).</para>
+    /// <para><b>Cascade-race guard on destination.</b> Step 3 re-checks
+    /// <see cref="AgencySystem.Agencies"/><c>.ContainsKey(destinationAgencyId)</c>
+    /// under the destination lock. A concurrent
+    /// <c>/deleteagency &lt;destination&gt; --confirm</c> against the
+    /// destination agency (two operators racing on the GUI launcher, or a
+    /// script firing both) would have raced past us here — we DROP the write
+    /// with Warning rather than land a file in a subdir about to be deleted.
+    /// Same posture as Phase 6.5's
+    /// <see cref="KerbalSystem.TryWriteKerbalProtoPerAgency"/>.</para>
     ///
-    /// <para><b>Race window — narrow, accepted.</b> Between cascade-lock-
+    /// <para><b>Race window — narrow, accepted.</b> Between snapshot lock
     /// release and <see cref="AgencySystem.TryDeleteAgency"/>'s own lock
     /// acquire (microseconds), a new <c>AgencyWolfCrewRouter.TryRoute</c>
     /// postfix from the demoted agency's owner could accept a new Launch,
@@ -86,66 +129,25 @@ namespace Server.System.Agency
     /// claims. It does NOT call <c>.Clear()</c> on
     /// <c>KolonyEntries</c> / <c>OrbitalTransfers</c> / <c>Contracts</c> /
     /// <c>TechNodes</c> / etc. — those dicts vanish with the unreachable
-    /// AgencyState reference. The 5 WOLF dicts get the same treatment.
-    /// Clearing them explicitly would be pointless (no caller can resolve
-    /// to a deleted AgencyId) and breaks precedent.</para>
+    /// AgencyState reference. The 5 WOLF dicts get the same treatment.</para>
     ///
     /// <para><b>Per-kerbal isolation</b> (mirrors
     /// <see cref="AgencyWolfCrewRouter"/> per-entry try/catch). A malformed
     /// or missing kerbal file never aborts sibling restorations. Each
     /// failure contributes a Warning log line + a name in
-    /// <see cref="CascadeResult.FailedKerbalNames"/>; the cascade carries
-    /// on with the remaining names.</para>
+    /// <see cref="CascadeResult.FailedKerbalNames"/> (or
+    /// <see cref="CascadeResult.CollidedKerbalNames"/> for the destination-
+    /// already-has-this-name case); the cascade carries on with the
+    /// remaining names.</para>
     ///
     /// <para><b>Intended call site.</b> Today the ONLY caller is
     /// <see cref="Server.Command.Command.DeleteAgencyCommand"/> immediately
-    /// before <see cref="AgencySystem.TryDeleteAgency"/>. The cascade
-    /// assumes the agency is about to be removed from the registry — it
-    /// does NOT defensively reset the WolfCrewRoutes dict, so a caller that
-    /// invokes the cascade WITHOUT then deleting the agency would leave
-    /// the in-flight CrewRoutes pointing at kerbals who are now in
-    /// <c>state=Available</c> on disk + ProtoCrewMember caches across the
-    /// cluster — the next projector tick would broadcast the dissonant
-    /// "Enroute route with Available kerbals" state to clients. If a future
+    /// before <see cref="AgencySystem.TryDeleteAgency"/>. If a future
     /// Slice G+ command needs to restore kerbals WITHOUT deleting the
     /// agency, add a sibling method (e.g. <c>RestoreInFlightKerbalsForReset</c>)
-    /// that ALSO clears or re-emits the affected WolfCrewRoutes entries.
-    /// Do NOT add new call sites for <see cref="CascadeOnDelete"/> without
-    /// satisfying this invariant.</para>
-    ///
-    /// <para><b>Pre-Slice-A dev-build orphans are NOT recoverable by this
-    /// cascade.</b> An operator who ran a pre-Slice-A intermediate
-    /// <c>feature/per-agency</c> build against MKS WOLF may have kerbal
-    /// files on disk with <c>state = Missing</c> + <c>ToD = MaxValue</c>
-    /// from a WOLF Launch that ran BEFORE <see cref="AgencyState.WolfCrewRoutes"/>
-    /// existed as a persisted dict. The cascade iterates per-agency
-    /// WolfCrewRoutes; those pre-Slice-A orphans have no per-agency record
-    /// to discover. Operators upgrading from pre-<c>95b65711</c> dev builds
-    /// with such orphans should <c>grep -l 'state = Missing'</c> in
-    /// <c>Universe/Kerbals/</c> BEFORE running <c>/deleteagency</c>, and
-    /// hand-restore any matches via the documented "edit Universe/Kerbals/
-    /// {name}.txt — set 'state = Available' + 'ToD = 0'" recipe.</para>
-    ///
-    /// <para><b>Concurrent-Launch race window — observed secondary
-    /// consequence beyond the documented "kerbal stays Missing" outcome.</b>
-    /// At t2 in the race window (between cascade-lock-release and
-    /// <see cref="AgencySystem.TryDeleteAgency"/>'s lock-acquire), a
-    /// concurrent <see cref="AgencyWolfCrewRouter.TryRoute"/> postfix from
-    /// the demoted agency's owner can land a new CrewRoute, calling
-    /// <see cref="AgencySystem.SaveAgency"/> and emitting
-    /// <see cref="AgencySystemSender.SendWolfCrewRouteStateToOwner"/> to
-    /// the owner. The owner's 5.18a client mirror records the new entry.
-    /// At t3 the agency file is deleted. The owner's local mirror diverges
-    /// silently from the (now-empty) server state. On reconnect, the
-    /// handshake-driven <see cref="AgencySystemSender.SendWolfCrewRouteCatchupTo"/>
-    /// runs against the FRESH agency the handshake mints (the prior
-    /// <see cref="AgencySystem.AgencyByPlayerName"/> mapping was removed)
-    /// — that fresh agency has no CrewRoutes, but the owner's local mirror
-    /// was never told to forget the stale entries. Operator workflow:
-    /// <c>/kick</c> the prior owner BEFORE <c>/deleteagency</c> to fully
-    /// close the race (kicked players cannot initiate Launches AND their
-    /// reconnect re-mints the agency-id + re-empties the local mirror in
-    /// a single round-trip).</para>
+    /// that ALSO clears or re-emits the affected WolfCrewRoutes entries —
+    /// without that clear, the projector tick would broadcast the dissonant
+    /// "Enroute route with Available kerbals" state to clients.</para>
     /// </summary>
     public static class AgencyWolfMigration
     {
@@ -163,6 +165,70 @@ namespace Server.System.Agency
             public List<string> RestoredKerbalNames = new List<string>();
             /// <summary>Names of kerbals where restoration failed (missing file, malformed, IO error). Per-kerbal Warning is logged at failure time.</summary>
             public List<string> FailedKerbalNames = new List<string>();
+            /// <summary>
+            /// [Phase 6.7] Names of kerbals where the destination agency
+            /// already had a same-named kerbal on disk. Per spec §Q-Render +
+            /// Phase 6.7 design decision (operator-confirmed 2026-05-20),
+            /// destination's existing file is preserved and the source's
+            /// version is dropped with a Warning. Separate from
+            /// <see cref="FailedKerbalNames"/> so an audit consumer can
+            /// distinguish "lost due to operator-chosen agency boundaries"
+            /// from "lost due to malformed file" — different recovery
+            /// recipes (the former requires a different <c>--restore-to</c>
+            /// + a re-run on a recovered backup; the latter requires
+            /// hand-editing the malformed file).
+            /// </summary>
+            public List<string> CollidedKerbalNames = new List<string>();
+            /// <summary>
+            /// [Phase 6.7] The agency that received the restored kerbal files
+            /// for the gate=on case, or <see cref="Guid.Empty"/> for the
+            /// gate=off legacy path / the <c>--restore-to-none</c> opt-out.
+            /// Reflected in the cascade summary log line.
+            /// </summary>
+            public Guid DestinationAgencyId;
+            /// <summary>
+            /// [Phase 6.7] True when the caller passed a destination agency
+            /// (<c>--restore-to</c> path) AND we wrote at least one file to
+            /// its subdir. False for the <c>--restore-to-none</c> path, the
+            /// gate=off path, and any gate=on case where every restoration
+            /// failed before reaching the write step.
+            /// </summary>
+            public bool WroteToDestinationSubdir;
+        }
+
+        /// <summary>
+        /// [Phase 6.7] Returns the count of WOLF CrewRoute passengers
+        /// currently in restoration scope ({Enroute, Arrived}) on the supplied
+        /// agency. Used by <see cref="Server.Command.Command.DeleteAgencyCommand"/>
+        /// to decide whether <c>--restore-to</c> / <c>--restore-to-none</c>
+        /// is required: under gate=on, a non-zero count forces the operator
+        /// to choose a disposition before the cascade can proceed.
+        ///
+        /// <para>Pure read under the agency's per-agency lock. Cheap — the
+        /// dict is keyed by route UniqueId and the scope check on each entry
+        /// is a single string compare. Called once per <c>/deleteagency</c>
+        /// invocation under gate=on.</para>
+        /// </summary>
+        public static int CountInFlightPassengersForRefusalCheck(AgencyState agency)
+        {
+            if (agency == null || agency.WolfCrewRoutes == null) return 0;
+            var count = 0;
+            lock (AgencySystem.GetAgencyLock(agency.AgencyId))
+            {
+                foreach (var kvp in agency.WolfCrewRoutes)
+                {
+                    var route = kvp.Value;
+                    if (route == null) continue;
+                    if (!IsInFlightForRestoration(route.FlightStatus)) continue;
+                    if (route.Passengers == null) continue;
+                    foreach (var passenger in route.Passengers)
+                    {
+                        if (passenger != null && !string.IsNullOrEmpty(passenger.Name))
+                            count++;
+                    }
+                }
+            }
+            return count;
         }
 
         /// <summary>
@@ -171,56 +237,66 @@ namespace Server.System.Agency
         /// <c>ToD = 0</c>). Caller invokes this BEFORE
         /// <see cref="AgencySystem.TryDeleteAgency"/> so the WolfCrewRoutes
         /// dict is still readable. Caller MUST NOT hold any agency lock —
-        /// this method takes the per-agency lock internally for the snapshot
-        /// phase.
+        /// this method takes the per-agency locks internally for the
+        /// snapshot + write phases.
+        ///
+        /// <para><b>Routing under
+        /// <see cref="AgencySystem.PerAgencyKerbalRosterEnabled"/>:</b>
+        /// <list type="bullet">
+        ///   <item><b>Gate off</b> — <paramref name="destination"/> is
+        ///         ignored (the command parser rejects <c>--restore-to</c>
+        ///         under gate=off so production callers always pass null).
+        ///         Read + rewrite + write happen against the legacy shared
+        ///         <see cref="KerbalSystem.KerbalsPath"/> directory. This is
+        ///         the v0-v7 behaviour preserved unchanged.</item>
+        ///   <item><b>Gate on +
+        ///         <paramref name="destination"/> non-null</b> — read kerbal
+        ///         files from <c>Universe/Agencies/{source.AgencyId:N}/Kerbals/</c>,
+        ///         rewrite, write to
+        ///         <c>Universe/Agencies/{destination.AgencyId:N}/Kerbals/</c>.
+        ///         Destination-side collisions skip with Warning. Source
+        ///         files are NOT deleted here — TryDeleteAgency's cascade
+        ///         removes the whole source subdir seconds later.</item>
+        ///   <item><b>Gate on + <paramref name="destination"/> null
+        ///         (<c>--restore-to-none</c>)</b> — walk routes, emit audit
+        ///         counts, but write nothing. Operator chose to accept the
+        ///         loss.</item>
+        /// </list></para>
         /// </summary>
-        public static CascadeResult CascadeOnDelete(AgencyState agency)
+        /// <param name="source">The agency being deleted. Reads its
+        ///   WolfCrewRoutes + (under gate=on) its kerbal subdir.</param>
+        /// <param name="destination">The destination agency that receives
+        ///   the restored kerbal files under gate=on. Null under gate=off
+        ///   AND under <c>--restore-to-none</c>. Must not be the same
+        ///   instance as <paramref name="source"/> — the caller's
+        ///   destination-resolution step already enforces this; defensive
+        ///   guard inside.</param>
+        public static CascadeResult CascadeOnDelete(AgencyState source, AgencyState destination = null)
         {
             var result = new CascadeResult();
-            if (agency == null)
+            if (source == null)
                 return result;
 
-            // [Stage 6 Phase 6.5 known limitation — Phase 6.7 scope]
-            // The kerbal-file rewrite below targets KerbalSystem.KerbalsPath
-            // (legacy Universe/Kerbals/) regardless of the per-agency gate. Under
-            // Phase 6.5's PerAgencyKerbalRosterEnabled=true mode, the per-agency
-            // request filter at KerbalSystem.ResolveKerbalsPathForRequester does
-            // NOT enumerate legacy — restored kerbals would be unreachable to
-            // clients of any agency. Phase 6.7 will rework this code path to
-            // route the restoration to the surviving agency's
-            // Universe/Agencies/{guid}/Kerbals/ subdir. For Phase 6.5 we surface
-            // the limitation as an audible Warning so an operator running
-            // /deleteagency on an agency with in-flight WOLF cross-agency
-            // CrewRoutes sees the kerbal-loss risk before the deletion completes.
-            // Operator-workflow mitigation per spec §Q-Migration: /kick the
-            // owner BEFORE /deleteagency to ensure no Launch lands during the
-            // cascade race window; AND manually restore any Missing passengers
-            // via the documented hand-edit workflow at Universe/Kerbals/{name}.txt
-            // (state = Available; ToD = 0) — they'll need to be hand-copied into
-            // the surviving agency's subdir for the receiving client to see them.
-            if (AgencySystem.PerAgencyKerbalRosterEnabled && agency.WolfCrewRoutes != null && agency.WolfCrewRoutes.Count > 0)
-            {
-                LunaLog.Warning(
-                    $"[fix:per-agency-kerbal-roster-write-routing] CascadeOnDelete invoked on agency {agency.AgencyId:N} " +
-                    "({agency.OwningPlayerName}) under PerAgencyKerbalRosterEnabled=true with in-flight WOLF CrewRoutes. " +
-                    "Restored kerbal files will land in legacy Universe/Kerbals/ but the per-agency request filter " +
-                    "(Phase 6.4) does not enumerate legacy under gate=on — restored kerbals will be unreachable to " +
-                    "clients of any surviving agency until Phase 6.7 ships the per-agency-subdir routing for Slice F. " +
-                    "Recovery: stop the server after this command completes, hand-copy any Universe/Kerbals/{name}.txt " +
-                    "files to the destination agency's Universe/Agencies/{guid:N}/Kerbals/ subdir, restart.");
-            }
+            // Phase 6.7 routing decision. Snap once at the top so the body
+            // below never re-reads the gate (changing gates mid-cascade is
+            // not a supported operator workflow but defensive consistency
+            // is cheap).
+            var gateOn = AgencySystem.PerAgencyKerbalRosterEnabled;
+            var hasDestination = gateOn && destination != null && destination.AgencyId != source.AgencyId;
+            result.DestinationAgencyId = hasDestination ? destination.AgencyId : Guid.Empty;
 
-            // Phase 1 — snapshot phase under the agency lock. We collect
-            // distinct passenger names into a HashSet so a kerbal who somehow
-            // appears in two in-flight routes (defensive — WOLF's wire
-            // contract doesn't permit this but a malformed wire upsert
-            // could) is restored exactly once. HashSet uses Ordinal compare
-            // to match KSP's kerbal-name semantics (file paths on disk are
-            // case-sensitive on Linux; Ordinal is the safe default).
+            // Phase 1 — snapshot phase under the source agency lock. We
+            // collect distinct passenger names into a HashSet so a kerbal
+            // who somehow appears in two in-flight routes (defensive —
+            // WOLF's wire contract doesn't permit this but a malformed
+            // wire upsert could) is restored exactly once. HashSet uses
+            // Ordinal compare to match KSP's kerbal-name semantics (file
+            // paths on disk are case-sensitive on Linux; Ordinal is the
+            // safe default).
             var passengersToRestore = new HashSet<string>(StringComparer.Ordinal);
-            lock (AgencySystem.GetAgencyLock(agency.AgencyId))
+            lock (AgencySystem.GetAgencyLock(source.AgencyId))
             {
-                foreach (var kvp in agency.WolfCrewRoutes)
+                foreach (var kvp in source.WolfCrewRoutes)
                 {
                     var route = kvp.Value;
                     if (route == null)
@@ -239,8 +315,9 @@ namespace Server.System.Agency
                 }
             }
 
-            // Phase 2 — restoration phase WITHOUT the agency lock. Per-kerbal
-            // file mutation serializes via FileHandler's per-path lock.
+            var sourceAgencyId = source.AgencyId;
+
+            // Phase 2/3 — read + write phase WITHOUT the source agency lock.
             // Per-kerbal try/catch isolates failures.
             //
             // Log grammar mirrors the per-vessel demote audit lines in
@@ -248,35 +325,53 @@ namespace Server.System.Agency
             // launcher's `[fix:WOLF-R4] deleteagency {agencyId:N}` grep can
             // pair these lines with the surrounding cascade-summary +
             // visibility-broadcast + per-vessel-demote audit trail for the
-            // same /deleteagency invocation. (Consumer-lens SHOULD FIX
-            // #1 — without the agencyId token the per-kerbal lines couldn't
-            // be routed back to the deleted agency's audit panel under
-            // concurrent /deleteagency operations.)
-            var agencyId = agency.AgencyId;
+            // same /deleteagency invocation.
             foreach (var name in passengersToRestore)
             {
                 try
                 {
-                    if (TryRestoreKerbalToAcPool(name))
+                    var outcome = TryRestoreKerbalForCascade(name, sourceAgencyId, gateOn, hasDestination, destination);
+                    switch (outcome)
                     {
-                        result.RestoredKerbalCount++;
-                        result.RestoredKerbalNames.Add(name);
-                        LunaLog.Normal(
-                            $"[fix:WOLF-R4] deleteagency {agencyId:N} restored-kerbal " +
-                            $"name='{name}' state=Available ToD=0");
-                    }
-                    else
-                    {
-                        result.FailedKerbalNames.Add(name);
+                        case RestoreOutcome.Restored:
+                            result.RestoredKerbalCount++;
+                            result.RestoredKerbalNames.Add(name);
+                            result.WroteToDestinationSubdir |= hasDestination;
+                            LunaLog.Normal(
+                                $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} restored-kerbal " +
+                                $"name='{name}' state=Available ToD=0" +
+                                (hasDestination ? $" destination={destination.AgencyId:N}" : string.Empty));
+                            break;
+                        case RestoreOutcome.SkippedNoDestination:
+                            // --restore-to-none path. Per-name visibility
+                            // matters: operator wants to know which kerbals
+                            // they accepted the loss of (so they can spot
+                            // operator-time mistakes after the fact).
+                            LunaLog.Normal(
+                                $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} dropped-kerbal " +
+                                $"name='{name}' reason='--restore-to-none' " +
+                                "manual-recovery-path-source-side='Universe/Agencies/" +
+                                $"{sourceAgencyId:N}/Kerbals/{name}.txt' note='source file is " +
+                                "removed by the recursive subdir delete seconds later — copy " +
+                                "it BEFORE running /deleteagency if you change your mind'");
+                            break;
+                        case RestoreOutcome.Collision:
+                            result.CollidedKerbalNames.Add(name);
+                            // Warning emitted inside TryRestoreKerbalForCascade.
+                            break;
+                        case RestoreOutcome.Failed:
+                        default:
+                            result.FailedKerbalNames.Add(name);
+                            break;
                     }
                 }
                 catch (Exception ex)
                 {
                     result.FailedKerbalNames.Add(name);
                     LunaLog.Warning(
-                        $"[fix:WOLF-R4] deleteagency {agencyId:N} failed-kerbal " +
+                        $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} failed-kerbal " +
                         $"name='{name}' cause='{ex.GetType().Name}: {ex.Message}' " +
-                        $"manual-recovery-path='Universe/Kerbals/{name}.txt' " +
+                        $"manual-recovery-path='{ResolveKerbalSourcePath(name, sourceAgencyId, gateOn)}' " +
                         "manual-recovery-fields='state = Available; ToD = 0'");
                 }
             }
@@ -285,18 +380,248 @@ namespace Server.System.Agency
         }
 
         /// <summary>
+        /// [Phase 6.7] Per-kerbal restoration outcome. Maps 1:1 onto the
+        /// fields of <see cref="CascadeResult"/>. Internal so ServerTest can
+        /// pin the routing decision without disk I/O.
+        /// </summary>
+        internal enum RestoreOutcome
+        {
+            Restored,
+            SkippedNoDestination,
+            Collision,
+            Failed,
+        }
+
+        /// <summary>
+        /// [Phase 6.7] Per-kerbal restoration core. Reads from source path,
+        /// rewrites state/ToD, decides destination per the routing rules
+        /// documented on <see cref="CascadeOnDelete"/>.
+        /// </summary>
+        internal static RestoreOutcome TryRestoreKerbalForCascade(
+            string kerbalName,
+            Guid sourceAgencyId,
+            bool gateOn,
+            bool hasDestination,
+            AgencyState destination)
+        {
+            if (string.IsNullOrEmpty(kerbalName))
+                return RestoreOutcome.Failed;
+
+            // [Phase 6.7 consumer-lens v1 finding #5] Every per-kerbal Warning
+            // line carries the {sourceAgencyId:N} prefix so a GUI launcher's
+            // grep `[fix:WOLF-R4] deleteagency {agencyId:N}` gathers ALL
+            // cascade-related output (summary + per-kerbal Normal lines +
+            // per-kerbal Warnings) under the originating /deleteagency
+            // invocation. Without the prefix, the Warnings would only match
+            // the lazier `[fix:WOLF-R4]` grep, mixing them with other
+            // invocations under concurrent operator workflows.
+            var sourcePath = ResolveKerbalSourcePath(kerbalName, sourceAgencyId, gateOn);
+            // [Phase 6.7 upgrade-lens v1 finding #1] Pre-Phase-6.5 / AllowEnable...
+            // upgrade hazard. An operator who ran a pre-Phase-6.5 binary with
+            // PerAgencyKerbalRoster=true (the half-shipped state Phase 6.4's
+            // temporary boot-refusal was supposed to prevent, but a dev-build
+            // operator could have hit) OR an operator who used the
+            // AllowEnablePerAgencyKerbalsOnExistingUniverse=true override on
+            // a populated v0-v7 universe could have kerbal files stranded at
+            // legacy Universe/Kerbals/{name}.txt with state=Missing +
+            // ToD=MaxValue. The gate=on cascade's first-choice source path
+            // is the per-agency subdir; if absent there, probe legacy before
+            // giving up — finding the file at legacy lets the cascade rescue
+            // it AND emits an operator-visible Warning so the upgrade hazard
+            // is audible (without the fallback, the operator sees the same
+            // "source file missing" Warning as for a newly-recruited kerbal,
+            // which is diagnostically wrong).
+            if (gateOn && !FileHandler.FileExists(sourcePath))
+            {
+                var legacyFallback = Path.Combine(KerbalSystem.KerbalsPath, kerbalName + ".txt");
+                if (FileHandler.FileExists(legacyFallback))
+                {
+                    LunaLog.Warning(
+                        $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} cascade-warning kerbal='{kerbalName}' " +
+                        $"reason='per-agency source missing at {sourcePath} BUT a legacy-stranded copy " +
+                        $"exists at {legacyFallback}. Falling back to legacy read — this is the upgrade " +
+                        "hazard for operators who ran pre-Phase-6.5 dev-builds with " +
+                        "PerAgencyKerbalRoster=true, or who used AllowEnablePerAgencyKerbalsOnExistingUniverse=true " +
+                        "on a populated universe. The rescued kerbal will land in the destination agency''s " +
+                        "subdir correctly. The legacy file at Universe/Kerbals/ is NOT deleted by this " +
+                        "cascade — operator should hand-remove it after the cascade completes if it''s " +
+                        "no longer referenced by any agency.'");
+                    sourcePath = legacyFallback;
+                }
+            }
+            if (!FileHandler.FileExists(sourcePath))
+            {
+                LunaLog.Warning(
+                    $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} cascade-warning kerbal='{kerbalName}' " +
+                    $"sourcePath='{sourcePath}' reason='source file missing — likely a newly-recruited " +
+                    "kerbal whose KerbalProto never made it to disk before /deleteagency, or operator " +
+                    "hand-deleted the file." +
+                    (gateOn
+                        ? " Also checked legacy Universe/Kerbals/ as Phase 6.7 upgrade-fallback; absent there too."
+                        : string.Empty) +
+                    "'");
+                return RestoreOutcome.Failed;
+            }
+
+            var original = FileHandler.ReadFileText(sourcePath);
+            if (string.IsNullOrEmpty(original))
+            {
+                LunaLog.Warning(
+                    $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} cascade-warning kerbal='{kerbalName}' " +
+                    $"sourcePath='{sourcePath}' reason='source file is empty (zero bytes) — malformed, " +
+                    "manual recovery required.'");
+                return RestoreOutcome.Failed;
+            }
+
+            if (!TryRewriteKerbalText(original, out var rewritten, out var stateSeen, out var todSeen, sourceAgencyId))
+                return RestoreOutcome.Failed;
+
+            if (!stateSeen || !todSeen)
+            {
+                LunaLog.Warning(
+                    $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} cascade-warning kerbal='{kerbalName}' " +
+                    $"sourcePath='{sourcePath}' reason='missing top-level state= (seen={stateSeen}) " +
+                    $"and/or ToD= (seen={todSeen}) — malformed for a KSP kerbal record; skipping " +
+                    "restoration to avoid partial corruption. Manual recovery required.'");
+                return RestoreOutcome.Failed;
+            }
+
+            // Gate=on + --restore-to-none branch: walk through the read +
+            // rewrite (so the audit accurately counts the kerbal as "in
+            // scope") but write nothing. Operator-confirmed acceptance of
+            // the loss.
+            if (gateOn && !hasDestination)
+                return RestoreOutcome.SkippedNoDestination;
+
+            var destPath = ResolveKerbalDestinationPath(kerbalName, sourceAgencyId, gateOn, hasDestination, destination);
+
+            // Destination collision check + write under the destination
+            // agency lock (gate=on) or unlocked (gate=off, single-anchor
+            // semaphore handles the legacy path).
+            //
+            // Gate=on: the destination subdir's per-agency lock anchors all
+            // concurrent KerbalProto writes from the destination owner. We
+            // re-check Agencies.ContainsKey under the lock to catch the
+            // narrow race where two /deleteagency commands race against
+            // each other (source-delete cascade vs destination-delete
+            // cascade); same posture as Phase 6.5's
+            // KerbalSystem.TryWriteKerbalProtoPerAgency.
+            //
+            // Gate=off: no per-agency lock concept; FileHandler's per-path
+            // lock covers concurrent writers.
+            if (gateOn && hasDestination)
+            {
+                lock (AgencySystem.GetAgencyLock(destination.AgencyId))
+                {
+                    if (!AgencySystem.Agencies.ContainsKey(destination.AgencyId))
+                    {
+                        LunaLog.Warning(
+                            $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} cascade-warning " +
+                            $"kerbal='{kerbalName}' destination={destination.AgencyId:N} " +
+                            $"owner='{destination.OwningPlayerName}' " +
+                            "reason='destination no longer in registry (a concurrent /deleteagency on " +
+                            "the destination raced the restoration). Dropping write. The source file " +
+                            "will be removed seconds later by TryDeleteAgency''s subdir cascade — " +
+                            "manual recovery is no longer possible.'");
+                        return RestoreOutcome.Failed;
+                    }
+                    if (FileHandler.FileExists(destPath))
+                    {
+                        LunaLog.Warning(
+                            $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} cascade-warning " +
+                            $"kerbal='{kerbalName}' destination={destination.AgencyId:N} " +
+                            $"owner='{destination.OwningPlayerName}' " +
+                            $"reason='destination already has a kerbal file at '{destPath}'. " +
+                            "Per-agency rosters can legitimately have same-named kerbals (Q-Seed: each " +
+                            "agency''s stock 4 share the stock names). The destination''s " +
+                            "existing kerbal is preserved; the source agency''s kerbal is dropped. " +
+                            "Operator recovery: re-run with a different --restore-to destination, or " +
+                            $"hand-copy from 'Universe/Agencies/{sourceAgencyId:N}/Kerbals/{kerbalName}.txt' " +
+                            "BEFORE /deleteagency completes its subdir cascade.'");
+                        return RestoreOutcome.Collision;
+                    }
+                    WriteAtomicViaFileHandler(destPath, rewritten);
+                }
+            }
+            else
+            {
+                // Gate=off legacy path. No collision check needed — same-
+                // path read+write means the only "collision" would be with
+                // ourselves, which is the intended behaviour.
+                WriteAtomicViaFileHandler(destPath, rewritten);
+            }
+
+            return RestoreOutcome.Restored;
+        }
+
+        /// <summary>
+        /// [Phase 6.7] Resolves the kerbal source path for the cascade's
+        /// read step. Under gate=on the source lives in the deleted
+        /// agency's per-agency subdir; under gate=off it lives in the
+        /// legacy shared <see cref="KerbalSystem.KerbalsPath"/>.
+        ///
+        /// <para>Internal visibility so ServerTest can exercise the resolver
+        /// without spinning the cascade.</para>
+        /// </summary>
+        internal static string ResolveKerbalSourcePath(string kerbalName, Guid sourceAgencyId, bool gateOn)
+        {
+            return gateOn
+                ? Path.Combine(AgencySystem.GetKerbalsPathForAgency(sourceAgencyId), kerbalName + ".txt")
+                : Path.Combine(KerbalSystem.KerbalsPath, kerbalName + ".txt");
+        }
+
+        /// <summary>
+        /// [Phase 6.7] Resolves the kerbal destination path for the cascade's
+        /// write step. Mirrors the source path resolver but consults
+        /// <paramref name="destination"/> when set (gate=on +
+        /// <c>--restore-to</c>); otherwise returns the source path (gate=off
+        /// legacy in-place rewrite) — callers must NOT invoke this in the
+        /// gate=on + no-destination path (the routing logic in
+        /// <see cref="TryRestoreKerbalForCascade"/> returns
+        /// <see cref="RestoreOutcome.SkippedNoDestination"/> before reaching
+        /// here).
+        /// </summary>
+        internal static string ResolveKerbalDestinationPath(
+            string kerbalName,
+            Guid sourceAgencyId,
+            bool gateOn,
+            bool hasDestination,
+            AgencyState destination)
+        {
+            if (gateOn && hasDestination)
+                return Path.Combine(AgencySystem.GetKerbalsPathForAgency(destination.AgencyId), kerbalName + ".txt");
+            // Gate=off: same-path in-place rewrite. Caller-guarded; not
+            // reachable in the gate=on + no-destination case.
+            return Path.Combine(KerbalSystem.KerbalsPath, kerbalName + ".txt");
+        }
+
+        /// <summary>
+        /// Atomic-write the rewritten kerbal text via
+        /// <see cref="FileHandler.WriteAtomic(string,string)"/>. Centralised
+        /// so the two write call-sites (gate=on under destination lock /
+        /// gate=off legacy) share the same crash-tolerance behaviour
+        /// (.tmp → rename rotation; .bak retained for one generation).
+        ///
+        /// <para>FolderCreate the parent on a brand-new destination subdir.
+        /// This is mostly redundant under gate=on (Phase 6.3 lifecycle hook
+        /// seeded the subdir at agency mint), but defensive against
+        /// operator-deleted subdirs + the gate=off path running on a fresh
+        /// universe where <see cref="KerbalSystem.KerbalsPath"/> exists.</para>
+        /// </summary>
+        private static void WriteAtomicViaFileHandler(string destPath, string rewritten)
+        {
+            var parent = Path.GetDirectoryName(destPath);
+            if (!string.IsNullOrEmpty(parent) && !FileHandler.FolderExists(parent))
+                FileHandler.FolderCreate(parent);
+            FileHandler.WriteAtomic(destPath, rewritten);
+        }
+
+        /// <summary>
         /// True when the supplied FlightStatus string (as serialized by
         /// <see cref="AgencyWolfCrewRouter"/> from WOLF's
         /// <c>FlightStatus.ToString()</c>) indicates the route's passengers
         /// are in <c>RosterStatus.Missing</c> and need rescuing. See class
         /// XML "Restoration scope" paragraph for the per-status rationale.
-        ///
-        /// <para><b>Case-sensitive Ordinal compare.</b> WOLF's
-        /// <c>FlightStatus.ToString()</c> emits canonical PascalCase enum
-        /// names (Arrived / Boarding / Enroute / Unknown — verified
-        /// <c>FlightMetadata.cs:3</c>). The wire round-trip preserves the
-        /// string verbatim per <see cref="AgencyWolfCrewRouter.Upsert"/>.
-        /// Defensive against null/empty via the IsNullOrEmpty short-circuit.</para>
         ///
         /// <para><b>Internal visibility</b> for ServerTest unit coverage of
         /// the per-status decision without bringing the disk-I/O path up.</para>
@@ -310,119 +635,22 @@ namespace Server.System.Agency
         }
 
         /// <summary>
-        /// Mutates the on-disk kerbal file at
-        /// <c>Universe/Kerbals/{name}.txt</c>: rewrites the top-level
-        /// <c>state = ...</c> line to <c>state = Available</c> and the
-        /// top-level <c>ToD = ...</c> line to <c>ToD = 0</c>. Returns true
-        /// on successful rewrite, false when the file is missing or
-        /// malformed.
-        ///
-        /// <para><b>Depth-aware line rewrite.</b> Kerbal files have nested
-        /// <c>CAREER_LOG { ... }</c> and <c>FLIGHT_LOG { ... }</c> blocks
-        /// per the resource template at
-        /// <c>Server/Resources/Kerbals/Jebediah Kerman.txt:18-25</c>. KSP
-        /// could theoretically emit a <c>ToD</c> field inside a log block
-        /// (none today, but defensive); we only rewrite at depth 0 to avoid
-        /// stomping nested data.</para>
-        ///
-        /// <para><b>UTF-8 round-trip</b> via <see cref="FileHandler.ReadFileText"/>
-        /// + <see cref="FileHandler.WriteAtomic"/> (which internally uses
-        /// <c>Encoding.UTF8</c>). Matches KSP's kerbal-file on-disk
-        /// encoding. <see cref="FileHandler.WriteAtomic"/> rather than
-        /// <see cref="FileHandler.WriteToFile(string, string)"/> because
-        /// the kerbal-restoration cascade runs as part of an operator-
-        /// initiated destructive command (<c>/deleteagency --confirm</c>) —
-        /// a crash mid-write of a kerbal file (truncate-then-rewrite) would
-        /// leave the file at half-bytes ("state = AvAvailable" or similar)
-        /// which KSP's ConfigNode parser would fail on, replacing the
-        /// "kerbal in Missing state" problem the cascade was solving with
-        /// a worse "kerbal file unparseable" problem. WriteAtomic's
-        /// rotate-temp-rename gives crash-tolerance against the truncation
-        /// window. (Integration-lens MUST FIX #1 / general-lens SHOULD FIX
-        /// #3 on Slice F.) Note: WriteAtomic leaves a single-generation
-        /// <c>{path}.bak</c> after rotation; operators see one .bak per
-        /// restored kerbal in <c>Universe/Kerbals/</c> until KSP's next
-        /// save cycle overwrites the canonical file — same pattern as
-        /// <c>Universe/Agencies/{guid}.txt.bak</c> from Stage 5.14c.</para>
-        ///
-        /// <para><b>Line-ending behavior.</b> Split-on-LF + join-on-LF
-        /// preserves \r\n on lines we pass through unchanged. Rewritten
-        /// state/ToD lines emit unconditionally with \n (the \r from a
-        /// CRLF-source line is dropped on the two rewritten lines only).
-        /// KSP's ConfigNode parser tolerates the mixed line endings; any
-        /// subsequent KSP-side save normalises the file to the platform
-        /// default in one round-trip.</para>
-        ///
-        /// <para><b>Internal visibility</b> for ServerTest unit coverage.</para>
-        /// </summary>
-        internal static bool TryRestoreKerbalToAcPool(string kerbalName)
-        {
-            if (string.IsNullOrEmpty(kerbalName))
-                return false;
-
-            var path = Path.Combine(KerbalSystem.KerbalsPath, kerbalName + ".txt");
-            if (!FileHandler.FileExists(path))
-            {
-                LunaLog.Warning(
-                    $"[fix:WOLF-R4] deleteagency cascade: kerbal file '{path}' is missing — " +
-                    "cannot restore. Likely a newly-recruited kerbal whose KerbalProto never " +
-                    "made it to disk before /deleteagency, or operator hand-deleted the file.");
-                return false;
-            }
-
-            var original = FileHandler.ReadFileText(path);
-            if (string.IsNullOrEmpty(original))
-            {
-                LunaLog.Warning(
-                    $"[fix:WOLF-R4] deleteagency cascade: kerbal file '{path}' is empty — " +
-                    "cannot restore. File is malformed (zero bytes); manual recovery required.");
-                return false;
-            }
-
-            if (!TryRewriteKerbalText(original, out var rewritten, out var stateSeen, out var todSeen))
-            {
-                return false;
-            }
-            if (!stateSeen || !todSeen)
-            {
-                LunaLog.Warning(
-                    $"[fix:WOLF-R4] deleteagency cascade: kerbal file '{path}' missing top-level " +
-                    $"'state =' (seen={stateSeen}) and/or 'ToD =' (seen={todSeen}). File is " +
-                    "malformed for a KSP kerbal record; skipping restoration to avoid corrupting " +
-                    "the file. Manual recovery required.");
-                return false;
-            }
-
-            // WriteAtomic gives crash-tolerance against the truncate window
-            // — see XML "UTF-8 round-trip" paragraph above for rationale.
-            // No-op short-circuit: if the file already has state=Available +
-            // ToD=0 (e.g. operator manually pre-restored the kerbal before
-            // /deleteagency), WriteAtomic still rotates + writes the
-            // identical content. A trivial waste of one .bak file vs a
-            // ContentChecker pre-compare; acceptable for an operator-
-            // initiated destructive command.
-            FileHandler.WriteAtomic(path, rewritten);
-            return true;
-        }
-
-        /// <summary>
         /// Pure-text helper for the depth-aware kerbal-file line rewrite.
-        /// Extracted from <see cref="TryRestoreKerbalToAcPool"/> so the
-        /// regex-free line-walk decision logic gets ServerTest coverage
-        /// without disk I/O.
+        /// Walks <paramref name="original"/> line-by-line tracking brace
+        /// depth and rewrites top-level <c>state = ...</c> /
+        /// <c>ToD = ...</c> lines.
         ///
-        /// <para>Walks <paramref name="original"/> line-by-line tracking
-        /// brace depth (<c>{</c> increments, <c>}</c> decrements). At depth
-        /// 0, rewrites <c>^\s*state\s*=\s*...</c> to <c>state = Available</c>
-        /// and <c>^\s*ToD\s*=\s*...</c> to <c>ToD = 0</c>. Other lines pass
-        /// through verbatim. Returns false only on catastrophic parse
-        /// failure (depth goes negative — indicates malformed file with an
-        /// unbalanced <c>}</c> at top scope).</para>
+        /// <para><paramref name="sourceAgencyIdForLog"/> is used ONLY for the
+        /// brace-depth-negative Warning prefix (Phase 6.7 consumer-lens v1
+        /// finding #5 — every per-kerbal Warning must carry
+        /// <c>deleteagency {agencyId:N}</c> for the GUI launcher grep).
+        /// Default <see cref="Guid.Empty"/> for callers (ServerTest) that
+        /// don't have an agency-id context.</para>
         ///
         /// <para><b>Internal visibility</b> for ServerTest unit coverage of
         /// the rewrite logic without disk I/O.</para>
         /// </summary>
-        internal static bool TryRewriteKerbalText(string original, out string rewritten, out bool stateSeen, out bool todSeen)
+        internal static bool TryRewriteKerbalText(string original, out string rewritten, out bool stateSeen, out bool todSeen, Guid sourceAgencyIdForLog = default)
         {
             stateSeen = false;
             todSeen = false;
@@ -440,12 +668,6 @@ namespace Server.System.Agency
                 var line = lines[i];
                 var trimmed = line.Trim();
 
-                // Detect a top-level (depth 0) field assignment for state or ToD
-                // BEFORE bumping depth on this line — KSP's kerbal files always
-                // open a brace on its own line, so per-line "trim and check
-                // prefix" is sufficient. If a future KSP version inlines
-                // `key = value { nested }` on one line this heuristic would
-                // mis-classify; today no such shape exists in stock kerbal files.
                 if (depth == 0)
                 {
                     if (IsTopLevelAssignment(trimmed, "state"))
@@ -468,17 +690,9 @@ namespace Server.System.Agency
                     sb.Append(line);
                 }
 
-                // Re-join with LF; the trailing \r (if Windows-style line endings
-                // were present on the input) is preserved as the last char of
-                // each pre-LF line via Split('\n'), so the joined output keeps
-                // CRLF when the input had CRLF.
                 if (i < lines.Length - 1)
                     sb.Append('\n');
 
-                // Update depth from THIS line's brace count. A line containing
-                // both `{` and `}` (one-line nested block — KSP doesn't emit
-                // these for kerbal files, defensive) nets to zero. Trim before
-                // counting so leading-tab `}` lines are caught.
                 foreach (var c in trimmed)
                 {
                     if (c == '{') depth++;
@@ -488,8 +702,9 @@ namespace Server.System.Agency
                 if (depth < 0)
                 {
                     LunaLog.Warning(
-                        $"[fix:WOLF-R4] deleteagency cascade: kerbal text rewrite aborted — " +
-                        $"brace depth went negative at line {i + 1}. File is malformed.");
+                        $"[fix:WOLF-R4] deleteagency {sourceAgencyIdForLog:N} cascade-warning " +
+                        $"reason='kerbal text rewrite aborted — brace depth went negative at line " +
+                        $"{i + 1}. File is malformed.'");
                     rewritten = original;
                     return false;
                 }
@@ -504,8 +719,6 @@ namespace Server.System.Agency
             if (!trimmedLine.StartsWith(fieldName, StringComparison.Ordinal))
                 return false;
             var rest = trimmedLine.Substring(fieldName.Length);
-            // Tolerate `key = value`, `key=value`, `key   =   value`. Reject
-            // `keyExtra = value` (e.g. a future field literally named "stateMachine").
             var i = 0;
             while (i < rest.Length && (rest[i] == ' ' || rest[i] == '\t')) i++;
             return i < rest.Length && rest[i] == '=';
