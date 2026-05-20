@@ -42,12 +42,23 @@
     Produces Debug-flavoured zips for diagnostic soak.
 
 .NOTES
-    Distribution gotcha: LmpGlobal/RepoConstants.cs + LunaMultiplayer.version
-    both point at upstream LunaMultiplayer/LunaMultiplayer. Testers who click
-    "check for updates" in-game will downgrade to upstream's no-fixes build.
-    Release notes MUST tell testers not to click update. When the cohort grows
-    beyond a handful of people, fork-edit RepoConstants + regenerate the version
-    file with our fork pointers (see project_release_distribution memory note).
+    Distribution updates (auto-updater branch, 2026-05-20):
+
+    - LunaMultiplayer.version is now TEMPLATED at build time (not copied
+      verbatim from the on-disk file, which is still pinned at upstream
+      0.29.1 with upstream URLs - kept on disk as a legacy fallback only).
+      Pass -ReleaseTag to populate the file with the actual fork tag,
+      Majestic95 GitHub URLs, and channel + revision so the PlayerUpdater
+      exe can recognise the player's installed line.
+    - The in-game UpdateHandler / UpdateWindow was removed in Piece B of
+      the auto-updater workstream (commit 9330cc5c). Clients no longer
+      poll any URL on session start; version checking lives entirely in
+      Tools/PlayerUpdater (Piece A, forthcoming on the same branch).
+    - LmpGlobal/RepoConstants.cs is still on upstream URLs, but the only
+      consumers are server-side (VersionChecker for master-server
+      registration, MasterServer for the dedicated-servers list). Player
+      clients no longer read RepoConstants. Repoint when cohort scale
+      makes the master-server registration relevant.
 #>
 
 [CmdletBinding()]
@@ -57,7 +68,24 @@ param(
 
     [string]$DotNet = "$env:USERPROFILE\.dotnet\dotnet.exe",
 
-    [switch]$SkipBuildLmpClient
+    [switch]$SkipBuildLmpClient,
+
+    # Fork release tag to embed in GameData/LunaMultiplayer/LunaMultiplayer.version
+    # Examples: 'v0.31.0-per-agency-private-8', 'v0.30.0-private-2', 'v0.31.0'.
+    #
+    # The PlayerUpdater exe (Tools/PlayerUpdater) reads this from a player's
+    # install to determine which release channel they are on and whether an
+    # update is available. The legacy on-disk LunaMultiplayer.version was
+    # frozen at upstream's 0.29.1 with upstream URLs - shipping that to every
+    # player meant the file lied about both the version AND the repo. This
+    # parameter forces a fresh fork-aware version file at every release.
+    #
+    # If empty, the script falls back to a local-dev sentinel ('v0.0.0-dev',
+    # channel=dev) so local non-release builds still get a fork-pointed file
+    # rather than the stale upstream-pointed one on disk. The dev sentinel
+    # can also be passed explicitly as '-ReleaseTag v0.0.0-dev' if your CI
+    # script always emits a tag value.
+    [string]$ReleaseTag = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -92,6 +120,95 @@ foreach ($lib in $requiredKspLibs) {
     }
 }
 Write-Host "KSP libs present at $kspLibs" -ForegroundColor Cyan
+
+# ---------- Parse the release tag ----------
+# Grammar (Majestic95 fork tags):
+#   v<MAJOR>.<MINOR>.<PATCH>                                  -> stable
+#   v<MAJOR>.<MINOR>.<PATCH>-private-<REV>                    -> stability private
+#   v<MAJOR>.<MINOR>.<PATCH>-per-agency-private-<REV>         -> per-agency private
+#   v0.0.0-dev                                                -> local non-release sentinel
+#
+# CANONICAL: this grammar is mirrored in Tools/PlayerUpdater/Core/VersionParser.cs.
+# If you extend it here (e.g. to add an 'rc' channel), extend the C# parser in
+# lockstep, or installed PlayerUpdaters will refuse to classify the new tags.
+function Get-LmpVersionMetadata {
+    param([string]$Tag)
+
+    # Accept empty OR the literal dev sentinel as the local-dev path - either
+    # 'unspecified' or 'explicitly dev' route to the same metadata.
+    if ([string]::IsNullOrWhiteSpace($Tag) -or $Tag -eq 'v0.0.0-dev') {
+        return @{
+            Tag = 'v0.0.0-dev'
+            Major = 0; Minor = 0; Patch = 0
+            Channel = 'dev'
+            Revision = $null
+        }
+    }
+
+    # Channel + revision are a SINGLE optional group. Tags either have BOTH
+    # ('-private-7', '-per-agency-private-3') or NEITHER (stable releases).
+    # A bare '-private' with no '-N' is a typo, not a valid shape - throw.
+    $rx = '^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(-(?<channel>private|per-agency-private)-(?<rev>\d+))?$'
+    $m = [regex]::Match($Tag, $rx)
+    if (-not $m.Success) {
+        throw "ReleaseTag '$Tag' does not match the expected grammar (v<MAJOR>.<MINOR>.<PATCH>[-private-N|-per-agency-private-N]). The PlayerUpdater exe relies on this grammar to classify channels - either pass a conformant tag or extend the grammar here and in Tools/PlayerUpdater/Core/VersionParser.cs together."
+    }
+
+    $channel = if ($m.Groups['channel'].Success) { $m.Groups['channel'].Value } else { 'stable' }
+    $rev     = if ($m.Groups['rev'].Success)     { [int]$m.Groups['rev'].Value } else { $null }
+
+    return @{
+        Tag      = $Tag
+        Major    = [int]$m.Groups['major'].Value
+        Minor    = [int]$m.Groups['minor'].Value
+        Patch    = [int]$m.Groups['patch'].Value
+        Channel  = $channel
+        Revision = $rev
+    }
+}
+
+$versionMeta = Get-LmpVersionMetadata -Tag $ReleaseTag
+Write-Host "Release tag: $($versionMeta.Tag) (channel=$($versionMeta.Channel), revision=$($versionMeta.Revision))" -ForegroundColor Cyan
+
+function New-LmpVersionFile {
+    param(
+        [Parameter(Mandatory)][hashtable]$Meta,
+        [Parameter(Mandatory)][string]$DestinationPath
+    )
+
+    # Manually construct JSON to keep the field ordering predictable + match
+    # what the PlayerUpdater reads. ConvertTo-Json would reorder keys.
+    $revToken = if ($null -eq $Meta.Revision) { 'null' } else { [string]$Meta.Revision }
+
+    $json = @"
+{
+    "NAME":    "Luna Multiplayer (Majestic95 fork)",
+    "URL":     "https://github.com/Majestic95/LunaMultiplayer/raw/master/LunaMultiplayer.version",
+    "DOWNLOAD": "https://github.com/Majestic95/LunaMultiplayer/releases",
+    "GITHUB": {
+        "USERNAME":   "Majestic95",
+        "REPOSITORY": "LunaMultiplayer"
+    },
+    "VERSION": {
+        "MAJOR": $($Meta.Major),
+        "MINOR": $($Meta.Minor),
+        "PATCH": $($Meta.Patch)
+    },
+    "TAG":      "$($Meta.Tag)",
+    "CHANNEL":  "$($Meta.Channel)",
+    "REVISION": $revToken,
+    "KSP_VERSION": {
+        "MAJOR": 1,
+        "MINOR": 12
+    }
+}
+"@
+
+    # The on-disk legacy file is UTF-8 no BOM (see git history). Match that
+    # so a diff of an installed file against a checked-in one shows only
+    # the genuine field changes, not encoding noise.
+    [System.IO.File]::WriteAllText($DestinationPath, $json, [System.Text.UTF8Encoding]::new($false))
+}
 
 # ---------- Output staging area ----------
 $ReleasesRoot = Join-Path $RepoRoot "Releases\$Configuration"
@@ -152,8 +269,14 @@ Copy-Item -Recurse -Force -Path (Join-Path $RepoRoot 'LmpClient\ModuleStore\XML\
 Copy-Item -Force -Path (Join-Path $RepoRoot 'LmpClient\Resources\Icons\*.*')         -Destination (Join-Path $lmpFolder 'Icons')
 Copy-Item -Force -Path (Join-Path $RepoRoot 'LmpClient\Resources\Flags\*.*')         -Destination (Join-Path $lmpFolder 'Flags')
 
-# Update-check metadata file.
-Copy-Item -Force -Path (Join-Path $RepoRoot 'LunaMultiplayer.version') -Destination (Join-Path $lmpFolder 'LunaMultiplayer.version')
+# Update-check metadata file - templated, NOT copied verbatim from disk.
+# The on-disk LunaMultiplayer.version is frozen at upstream's 0.29.1 with
+# upstream URLs; shipping that to every player would tell their installed
+# PlayerUpdater (and the legacy in-game updater pre-Piece-B) to poll the
+# wrong repo. We regenerate the file here with the actual release tag +
+# Majestic95 URLs every time. See Get-LmpVersionMetadata / New-LmpVersionFile
+# at the top of this script.
+New-LmpVersionFile -Meta $versionMeta -DestinationPath (Join-Path $lmpFolder 'LunaMultiplayer.version')
 
 # Readme alongside the GameData folder.
 $readmeSrc = Join-Path $RepoRoot 'LMP Readme.txt'
