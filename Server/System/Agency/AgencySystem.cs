@@ -1,13 +1,16 @@
 using LmpCommon.Enums;
+using LunaConfigNode.CfgNode;
 using Server.Context;
 using Server.Log;
 using Server.Settings.Structures;
+using Server.System.Scenario;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace Server.System.Agency
 {
@@ -1744,6 +1747,12 @@ namespace Server.System.Agency
                         $"GUID collision on AgencyId {state.AgencyId:N} while registering player {playerName}");
                 }
 
+                // [fix:per-agency-start, 2026-05-20] Seed the start tech node + its
+                // starter parts in-memory BEFORE the single SaveAgency below. The
+                // helper no-ops if the shared scenario is missing (rare); the
+                // SaveAgency that follows captures whatever state we have either way.
+                EnsureStartTechSeeded(state);
+
                 // Persistence-before-index ordering (round-2 review). The XML doc on
                 // AgencyByPlayerName guarantees: persist via SaveAgency BEFORE flipping the
                 // index. Prior order (flip-then-save) created a crash window between the
@@ -2341,6 +2350,186 @@ namespace Server.System.Agency
         /// (before the server accepts connections) so the lock is uncontested there but the
         /// guard is symmetric across both callers.
         /// </summary>
+        /// <summary>
+        /// [fix:per-agency-start, 2026-05-20] Seeds the canonical <c>start</c> tech node
+        /// (and the parts it unlocks) into <paramref name="state"/>'s
+        /// <see cref="AgencyState.TechNodes"/> and <see cref="AgencyState.PurchasedParts"/>.
+        /// Idempotent — short-circuits if the agency already has a <c>start</c> entry.
+        ///
+        /// <para><b>Why it exists.</b> KSP auto-unlocks the <c>start</c> tech node at
+        /// Career-game-creation time without going through the
+        /// <c>ResearchAndDevelopment.UnlockTechWithParts</c> codepath that fires
+        /// <c>ShareProgressTechnologyMsgData</c>. As a result <see cref="AgencyTechRouter.TryRoute"/>
+        /// never sees the unlock and <see cref="AgencyState.TechNodes"/> never gets a
+        /// <c>start</c> entry. The <see cref="AgencyScenarioProjector"/> then strips
+        /// every <c>Tech</c> child node from the outgoing R&amp;D scenario (including
+        /// <c>start</c>) and re-splices only entries present in <c>TechNodes</c> —
+        /// leaving every per-agency client with no starter parts. This helper fills
+        /// the gap by reading the canonical <c>start</c> bytes from the shared
+        /// <c>ResearchAndDevelopment</c> scenario and persisting them into the agency.</para>
+        ///
+        /// <para><b>Why both TechNodes AND PurchasedParts.</b> The Tech bytes carry
+        /// <c>part = X</c> lines that the projector splices verbatim into the per-
+        /// agency Tech node. But KSP's R&amp;D model treats those part lines as
+        /// "part lives here" — separate from "purchased". On universes with non-
+        /// zero part <c>entryCost</c> on Start's parts, the player would still need
+        /// to spend funds to use them. Seeding <see cref="AgencyState.PurchasedParts"/>
+        /// marks them as already-purchased so the projector merges them in for free.</para>
+        ///
+        /// <para><b>Locking.</b> Snapshot-then-release on the shared scenario
+        /// (<see cref="ScenarioDataUpdater.GetSemaphore"/>, BUG-033 contract); then
+        /// mutate <see cref="AgencyState"/> under <see cref="GetAgencyLock"/>. No
+        /// nested-lock cycle. The mutation block re-checks the idempotency guard
+        /// under the agency lock to close any same-agency race window between the
+        /// outer early-check and the lock acquire.</para>
+        ///
+        /// <para><b>Called from</b> <see cref="RegisterAgency"/> (new mint) AND
+        /// <see cref="LoadAgencyFromFile"/> (boot + runtime load — backfills
+        /// agencies minted before this fix shipped). Both callers are safe to
+        /// invoke repeatedly thanks to the <c>ContainsKey("start")</c> guard.</para>
+        ///
+        /// <para><b>Returns</b> <c>true</c> when the agency was mutated (caller is
+        /// responsible for the resulting <see cref="SaveAgency"/> call so the
+        /// new-mint path can collapse "bare-state save + seed save" into one
+        /// disk write). Returns <c>false</c> on every no-op branch (gate closed /
+        /// already seeded / shared scenario missing).</para>
+        ///
+        /// No-op when <see cref="PerAgencyEnabled"/> is false (gate off OR non-Career).
+        /// </summary>
+        private static bool EnsureStartTechSeeded(AgencyState state)
+        {
+            if (state == null || !PerAgencyEnabled)
+                return false;
+
+            // Idempotency guard. ALSO auto-heal the v0 bad-format bytes shipped
+            // by the initial 2026-05-20 build: that version used
+            // `startTech.ToString()`, which for CHILD ConfigNodes in LunaConfigNode
+            // includes the outer `Tech\n{\n...\n}` wrapper (contrary to top-level
+            // AgencyState.ToConfigNode().ToString(), which strips it). The
+            // projector then wrapped those bytes AGAIN with "Tech" → KSP saw
+            // `Tech { Tech { id = start ... } }` whose top-level GetValue("id")
+            // returned null. Detect the leading "Tech" wrapper marker + re-seed
+            // with the bare key=value format basicRocketry/etc. use. Agencies
+            // produced by the v0 build automatically pick up the correct bytes
+            // on next server restart.
+            if (state.TechNodes.TryGetValue("start", out var existing))
+            {
+                var first8 = existing?.Data == null || existing.NumBytes < 4
+                    ? string.Empty
+                    : Encoding.UTF8.GetString(existing.Data, 0,
+                        Math.Min(4, existing.NumBytes));
+                if (!first8.Equals("Tech", StringComparison.Ordinal))
+                    return false;
+                // Bad-format detected — remove the entry so the seed below
+                // produces the correct shape. Don't also touch PurchasedParts
+                // here; the seed re-asserts the part set additively.
+                state.TechNodes.Remove("start");
+                LunaLog.Warning(
+                    $"[fix:per-agency-start] Detected v0 bad-format start tech in agency {state.AgencyId:N} " +
+                    $"({state.OwningPlayerName}); re-seeding with correct bare key=value bytes.");
+            }
+
+            // Snapshot the start tech bytes + part list inside the per-scenario
+            // semaphore (BUG-033 contract — protects ConfigNode iteration against
+            // ScenarioDataUpdater writers). Release before touching AgencyState.
+            byte[] data;
+            List<string> startParts;
+            lock (ScenarioDataUpdater.GetSemaphore("ResearchAndDevelopment"))
+            {
+                if (!ScenarioStoreSystem.CurrentScenarios.TryGetValue("ResearchAndDevelopment", out var rd))
+                {
+                    LunaLog.Warning(
+                        $"[fix:per-agency-start] Shared scenario 'ResearchAndDevelopment' absent; cannot seed start tech for agency " +
+                        $"{state.AgencyId:N} ({state.OwningPlayerName}). Player will need to manually research Start in R&D.");
+                    return false;
+                }
+
+                ConfigNode startTech = null;
+                foreach (var wrapper in rd.GetNodes("Tech"))
+                {
+                    var t = wrapper.Value;
+                    if (t != null && t.GetValue("id")?.Value == "start")
+                    {
+                        startTech = t;
+                        break;
+                    }
+                }
+                if (startTech == null)
+                {
+                    LunaLog.Warning(
+                        $"[fix:per-agency-start] Shared 'ResearchAndDevelopment' scenario has no Tech node with id=start; " +
+                        $"cannot seed for agency {state.AgencyId:N} ({state.OwningPlayerName}).");
+                    return false;
+                }
+
+                // Build bare key=value bytes — the format AgencyTechRouter stores
+                // wire payloads in (no outer "Tech" tag, no `{}` braces). Match
+                // the basicRocketry / engineering101 / etc. shape exactly so the
+                // projector's `ScenarioDataUpdater.ParseClientConfigNode(data,
+                // len, "Tech")` call wraps these bytes ONCE with a "Tech" parent
+                // and produces a clean Tech node KSP can recognize.
+                //
+                // LunaConfigNode's ConfigNode.ToString() on a CHILD node includes
+                // the outer `Name\n{...}` wrapper (verified empirically against
+                // the projector splice path — the first build of this helper
+                // used .ToString() and produced double-wrapped bytes that KSP's
+                // R&D loader silently rejected). We re-emit by hand instead.
+                var sb = new StringBuilder(256);
+                AppendValueLine(sb, "id", startTech.GetValue("id")?.Value ?? "start");
+                AppendValueLine(sb, "state", startTech.GetValue("state")?.Value ?? "Available");
+                AppendValueLine(sb, "cost", startTech.GetValue("cost")?.Value ?? "0");
+
+                startParts = new List<string>();
+                foreach (var v in startTech.GetValues("part"))
+                {
+                    if (string.IsNullOrEmpty(v.Value)) continue;
+                    AppendValueLine(sb, "part", v.Value);
+                    startParts.Add(v.Value);
+                }
+
+                data = Encoding.UTF8.GetBytes(sb.ToString());
+            }
+
+            int seededPartCount;
+            lock (GetAgencyLock(state.AgencyId))
+            {
+                // Defensive re-check under the lock. Paired callers (RegisterAgency,
+                // LoadAgencyFromFile) are already serialised, but the guard is cheap.
+                if (state.TechNodes.ContainsKey("start"))
+                    return false;
+
+                state.TechNodes["start"] = new AgencyTechNodeEntry
+                {
+                    TechId = "start",
+                    Data = data,
+                    NumBytes = data.Length,
+                };
+
+                if (!state.PurchasedParts.TryGetValue("start", out var partSet))
+                {
+                    partSet = new HashSet<string>(StringComparer.Ordinal);
+                    state.PurchasedParts["start"] = partSet;
+                }
+                foreach (var partName in startParts)
+                    partSet.Add(partName);
+
+                seededPartCount = partSet.Count;
+            }
+
+            LunaLog.Normal(
+                $"[fix:per-agency-start] Seeded 'start' tech node + {seededPartCount} starter parts into agency " +
+                $"{state.AgencyId:N} ({state.OwningPlayerName})");
+            return true;
+        }
+
+        // Newline-terminated `key = value` line writer used by EnsureStartTechSeeded
+        // to build the bare ConfigNode-format wire bytes (no outer braces, no
+        // wrapping name) that AgencyTechRouter stores from real client wire sends.
+        private static void AppendValueLine(StringBuilder sb, string key, string value)
+        {
+            sb.Append(key).Append(" = ").Append(value).Append('\n');
+        }
+
         private static AgencyState LoadAgencyFromFile(string filePath)
         {
             var canonicalExisted = FileHandler.FileExists(filePath);
@@ -2365,6 +2554,29 @@ namespace Server.System.Agency
                     FileHandler.WriteAtomic(filePath, content);
                 }
                 LunaLog.Normal($"[fix:per-agency-career] Healed canonical path after .bak recovery: {Path.GetFileName(filePath)}");
+            }
+
+            // [fix:per-agency-start, 2026-05-20] Backfill the start tech seed for
+            // pre-fix agencies. No-op when the agency already has 'start' or when
+            // PerAgencyEnabled is false (gate off / non-Career). Boot-time:
+            // ScenarioStoreSystem.LoadExistingScenarios runs at MainServer line 97
+            // BEFORE LoadExistingAgencies at line 110, so CurrentScenarios is
+            // populated. Runtime: any post-boot LoadAgency happens long after.
+            //
+            // Inline WriteAtomic instead of SaveAgency: at this point the state is
+            // NOT yet in the Agencies dictionary (both callers — LoadExistingAgencies
+            // at line 226 + LoadAgency at line 1799 — TryAdd after we return), so
+            // SaveAgency would short-circuit on its Agencies.TryGetValue miss at
+            // line 2274 and the seed would survive in-memory but never reach disk.
+            // Mirrors the heal-on-bak block above (line 2552) by design.
+            if (EnsureStartTechSeeded(state))
+            {
+                lock (GetAgencyLock(state.AgencyId))
+                {
+                    FileHandler.WriteAtomic(filePath, state.Serialize());
+                }
+                LunaLog.Normal(
+                    $"[fix:per-agency-start] Persisted backfilled start tech to disk for agency {state.AgencyId:N} ({state.OwningPlayerName})");
             }
 
             return state;
