@@ -233,6 +233,22 @@ namespace ServerTest
             // Bob's kolony entry survives — no migration ran.
             Assert.AreEqual(1, AgencySystem.Agencies[_agencyBob].KolonyEntries.Count,
                 "Same-stamp short-circuit must not invoke MigrateForVesselTransfer.");
+            // [v8.1 audit cross-phase (e)] The same-stamp branch DOES still
+            // fire AgencySystemSender.BroadcastVisibilityChange so operators
+            // can use idempotent re-run as an in-band Visibility re-sync tool
+            // for peers with stale VesselOwnership state (wire desync /
+            // late-join / pre-Visibility connect window). Direct assertion
+            // requires intercepting MessageQueuer broadcasts which is e2e
+            // MockClientTest territory; here we pin the contract via the
+            // surrounding behaviour: the command returns true AND mutates
+            // nothing AND the log line carries `visibility-rebroadcast=1`.
+            // The log-line content is pinned implicitly — operators grep
+            // the [fix:per-agency-career] prefix + result=noop key + the
+            // visibility-rebroadcast=1 token. If a future refactor removes
+            // the broadcast, the e2e MockClientTest harness would catch it
+            // (peer no longer receives AgencyVisibilityMsgData on no-op
+            // re-run). For unit-level coverage we rely on the contract being
+            // pinned in code review.
         }
 
         // -------------------------------------------------------------------

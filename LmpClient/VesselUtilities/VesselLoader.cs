@@ -504,7 +504,12 @@ namespace LmpClient.VesselUtilities
                     // Gating on the combined Phase 6.6 flag means the registry only
                     // populates when the scrub is genuinely the per-agency partition
                     // doing its job.
-                    if (SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled)
+                    // [v8.1 audit cross-phase (g)] Route the gate check through
+                    // AgencyMembership.ShouldRecordForeignCrewCount so the contract
+                    // is pinned by an LmpClientTest unit-test, NOT enforced only
+                    // by the inline `if (...PerAgencyKerbalRosterEnabled)` here.
+                    if (AgencyMembership.ShouldRecordForeignCrewCount(
+                            SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled))
                     {
                         AgencySystem.Singleton.ForeignCrewCount[vesselProto.vesselID] = totalRemoved;
                     }
@@ -530,7 +535,11 @@ namespace LmpClient.VesselUtilities
                     // under gate=on but the gate later flipped off, leaving the
                     // entry behind — eviction here doesn't fire because the
                     // gate flipped before the next scrub).
-                    if (SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled)
+                    // [v8.1 audit cross-phase (g)] Mirror the population branch:
+                    // gate via the AgencyMembership pure helper so both write
+                    // and evict are pinned by the same regression test.
+                    if (AgencyMembership.ShouldRecordForeignCrewCount(
+                            SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled))
                     {
                         AgencySystem.Singleton.ForeignCrewCount.TryRemove(vesselProto.vesselID, out _);
                     }

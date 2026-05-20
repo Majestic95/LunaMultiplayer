@@ -194,6 +194,20 @@ namespace Server.System.Agency
             /// failed before reaching the write step.
             /// </summary>
             public bool WroteToDestinationSubdir;
+            /// <summary>
+            /// [v8.1 audit cross-phase (h)] Count of passengers the cascade
+            /// walked but deliberately did NOT restore because the operator
+            /// passed <c>--restore-to-none</c>. Distinct from
+            /// <see cref="FailedKerbalNames"/> (which counts failures during
+            /// an attempted restoration). Non-zero only on the
+            /// <c>--restore-to-none</c> path; zero everywhere else. Emitted
+            /// in the cascade summary as <c>dropped-kerbals={n}</c> so a GUI
+            /// launcher parsing the audit line by key=value gets an integer
+            /// for "how many were dropped under operator-accepted loss"
+            /// without needing to per-name grep the surrounding Normal
+            /// lines.
+            /// </summary>
+            public int DroppedPassengerCount;
         }
 
         /// <summary>
@@ -346,7 +360,14 @@ namespace Server.System.Agency
                             // --restore-to-none path. Per-name visibility
                             // matters: operator wants to know which kerbals
                             // they accepted the loss of (so they can spot
-                            // operator-time mistakes after the fact).
+                            // operator-time mistakes after the fact). v8.1
+                            // (cross-phase audit h) — also bump the
+                            // CascadeResult.DroppedPassengerCount aggregate
+                            // so the cascade summary line emits a single
+                            // integer for "how many dropped" matching the
+                            // existing restored-kerbals / failed-kerbals /
+                            // collided-kerbals counters.
+                            result.DroppedPassengerCount++;
                             LunaLog.Normal(
                                 $"[fix:WOLF-R4] deleteagency {sourceAgencyId:N} dropped-kerbal " +
                                 $"name='{name}' reason='--restore-to-none' " +

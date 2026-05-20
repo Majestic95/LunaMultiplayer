@@ -420,6 +420,11 @@ namespace Server.Command.Command
                 $"[fix:WOLF-R4] deleteagency {agencyId:N} wolf-cascade in-flight-routes={wolfCascade.InFlightRoutesScanned} " +
                 $"restored-kerbals={wolfCascade.RestoredKerbalCount} failed-kerbals={wolfCascade.FailedKerbalNames.Count} " +
                 $"collided-kerbals={wolfCascade.CollidedKerbalNames.Count} " +
+                // [v8.1 audit cross-phase (h)] dropped-kerbals aggregate token
+                // — non-zero only on the --restore-to-none disposition. Lets
+                // a GUI launcher's audit panel parse "how many dropped" via
+                // the established key=value grammar without per-name grep.
+                $"dropped-kerbals={wolfCascade.DroppedPassengerCount} " +
                 $"destination={wolfCascade.DestinationAgencyId:N} operator-disposition={disposition} " +
                 $"cascade-failed={wolfCascadeFailed}");
 

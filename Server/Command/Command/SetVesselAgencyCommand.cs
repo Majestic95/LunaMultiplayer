@@ -191,6 +191,23 @@ namespace Server.Command.Command
     /// a WOLF migration walk here</b> — the dicts have no FK to the moved
     /// vessel and a migration walk would produce no observable change.</para>
     ///
+    /// <para><b>Stock-4 strand quirk on first-launch reassign</b> (v8.1 audit
+    /// cross-phase (a)). When a player's very first crewed launch happens
+    /// AFTER the agency mints but BEFORE any other crewed launch, the vessel
+    /// carries the stock-4 Jeb/Bill/Bob/Val from
+    /// <see cref="Server.System.Agency.AgencySystem.SeedStockKerbalsForAgency"/>'s
+    /// per-agency seeding. Running <c>/setvesselagency V differentAgency</c>
+    /// migrates the on-board crew (Jeb/Bill/Bob if all three are aboard) OUT
+    /// of the source agency's <c>Kerbals/</c> subdir, leaving the remaining
+    /// stock-4 templates (Valentina + whichever weren't aboard). KSP then
+    /// re-mints replacement kerbals on the next launch via the
+    /// <c>onKerbalAdded</c> Astronaut Complex flow. Operator-visible only on
+    /// attempted re-launch in the source agency. Not destructive — the
+    /// migrated kerbals are alive in the destination agency. Documented as
+    /// expected behaviour; no in-band fix shipped (operator workaround:
+    /// fly the migrated vessel in destination's agency, OR reverse the
+    /// reassignment, OR accept the re-mint).</para>
+    ///
     /// <para><b>Phase 6.8 — vessel-crew kerbal files DO migrate.</b>
     /// Consumer-lens v1 CONSIDER C4 — distinct from the WOLF NO-OP block
     /// above. Under combined gate=on
@@ -361,15 +378,35 @@ namespace Server.Command.Command
             // ReferenceEquals guards inside the migration helpers are
             // defense-in-depth backstops — DO NOT rely on them for the
             // operator-visible no-op log.
+            //
+            // [v8.1 audit cross-phase (e)] We DO still emit a Visibility
+            // broadcast on the no-op branch. Operators reasonably re-run
+            // /setvesselagency V owningAgency to force a Visibility re-
+            // affirmation when a peer client's VesselOwnership mirror
+            // is stale (wire desync / late-join / pre-Visibility connect
+            // window). Without the broadcast on no-op, idempotent re-run
+            // is a silent operation and the stale peer state lingers
+            // until the next destructive vessel reload OR the next
+            // AgencyVisibilityMsgData triggered by some OTHER cause.
+            // Cost: one channel-22 ReliableOrdered broadcast per re-run,
+            // negligible. Benefit: in-band re-sync tool for the operator.
             if (sourceAgencyId == destAgencyId)
             {
                 // Round-1 consumer-lens MUST FIX — result=noop key lets a GUI
                 // launcher's regex match `result=(\w+)` cleanly for "did
                 // anything change?" without substring-matching `no-op` text.
+                // v8.1: kept result=noop (no state mutation happened) but
+                // a Visibility re-broadcast fires; visibility-rebroadcast=1
+                // surfaces the side-effect distinctly for audit grep.
+                AgencySystemSender.BroadcastVisibilityChange(new List<VesselOwnershipChange>
+                {
+                    new VesselOwnershipChange { VesselId = movedVesselId, NewOwningAgencyId = destAgencyId }
+                });
                 LunaLog.Normal(
                     $"[fix:per-agency-career] setvesselagency {movedVesselId:N} result=noop " +
-                    $"dest={destAgencyId:N} dest-owner='{destOwnerName}' " +
-                    "(vessel already assigned to this agency)");
+                    $"dest={destAgencyId:N} dest-owner='{destOwnerName}' visibility-rebroadcast=1 " +
+                    "(vessel already assigned to this agency; re-affirmed ownership to all peers " +
+                    "in case a late-join / wire-desync left stale state)");
                 return true;
             }
 

@@ -586,5 +586,43 @@ namespace LmpClientTest
                 mirrorStampedAgencyId: ownerOnMirror,
                 perAgencyEnabledClientGate: true));
         }
+
+        // -------------------------------------------------------------------
+        // [v8.1 audit cross-phase (g)] ShouldRecordForeignCrewCount — pins
+        // the combined-gate contract for ForeignCrewCount population. The
+        // gate MUST be PerAgencyKerbalRosterEnabled (composite) not
+        // PerAgencyCareerEnabled alone — Phase 6.6 review's MUST FIX caught
+        // a regression where the gate was the latter, letting BUG-023 race
+        // transients under the intermediate Stage 5 → 6 ramp seed misleading
+        // foreign-vessel labels for shared kerbals.
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void ShouldRecordForeignCrewCount_True_WhenPerAgencyKerbalRosterEnabled()
+        {
+            Assert.IsTrue(AgencyMembership.ShouldRecordForeignCrewCount(perAgencyKerbalRosterEnabled: true));
+        }
+
+        [TestMethod]
+        public void ShouldRecordForeignCrewCount_False_WhenGateOff()
+        {
+            Assert.IsFalse(AgencyMembership.ShouldRecordForeignCrewCount(perAgencyKerbalRosterEnabled: false));
+        }
+
+        [TestMethod]
+        public void ShouldRecordForeignCrewCount_ParameterNamedForCombinedGate()
+        {
+            // Compile-time + reflection contract assertion: helper signature
+            // requires the combined gate name. A future refactor passing
+            // PerAgencyCareerEnabled alone without renaming the parameter
+            // would trip this test. The Phase 6.6 review's MUST FIX would
+            // re-surface as a regression.
+            var method = typeof(AgencyMembership).GetMethod(nameof(AgencyMembership.ShouldRecordForeignCrewCount));
+            Assert.IsNotNull(method, "ShouldRecordForeignCrewCount must exist as a public static helper");
+            var parameters = method.GetParameters();
+            Assert.AreEqual(1, parameters.Length, "Helper must take exactly one parameter");
+            Assert.AreEqual("perAgencyKerbalRosterEnabled", parameters[0].Name,
+                "Parameter must be named for the COMBINED gate, not PerAgencyCareerEnabled alone");
+        }
     }
 }

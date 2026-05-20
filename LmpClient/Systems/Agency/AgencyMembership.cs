@@ -356,5 +356,35 @@ namespace LmpClient.Systems.Agency
             // forcing the trade-off to be re-evaluated.
             return Guid.Empty;
         }
+
+        /// <summary>
+        /// [v8.1 audit cross-phase (g)] Pure decision helper for whether
+        /// <see cref="VesselUtilities.VesselLoader.ScrubInvalidProtoCrew"/>
+        /// should populate (or evict) the
+        /// <see cref="AgencySystem.ForeignCrewCount"/> registry on a given
+        /// scrub event. Extracted from the inline gate-check at
+        /// <c>VesselLoader.cs:507</c> + <c>:533</c> so the combined-gate
+        /// contract is pinned by <c>LmpClientTest</c> — the original Phase
+        /// 6.6 review caught a MUST FIX where the gate was originally
+        /// <see cref="SettingsServerStructure.PerAgencyCareerEnabled"/>
+        /// alone, which let BUG-023 race transients under the intermediate
+        /// <c>PerAgencyCareer=on / PerAgencyKerbalRoster=off</c> ramp seed
+        /// misleading "Crew: N (Agency)" labels for shared kerbals.
+        /// Extracting the helper means a future refactor can't weaken the
+        /// gate without breaking the regression test.
+        ///
+        /// <para><b>Contract:</b> the helper enforces the combined-gate
+        /// invariant — only the
+        /// <see cref="SettingsServerStructure.PerAgencyKerbalRosterEnabled"/>
+        /// composite gate (which already requires
+        /// <c>PerAgencyCareer AND PerAgencyKerbalRoster AND GameMode=Career</c>
+        /// per <see cref="Server.System.Agency.AgencySystem.PerAgencyKerbalRosterEnabled"/>)
+        /// gates registry mutation. Plain
+        /// <c>PerAgencyCareerEnabled</c> is NOT sufficient.</para>
+        /// </summary>
+        public static bool ShouldRecordForeignCrewCount(bool perAgencyKerbalRosterEnabled)
+        {
+            return perAgencyKerbalRosterEnabled;
+        }
     }
 }

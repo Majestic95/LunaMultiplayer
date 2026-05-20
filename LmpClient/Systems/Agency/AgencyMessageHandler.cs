@@ -361,6 +361,7 @@ namespace LmpClient.Systems.Agency
             // ForceRecordOwnership CONSIDER review finding to this consumer call
             // site, where it belongs.
             var registry = System?.VesselOwnership;
+            var foreignCrewRegistry = System?.ForeignCrewCount;
             var activeVesselId = FlightGlobals.ActiveVessel?.id ?? Guid.Empty;
             for (var i = 0; i < data.ChangeCount; i++)
             {
@@ -368,6 +369,21 @@ namespace LmpClient.Systems.Agency
                 var prior = Guid.Empty;
                 registry?.TryGetValue(change.VesselId, out prior);
                 AgencyMembership.ForceRecordOwnership(registry, change.VesselId, change.NewOwningAgencyId);
+
+                // [v8.1 audit cross-phase (c)] Evict stale ForeignCrewCount on
+                // authoritative ownership change. Without this, a third-agency
+                // observer (neither source nor destination of a /setvesselagency
+                // or /transferagency or /deleteagency event) sees their ownership
+                // mirror update via this broadcast — but their cached pre-scrub
+                // crew count for the vessel stays whatever the LAST destructive
+                // reload recorded. If Phase 6.8 migrated crew during the same
+                // ownership change, the stale count is wrong; falling back to
+                // "(Agency)" without a count is correct (the next destructive
+                // reload repopulates from a fresh scrub). Agency tag itself
+                // stays accurate because AgencyLabelFormatter.IsForeignVessel
+                // reads `registry` at render time. Eviction here is harmless
+                // when ForeignCrewCount has no entry for the vessel.
+                foreignCrewRegistry?.TryRemove(change.VesselId, out _);
 
                 if (change.NewOwningAgencyId == Guid.Empty && prior != Guid.Empty)
                 {

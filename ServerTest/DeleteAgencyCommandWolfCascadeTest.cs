@@ -497,6 +497,13 @@ namespace ServerTest
             Assert.AreEqual(Guid.Empty, result.DestinationAgencyId,
                 "DestinationAgencyId stays Empty when operator chose --restore-to-none.");
             Assert.IsFalse(result.WroteToDestinationSubdir);
+            // [v8.1 audit cross-phase (h)] DroppedPassengerCount aggregate
+            // for --restore-to-none. Pin that the per-name SkippedNoDestination
+            // events accumulate into the new summary token. One passenger was
+            // walked + dropped → DroppedPassengerCount=1.
+            Assert.AreEqual(1, result.DroppedPassengerCount,
+                "DroppedPassengerCount must count --restore-to-none passengers separately " +
+                "from RestoredKerbalCount/FailedKerbalNames/CollidedKerbalNames for audit clarity.");
 
             // Source file unchanged (cascade only read it). No file in Bob's subdir.
             Assert.AreEqual("Missing", ReadKerbalFieldFromAgencySubdir(alice.AgencyId, "Lost Kerman", "state"));
