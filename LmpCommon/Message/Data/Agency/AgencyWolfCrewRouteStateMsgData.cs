@@ -12,18 +12,76 @@ namespace LmpCommon.Message.Data.Agency
     /// the distinctive cross-agency kerbal authority gate enforced in
     /// <c>AgencyWolfCrewRouter.TryRoute</c> per pre-spec §2.b.v.
     ///
+    /// <para><b>Bidirectional contract (mirrors Slice B/C/D template):</b>
+    /// <list type="bullet">
+    ///   <item><b>Server → client (owner-only echo + connect catch-up).</b>
+    ///         Echo emitted from <c>AgencySystemSender.SendWolfCrewRouteStateToOwner</c>
+    ///         after every successful router upsert. Connect catch-up emitted
+    ///         from <c>AgencySystemSender.SendWolfCrewRouteCatchupTo</c> at
+    ///         handshake completion (last in the depots → routes → hoppers →
+    ///         terminals → crew-routes catchup chain — CrewRoutes carry
+    ///         origin+destination FK to depots, depots must arrive first).
+    ///         REPLACE semantics on receive — the catchup batch is the
+    ///         authoritative snapshot at handshake time; the client mirror
+    ///         (when wired) clears the local CrewRoutes dict and rebuilds
+    ///         from the batch.</item>
+    ///   <item><b>Client → server (per-mutation emit from postfix).</b>
+    ///         Emitted from <c>AgencyWolfCrewRouteSender.SendMutation</c>
+    ///         when WOLF's <c>CrewRoute.Embark</c> / <c>Disembark</c> /
+    ///         <c>Launch</c> / <c>CheckArrived</c> /
+    ///         <c>ScenarioPersister.CreateCrewRoute</c> Harmony postfixes
+    ///         fire under <c>PerAgencyCareerEnabled=true</c>. Server trust
+    ///         posture: <see cref="AgencyId"/> on inbound is IGNORED — the
+    ///         server derives the sender's authoritative agency from
+    ///         <c>AgencySystem.AgencyByPlayerName[client.PlayerName]</c>.
+    ///         A C→S inbound that lies about AgencyId routes to the
+    ///         player's actual agency, not the wire-claimed one.</item>
+    /// </list></para>
+    ///
+    /// <para><b>Privacy rule (spec §10 Q1 PrivateAgencyResources=true).</b>
+    /// Peers never receive another agency's crew-route batch. Cross-agency
+    /// awareness leaks ONLY through the projector splice
+    /// (<c>AgencyScenarioProjector.SpliceAgencyWolfState</c>) which projects
+    /// per-target-client at scene-load time.</para>
+    ///
+    /// <para><b>Upsert key + REPLACE semantics.</b> Partition key is
+    /// <see cref="AgencyWolfCrewRouteEntry.UniqueId"/> (Guid in
+    /// <c>ToString("N")</c> form per WOLF's <c>CrewRoute.cs:90</c>). Server-
+    /// side router does last-write-wins upsert. No per-field delta state
+    /// machine — every emit carries the full route snapshot. The
+    /// <see cref="RemovedKeys"/> tail is RESERVED for Slice F admin /
+    /// migration paths (deleteagency cascade, transferagency MKS-aware
+    /// companion) — WOLF has no normal-op <c>RemoveCrewRoute</c> API
+    /// (verified s41 source walk against MKS SHA <c>ed0f6aa6</c> at
+    /// <c>ScenarioPersister.cs:432-449</c> — only <c>RemoveHopper</c> +
+    /// <c>RemoveTerminal</c> exist).</para>
+    ///
     /// <para><b>No <c>RejectionReason</c> field</b> per pre-spec §2.b.v Option C
     /// (locked). Cross-agency kerbal rejections are silent server-side drops
-    /// with a Warning log; the client-side prefix on
-    /// <c>WOLF_CrewTransferScenario.Launch</c> is the legitimate-client UX path
-    /// (pre-spec §8.e). Modified-client desync is structurally acceptable per
-    /// pre-spec §8.f.</para>
+    /// with a Warning log. The client UI flap window between rejection and
+    /// the projector's next <c>SendScenarioModules</c> tick (~30s cadence)
+    /// is the documented operator-visible artifact: the operator's local
+    /// WOLF UI shows the cross-agency passenger as embarked until the
+    /// projector overwrites; then the passenger silently vanishes from the
+    /// route. Pre-spec §8.f acceptable desync. The deferred legitimate-
+    /// client UX surface is a Slice F prefix on
+    /// <c>WOLF_CrewTransferScenario.Launch</c> that suppresses the
+    /// optimistic UI mutation at click time.</para>
     ///
-    /// <para><b>Slice A scope:</b> wire shape only. Slice E wires the router +
-    /// projector splice + cross-agency kerbal authority gate; Slice E client-
-    /// side postfixes on <c>CrewRoute.Embark</c> / <c>Disembark</c> /
-    /// <c>Launch</c> / <c>CheckArrived</c> + prefix on
-    /// <c>WOLF_CrewTransferScenario.Launch</c> emit this message.</para>
+    /// <para><b>Orthogonal concerns:</b>
+    /// <list type="bullet">
+    ///   <item><b>Mid-flight kerbal stranding</b> — passengers in
+    ///         <c>RosterStatus.Missing</c> aboard a Boarding/Enroute
+    ///         CrewRoute that's stripped via Slice F deleteagency cascade
+    ///         (or a pre-0.31 upgrade strip) get permanently orphaned.
+    ///         <c>AgencySystem.WarnAboutSharedWolfOnUpgrade</c> warns
+    ///         operators at boot.</item>
+    ///   <item><b>Admin /setvesselagency on an in-flight kerbal</b> — a NO-OP
+    ///         for the CrewRoute's passenger record (the list is fixed at
+    ///         <c>CreateCrewRoute</c> time per WOLF source contract). The
+    ///         kerbal cannot be moved to another agency until the route
+    ///         reaches Arrived and the passenger Disembarks.</item>
+    /// </list></para>
     ///
     /// <para><b>Wire shape.</b> <see cref="AgencyId"/> (Guid) +
     /// <see cref="EntryCount"/> (int) + <see cref="Entries"/>[0..EntryCount-1]

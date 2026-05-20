@@ -184,12 +184,18 @@
     <Compile Include="Harmony\ScenarioPersister_RemoveHopperPostfix.cs" />
     <Compile Include="Harmony\ScenarioPersister_CreateTerminalPostfix.cs" />
     <Compile Include="Harmony\ScenarioPersister_RemoveTerminalPostfix.cs" />
+    <Compile Include="Harmony\ScenarioPersister_CreateCrewRoutePostfix.cs" />
+    <Compile Include="Harmony\CrewRoute_EmbarkPostfix.cs" />
+    <Compile Include="Harmony\CrewRoute_DisembarkPostfix.cs" />
+    <Compile Include="Harmony\CrewRoute_LaunchPostfix.cs" />
+    <Compile Include="Harmony\CrewRoute_CheckArrivedPostfix.cs" />
     <Compile Include="Harmony\Route_AddResourcePostfix.cs" />
     <Compile Include="Harmony\Route_RemoveResourcePostfix.cs" />
     <Compile Include="Harmony\WolfDepotReflection.cs" />
     <Compile Include="Harmony\WolfRouteReflection.cs" />
     <Compile Include="Harmony\WolfHopperReflection.cs" />
     <Compile Include="Harmony\WolfTerminalReflection.cs" />
+    <Compile Include="Harmony\WolfCrewRouteReflection.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_AbortPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPostfix.cs" />
     <Compile Include="Harmony\OrbitalLogisticsTransferRequest_DeliverPrefix.cs" />
@@ -313,6 +319,7 @@
     <Compile Include="Systems\Agency\AgencyWolfRouteSender.cs" />
     <Compile Include="Systems\Agency\AgencyWolfHopperSender.cs" />
     <Compile Include="Systems\Agency\AgencyWolfTerminalSender.cs" />
+    <Compile Include="Systems\Agency\AgencyWolfCrewRouteSender.cs" />
     <Compile Include="Systems\Agency\AgencyOrbitalSender.cs" />
     <Compile Include="Systems\Agency\AgencyPlanetarySender.cs" />
     <Compile Include="Systems\Agency\AgencyMembership.cs" />

@@ -104,9 +104,9 @@ namespace Server.System
                         // reconnecting owner before any mid-session mutation.
                         // Unconditional under gate=on so the empty-dict case is
                         // observable by the pre-Slice-B client mirror author.
-                        // Slices D-E will append SendWolfHopperCatchupTo /
-                        // SendWolfTerminalCatchupTo / SendWolfCrewRouteCatchupTo
-                        // here as the per-router surfaces land.
+                        // Slice D appended SendWolfHopperCatchupTo +
+                        // SendWolfTerminalCatchupTo (below); Slice E appended
+                        // SendWolfCrewRouteCatchupTo (below).
                         AgencySystemSender.SendWolfDepotCatchupTo(client, assignedState);
                         // [Phase 4 Slice C] MKS WOLF cargo-route catch-up.
                         // Ordering: depots-then-routes mirrors WOLF's own
@@ -134,6 +134,19 @@ namespace Server.System
                         // "depots-then-children" invariant the Slice E
                         // CrewRoutes catchup will inherit.
                         AgencySystemSender.SendWolfTerminalCatchupTo(client, assignedState);
+                        // [Phase 4 Slice E] MKS WOLF crew-route catch-up.
+                        // Last in the WOLF catchup chain. CrewRoutes
+                        // reference BOTH origin AND destination depot per
+                        // CrewRoute.cs:249-250 (_registry.GetDepot throws
+                        // DepotDoesNotExistException on FK miss — would kill
+                        // the whole WOLF scenario OnLoad). Depots ship
+                        // first; CrewRoutes come last so any future client
+                        // mirror that applies a WOLF-equivalent OnLoad
+                        // sequence has both endpoint depots available
+                        // before CrewRoute resolution runs. The Phase 4
+                        // catchup chain is now complete: depots → routes →
+                        // hoppers → terminals → crewRoutes.
+                        AgencySystemSender.SendWolfCrewRouteCatchupTo(client, assignedState);
                     }
 
                     // [Mod-compat / Path B D2 catch-up] Synchronous connect-
@@ -147,9 +160,20 @@ namespace Server.System
                     // scenarios. (S3 / FarFutureTechnologyPersistence was
                     // retired 2026-05-19 — orphan file not in compiled FFT.dll;
                     // see docs/mod-compat/near-future-and-far-future.md.)
+                    // [Phase 4 Slice E] WOLF_ScenarioModule joins the
+                    // connect-time projection list: the per-agency wire
+                    // catchups above ship raw entries to AgencyState, but
+                    // the projector splice into WOLF_ScenarioModule only
+                    // fires on the next ~30s SendScenarioModules tick.
+                    // Adding WOLF_ScenarioModule here closes the reconnect
+                    // window so a returning owner sees their per-agency
+                    // depots/routes/hoppers/terminals/crewRoutes in the
+                    // outgoing WOLF blob immediately. Integration-logic
+                    // lens [SHOULD FIX] from the Slice E review.
                     ScenarioSystem.SendScenariosToClient(client,
                         "SCANcontroller",       // S2
-                        "DMScienceScenario");   // S4
+                        "DMScienceScenario",    // S4
+                        "WOLF_ScenarioModule"); // Phase 4 (all 5 family splices)
                 }
 
                 var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<PlayerConnectionJoinMsgData>();

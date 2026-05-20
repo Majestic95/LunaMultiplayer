@@ -1379,5 +1379,157 @@ namespace Server.System.Agency
 
             MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
         }
+
+        /// <summary>
+        /// [Phase 4 Slice E — WOLF] Owner-only echo of a per-agency crew-
+        /// route batch. Emitted by <see cref="AgencyWolfCrewRouter.TryRoute"/>
+        /// after a successful upsert + persist. Peers never receive another
+        /// agency's per-agency crew routes (spec §10 Q1
+        /// PrivateAgencyResources=true) — projection through
+        /// <see cref="AgencyScenarioProjector"/>'s <c>WOLF_ScenarioModule</c>
+        /// case is the only path by which cross-agency awareness leaks into
+        /// the read-side, and projection happens per-target-client at
+        /// scene-load time.
+        ///
+        /// <para>Mirrors <see cref="SendWolfHopperStateToOwner"/> /
+        /// <see cref="SendWolfTerminalStateToOwner"/> shape including the
+        /// protective null-filter on entries + removedKeys. No-op when
+        /// gate=off / owner==null / batch empty.</para>
+        ///
+        /// <para><b>Cross-agency kerbal reject does NOT emit a separate
+        /// rejection wire.</b> Per pre-spec §2.b.v Option C, rejection is
+        /// silent on the wire — the operator-side feedback path is the
+        /// Warning log + the projector overwriting the requester's local
+        /// CrewRoute UI back to the pre-Embark snapshot on the next
+        /// <c>SendScenarioModules</c> tick. Legitimate-client UX (a Slice F
+        /// prefix on <c>WOLF_CrewTransferScenario.Launch</c> that surfaces
+        /// "kerbal already owned by another agency") is deferred to Slice F
+        /// if an operator surfaces demand. See
+        /// <see cref="AgencyWolfCrewRouteStateMsgData"/> XML "No
+        /// RejectionReason field" para for the full rationale.</para>
+        /// </summary>
+        public static void SendWolfCrewRouteStateToOwner(
+            ClientStructure owner,
+            Guid agencyId,
+            IReadOnlyList<AgencyWolfCrewRouteEntry> entries,
+            IReadOnlyList<string> removedKeys = null)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (owner == null)
+                return;
+
+            var entriesEmpty = entries == null || entries.Count == 0;
+            var removedEmpty = removedKeys == null || removedKeys.Count == 0;
+            if (entriesEmpty && removedEmpty)
+                return;
+
+            var nonNullEntries = entriesEmpty
+                ? null
+                : new List<AgencyWolfCrewRouteEntry>(entries.Count);
+            if (!entriesEmpty)
+            {
+                for (var i = 0; i < entries.Count; i++)
+                {
+                    if (entries[i] != null) nonNullEntries.Add(entries[i]);
+                }
+            }
+
+            var nonNullRemoved = removedEmpty
+                ? null
+                : new List<string>(removedKeys.Count);
+            if (!removedEmpty)
+            {
+                for (var i = 0; i < removedKeys.Count; i++)
+                {
+                    if (!string.IsNullOrEmpty(removedKeys[i])) nonNullRemoved.Add(removedKeys[i]);
+                }
+            }
+
+            var emitEntries = nonNullEntries != null && nonNullEntries.Count > 0;
+            var emitRemoved = nonNullRemoved != null && nonNullRemoved.Count > 0;
+            if (!emitEntries && !emitRemoved)
+                return;
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfCrewRouteStateMsgData>();
+            msgData.AgencyId = agencyId;
+            msgData.EntryCount = emitEntries ? nonNullEntries.Count : 0;
+            msgData.Entries = emitEntries ? nonNullEntries.ToArray() : new AgencyWolfCrewRouteEntry[0];
+            msgData.RemovedKeyCount = emitRemoved ? nonNullRemoved.Count : 0;
+            msgData.RemovedKeys = emitRemoved ? nonNullRemoved.ToArray() : new string[0];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(owner, msgData);
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice E — WOLF] Connect-time catch-up: ships the owner's
+        /// persisted <c>AgencyState.WolfCrewRoutes</c> dictionary as a single
+        /// batch <see cref="AgencyWolfCrewRouteStateMsgData"/>. Wired into
+        /// <c>HandshakeSystem.HandleHandshakeRequest</c> immediately after
+        /// <see cref="SendWolfTerminalCatchupTo"/> per the depots → routes →
+        /// hoppers → terminals → crewRoutes call-ordering invariant.
+        ///
+        /// <para><b>Ordering rationale.</b> CrewRoutes reference BOTH origin
+        /// AND destination depot per <c>CrewRoute.cs:249-250</c> —
+        /// <c>_registry.GetDepot</c> throws
+        /// <c>DepotDoesNotExistException</c> on FK miss, which would kill
+        /// OnLoad for the whole WOLF scenario. Depots ship first; crew
+        /// routes come LAST so any future client mirror that applies a
+        /// WOLF-equivalent OnLoad sequence has both endpoint depots
+        /// available before crew-route resolution runs.</para>
+        ///
+        /// <para>Sends unconditionally under gate=on, even for empty
+        /// dictionaries (same shape as <see cref="SendWolfDepotCatchupTo"/>).
+        /// REPLACE semantics on the client side — an offline-window admin
+        /// /deleteagency or Slice F migration on a stale crew route must
+        /// produce post-mutation authoritative state on reconnect.</para>
+        ///
+        /// <para><b>Chunking TODO</b> (inherited from Slice B catchup gap
+        /// per <see cref="SendWolfDepotCatchupTo"/> XML): catchup ships
+        /// <c>state.WolfCrewRoutes.Count</c> entries unconditionally. If a
+        /// megabase cohort accumulates &gt;100 crew routes
+        /// (<see cref="AgencyWolfCrewRouteStateMsgData.MaxEntryCount"/>),
+        /// the receive-side <c>InternalDeserialize</c> at slot 13 throws
+        /// <c>InvalidDataException</c> + the client disconnects at handshake
+        /// completion. Phase 3 Slice D-1 closed this for orbital via
+        /// <see cref="SendOrbitalCatchupTo"/>'s chunked loop — pattern is
+        /// available to mirror here when soak shows clipping. Acceptable
+        /// for Slice E (100 crew routes/agency is well above realistic cohort
+        /// sizes; matches the pre-existing Wolf-depot / route / hopper /
+        /// terminal gap pattern that hasn't fired in soak).</para>
+        /// </summary>
+        public static void SendWolfCrewRouteCatchupTo(ClientStructure client, AgencyState state)
+        {
+            if (!AgencySystem.PerAgencyEnabled)
+                return;
+            if (client == null || state == null)
+                return;
+
+            AgencyWolfCrewRouteEntry[] snapshot;
+            lock (AgencySystem.GetAgencyLock(state.AgencyId))
+            {
+                snapshot = new AgencyWolfCrewRouteEntry[state.WolfCrewRoutes.Count];
+                var i = 0;
+                foreach (var kvp in state.WolfCrewRoutes)
+                {
+                    if (kvp.Value == null) continue;
+                    snapshot[i++] = kvp.Value;
+                }
+                if (i < snapshot.Length)
+                    Array.Resize(ref snapshot, i);
+            }
+
+            var msgData = ServerContext.ServerMessageFactory.CreateNewMessageData<AgencyWolfCrewRouteStateMsgData>();
+            msgData.AgencyId = state.AgencyId;
+            msgData.EntryCount = snapshot.Length;
+            msgData.Entries = snapshot;
+            // See SendWolfHopperCatchupTo for the explicit-init rationale
+            // (integration-logic review #1 — guard against latent MsgData
+            // field-default refactors).
+            msgData.RemovedKeyCount = 0;
+            msgData.RemovedKeys = new string[0];
+
+            MessageQueuer.SendToClient<AgencySrvMsg>(client, msgData);
+        }
     }
 }

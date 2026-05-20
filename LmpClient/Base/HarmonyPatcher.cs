@@ -37,6 +37,7 @@ namespace LmpClient.Base
             PatchWolfRoute();
             PatchWolfHopper();
             PatchWolfTerminal();
+            PatchWolfCrewRoute();
         }
 
         /// <summary>
@@ -704,6 +705,119 @@ namespace LmpClient.Base
             catch (Exception e)
             {
                 LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF terminal methods: {e.Message}");
+            }
+        }
+
+        /// <summary>
+        /// [Phase 4 Slice E] Imperatively-registered Harmony patches on
+        /// WOLF.ScenarioPersister.CreateCrewRoute + WOLF.CrewRoute.Embark /
+        /// Disembark / Launch / CheckArrived.
+        ///
+        /// <para><b>All-or-nothing 5-method resolve.</b> If any of the 5
+        /// methods can't be resolved (WOLF source drift / version
+        /// mismatch), no postfix lands and we log a single Warning.
+        /// Mirrors the Slice C / D all-or-nothing resolve pattern.
+        /// The 5 methods are tightly coupled to the CrewRoute state
+        /// machine: CreateCrewRoute mints empty → Embark grows
+        /// passengers → Launch transitions Boarding→Enroute + sets
+        /// ArrivalTime → CheckArrived auto-transitions Enroute→Arrived
+        /// time-drivenly → Disembark drains passengers at Arrived.
+        /// Landing only some of the 5 would produce per-agency state
+        /// that's permanently out-of-sync with the operator's local
+        /// WOLF UI state. The CheckArrived hook is what the
+        /// integration-logic lens caught Slice E missing — without it,
+        /// auto-arrival never propagates to the server.</para>
+        ///
+        /// <para><b>Cross-agency kerbal reject does NOT require additional
+        /// resolve sites here.</b> The reject is enforced SERVER-SIDE in
+        /// <see cref="Server.System.Agency.AgencyWolfCrewRouter.RejectIfCrossAgencyPassenger"/>
+        /// by scanning <c>VesselStoreSystem.CurrentVessels</c> for the
+        /// kerbal's hosting vessel — no client-side reflection on the
+        /// kerbal roster is needed. The wire payload simply carries the
+        /// passenger's name, and the server resolves authority via the
+        /// vessel-proxy K1 pattern.</para>
+        /// </summary>
+        internal static void PatchWolfCrewRoute()
+        {
+            try
+            {
+                var crewRouteType = HarmonyLib.AccessTools.TypeByName("WOLF.CrewRoute");
+                var persisterType = HarmonyLib.AccessTools.TypeByName("WOLF.ScenarioPersister");
+                if (crewRouteType == null || persisterType == null)
+                {
+                    LunaLog.Log("[LMP]: [fix:WOLF-R4] WOLF.CrewRoute / ScenarioPersister types not found — WOLF (MKS WOLF) not installed, skipping per-agency crew-route postfixes.");
+                    return;
+                }
+
+                var passengerInterface = HarmonyLib.AccessTools.TypeByName("WOLF.IPassenger");
+                if (passengerInterface == null)
+                {
+                    LunaLog.LogWarning("[LMP]: [fix:WOLF-R4] WOLF.IPassenger interface not found — WOLF version mismatch? Per-agency WOLF crew-route routing NOT active.");
+                    return;
+                }
+
+                var createCrewRouteMethod = HarmonyLib.AccessTools.Method(persisterType, "CreateCrewRoute",
+                    new[] { typeof(string), typeof(string), typeof(string), typeof(string), typeof(int), typeof(int), typeof(double) });
+                var embarkMethod = HarmonyLib.AccessTools.Method(crewRouteType, "Embark",
+                    new[] { passengerInterface });
+                var disembarkMethod = HarmonyLib.AccessTools.Method(crewRouteType, "Disembark",
+                    new[] { passengerInterface });
+                var launchMethod = HarmonyLib.AccessTools.Method(crewRouteType, "Launch",
+                    new[] { typeof(double) });
+                var checkArrivedMethod = HarmonyLib.AccessTools.Method(crewRouteType, "CheckArrived",
+                    new[] { typeof(double) });
+
+                if (createCrewRouteMethod == null || embarkMethod == null || disembarkMethod == null
+                    || launchMethod == null || checkArrivedMethod == null)
+                {
+                    LunaLog.LogWarning(
+                        $"[LMP]: [fix:WOLF-R4] WOLF crew-route method resolve failed " +
+                        $"(CreateCrewRoute={(createCrewRouteMethod != null ? "OK" : "MISSING")}, " +
+                        $"Embark={(embarkMethod != null ? "OK" : "MISSING")}, " +
+                        $"Disembark={(disembarkMethod != null ? "OK" : "MISSING")}, " +
+                        $"Launch={(launchMethod != null ? "OK" : "MISSING")}, " +
+                        $"CheckArrived={(checkArrivedMethod != null ? "OK" : "MISSING")}) — " +
+                        "WOLF version mismatch? Per-agency WOLF crew-route routing NOT active; " +
+                        "under gate=on the legacy 30s SHA broadcast for WOLF_ScenarioModule is " +
+                        "suppressed so crew-route state will not propagate at all (sync lag = infinite). " +
+                        "Under gate=off the shared-mode broadcast continues unchanged.");
+                    return;
+                }
+
+                var createCrewRoutePostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.ScenarioPersister_CreateCrewRoutePostfix),
+                    nameof(LmpClient.Harmony.ScenarioPersister_CreateCrewRoutePostfix.Postfix));
+                var embarkPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.CrewRoute_EmbarkPostfix),
+                    nameof(LmpClient.Harmony.CrewRoute_EmbarkPostfix.Postfix));
+                var disembarkPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.CrewRoute_DisembarkPostfix),
+                    nameof(LmpClient.Harmony.CrewRoute_DisembarkPostfix.Postfix));
+                var launchPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.CrewRoute_LaunchPostfix),
+                    nameof(LmpClient.Harmony.CrewRoute_LaunchPostfix.Postfix));
+                var checkArrivedPrefix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.CrewRoute_CheckArrivedPostfix),
+                    nameof(LmpClient.Harmony.CrewRoute_CheckArrivedPostfix.Prefix));
+                var checkArrivedPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.CrewRoute_CheckArrivedPostfix),
+                    nameof(LmpClient.Harmony.CrewRoute_CheckArrivedPostfix.Postfix));
+
+                HarmonyInstance.Patch(createCrewRouteMethod, postfix: createCrewRoutePostfix);
+                HarmonyInstance.Patch(embarkMethod, postfix: embarkPostfix);
+                HarmonyInstance.Patch(disembarkMethod, postfix: disembarkPostfix);
+                HarmonyInstance.Patch(launchMethod, postfix: launchPostfix);
+                HarmonyInstance.Patch(checkArrivedMethod, prefix: checkArrivedPrefix, postfix: checkArrivedPostfix);
+
+                LunaLog.Log(
+                    "[LMP]: [fix:WOLF-R4] Patched WOLF.ScenarioPersister.CreateCrewRoute + " +
+                    "WOLF.CrewRoute.Embark/Disembark/Launch/CheckArrived — per-agency " +
+                    "crew-route routing active under PerAgencyCareerEnabled (server-side " +
+                    "cross-agency kerbal reject per spec §10 Q3).");
+            }
+            catch (Exception e)
+            {
+                LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] Could not patch WOLF crew-route methods: {e.Message}");
             }
         }
 

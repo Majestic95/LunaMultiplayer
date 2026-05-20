@@ -170,6 +170,25 @@ namespace LmpClient.Systems.Agency
                     // author moves real apply logic into this branch.
                     LunaLog.Log("[Agency]: WolfTerminalState received — client mirror not yet wired (Phase 4 Slice D, future-slice follow-up).");
                     break;
+                case AgencyMessageType.WolfCrewRouteState:
+                    // [Phase 4 Slice E] Forward-compat stub. Same shape as
+                    // WolfDepotState / RouteState / HopperState / TerminalState.
+                    // HandshakeSystem ships AgencyWolfCrewRouteStateMsgData
+                    // unconditionally under gate=on (last in the WOLF
+                    // catchup chain after depots / routes / hoppers /
+                    // terminals — CrewRoutes have origin+destination FK to
+                    // depots like Routes do). Every Create/Embark/Disembark/
+                    // Launch echo from AgencyWolfCrewRouter also arrives
+                    // here, AND the cross-agency-kerbal-reject silent-drop
+                    // produces NO inbound to the client (the projector
+                    // overwrites the local CrewRoute UI on next
+                    // SendScenarioModules tick — pre-spec §8.f acceptable
+                    // desync). A future client mirror author moves real
+                    // apply logic into this branch (upsert-by-UniqueId +
+                    // RemovedKeys handling + REPLACE on catchup per the
+                    // AgencyWolfCrewRouteStateMsgData XML).
+                    LunaLog.Log("[Agency]: WolfCrewRouteState received — client mirror not yet wired (Phase 4 Slice E, future-slice follow-up).");
+                    break;
                 default:
                     LunaLog.LogWarning($"[Agency]: Unknown AgencyMessageType {msgData.AgencyMessageType} — dropping.");
                     break;

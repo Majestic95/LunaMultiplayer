@@ -146,6 +146,27 @@ namespace Server.Message
                     // ScenarioPersister.cs:320-329).
                     AgencyWolfHopperRouter.TryRoute(client, (AgencyWolfHopperStateMsgData)data);
                     break;
+                case AgencyMessageType.WolfCrewRouteState:
+                    // [Phase 4 Slice E] MKS WOLF crew-route per-agency routing.
+                    // Inbound from client postfixes on
+                    // ScenarioPersister.CreateCrewRoute + CrewRoute.Embark /
+                    // Disembark / Launch (Slice E client-side). CrewRoutes are
+                    // UniqueId-keyed (CrewRoute.cs:90 — ToString("N") WITHOUT
+                    // hyphens; matches the WolfTerminals "N" form precedent).
+                    // **Distinctive Phase 4 surface: cross-agency kerbal
+                    // authority gate** — passengers are vessel-proxy-authority-
+                    // checked against each kerbal's hosting vessel's
+                    // OwningAgencyId (mirrors K1 grief guard at
+                    // KerbalSystem.CanRemoveKerbalUnderK1). Owner-only echo via
+                    // AgencySystemSender.SendWolfCrewRouteStateToOwner. The
+                    // projector splice in
+                    // AgencyScenarioProjector.SpliceAgencyWolfState FK-sweeps
+                    // CrewRoutes against the just-emitted per-agency depot pool
+                    // (CrewRoute.OnLoad at CrewRoute.cs:249-250 throws
+                    // DepotDoesNotExistException on FK miss — same Routes-style
+                    // strict FK behavior).
+                    AgencyWolfCrewRouter.TryRoute(client, (AgencyWolfCrewRouteStateMsgData)data);
+                    break;
                 case AgencyMessageType.WolfTerminalState:
                     // [Phase 4 Slice D] MKS WOLF terminal per-agency routing.
                     // Inbound from client postfixes on

@@ -1354,12 +1354,18 @@ namespace Server.System.Agency
                 midFlightSuffix + ". " +
                 "The Phase 4 projector strips ALL 5 WOLF child node families on first per-agency " +
                 "connect; accumulated WOLF logistics graph is NOT migrated. " +
-                "EVEN THE ROUTED FAMILIES LOSE THEIR PRE-UPGRADE STATE: Slice B-2 (depots), " +
-                "Slice C (routes), and Slice D (hoppers + terminals) route fresh mutations into " +
-                "per-agency AgencyState, but the stripper has no migration path for pre-existing " +
-                "shared entries — only mutations made AFTER gate=on populate WolfDepots / " +
-                "WolfRoutes / WolfHoppers / WolfTerminals. CrewRoutes remain fully stripped " +
-                "(Slice E pending). " +
+                "EVEN THE ROUTED FAMILIES LOSE THEIR PRE-UPGRADE STATE: Slices B-2 (depots), " +
+                "C (routes), D (hoppers + terminals), and E (crew routes) route fresh mutations " +
+                "into per-agency AgencyState, but the stripper has no migration path for " +
+                "pre-existing shared entries — only mutations made AFTER gate=on populate " +
+                "WolfDepots / WolfRoutes / WolfHoppers / WolfTerminals / WolfCrewRoutes. " +
+                "All 5 families routed; the kerbal-stranding hazard for mid-flight CrewRoutes " +
+                "is the load-bearing operator concern — passengers in RosterStatus.Missing are " +
+                "permanently orphaned by the strip with no migration path. " +
+                "ADMIN NOTE: admin /setvesselagency on a kerbal currently in an Enroute CrewRoute " +
+                "is a NO-OP — passenger lists are fixed at CreateCrewRoute time per WOLF source " +
+                "contract; the kerbal cannot be moved to another agency until the route reaches " +
+                "Arrived and the passenger Disembarks. " +
                 "RECOVERY OPTIONS: " +
                 "(1) BEFORE upgrade: ensure no CrewRoutes are mid-flight (let in-flight routes " +
                 "complete to Arrived OR Disembark passengers OR delete routes via in-game UI). " +

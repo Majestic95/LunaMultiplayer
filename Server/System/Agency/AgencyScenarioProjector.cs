@@ -1662,25 +1662,28 @@ namespace Server.System.Agency
         /// </code>
         ///
         /// <para><b>Strip ALL 5 child node families first</b> (clean the
-        /// slate) — Slice B-2 strips and emits DEPOTS; Slice C strips and
-        /// emits ROUTES (with FK sweep — see below); Slices D-E will
-        /// extend this method to also emit HOPPERS / TERMINALS /
-        /// CREWROUTES from <c>agency.WolfHoppers</c> / etc. Until then,
-        /// the missing 3 child nodes load as empty in WOLF (per
-        /// <c>ScenarioPersister.OnLoad</c>'s <c>HasNode</c> guards at
-        /// lines 289/303/314/332/343).</para>
+        /// slate). The 5 emit blocks for the 5 families are all in
+        /// place: Slice B-2 added DEPOTS; Slice C added ROUTES (with FK
+        /// sweep — see below); Slice D added HOPPERS (FK-swept) +
+        /// TERMINALS (no FK); Slice E added CREWROUTES (origin+dest
+        /// FK-swept). WOLF's <c>ScenarioPersister.OnLoad</c>'s
+        /// <c>HasNode</c> guards at lines 289/303/314/332/343 tolerate a
+        /// missing family — emit only when the per-agency snapshot has
+        /// non-empty entries (lazy-allocate container).</para>
         ///
         /// <para><b>Emit ORDER: DEPOTS FIRST</b> (pre-spec §2.c) because
         /// WOLF's <c>ScenarioPersister.OnLoad</c> at line 288-302 loads
         /// depots first and other entity types call
         /// <c>_registry.GetDepot</c> during their <c>OnLoad</c>. Slice C
-        /// emits ROUTES AFTER the depot emit + runs the foreign-key
-        /// integrity sweep (pre-spec §2.c) to drop routes that reference
-        /// depots not in the agency's pool — otherwise WOLF's OnLoad
-        /// throws <c>DepotDoesNotExistException</c> and the scene load
-        /// hangs. Slices D-E inserting their emit calls must mirror the
-        /// AFTER-DEPOTS placement (Hoppers + CrewRoutes also reference
-        /// depots).</para>
+        /// ROUTES + Slice D HOPPERS + Slice E CREWROUTES all emit AFTER
+        /// the depot emit + run the foreign-key integrity sweep against
+        /// the just-emitted depot pool (pre-spec §2.c) to drop entries
+        /// that reference depots not in the agency's pool — otherwise
+        /// WOLF's OnLoad throws <c>DepotDoesNotExistException</c> on
+        /// Routes/CrewRoutes or silently drops Hoppers, and the scene
+        /// load misbehaves. The shared depotKeySet HashSet is built
+        /// lazily by the <c>EnsureDepotKeySet</c> local function at
+        /// method scope so all three FK consumers share one build.</para>
         ///
         /// <para><b>Per-entry isolation</b>: a malformed entry's failure
         /// is logged + skipped, siblings continue. Whole-scenario parse
@@ -1730,6 +1733,7 @@ namespace Server.System.Agency
             AgencyWolfRouteEntry[] routeSnapshot;
             AgencyWolfHopperEntry[] hopperSnapshot;
             AgencyWolfTerminalEntry[] terminalSnapshot;
+            AgencyWolfCrewRouteEntry[] crewRouteSnapshot;
             lock (AgencySystem.GetAgencyLock(targetAgency.AgencyId))
             {
                 depotSnapshot = new AgencyWolfDepotEntry[targetAgency.WolfDepots.Count];
@@ -1771,6 +1775,16 @@ namespace Server.System.Agency
                 }
                 if (ti < terminalSnapshot.Length)
                     Array.Resize(ref terminalSnapshot, ti);
+
+                crewRouteSnapshot = new AgencyWolfCrewRouteEntry[targetAgency.WolfCrewRoutes.Count];
+                var ci = 0;
+                foreach (var kvp in targetAgency.WolfCrewRoutes)
+                {
+                    if (kvp.Value == null) continue;
+                    crewRouteSnapshot[ci++] = kvp.Value;
+                }
+                if (ci < crewRouteSnapshot.Length)
+                    Array.Resize(ref crewRouteSnapshot, ci);
             }
 
             // Emit DEPOTS first (WOLF OnLoad ordering invariant). Slices
@@ -1865,15 +1879,7 @@ namespace Server.System.Agency
 
             if (routeSnapshot.Length > 0)
             {
-                if (depotKeySet == null && depotSnapshot.Length > 0)
-                {
-                    depotKeySet = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var d in depotSnapshot)
-                    {
-                        if (d == null) continue;
-                        depotKeySet.Add($"{d.Body ?? string.Empty}|{d.Biome ?? string.Empty}");
-                    }
-                }
+                EnsureDepotKeySet();
 
                 ConfigNode routesContainer = null;
                 foreach (var entry in routeSnapshot)
@@ -1962,15 +1968,7 @@ namespace Server.System.Agency
             // routes block; build it here if the routes block was empty).
             if (hopperSnapshot.Length > 0)
             {
-                if (depotKeySet == null && depotSnapshot.Length > 0)
-                {
-                    depotKeySet = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var d in depotSnapshot)
-                    {
-                        if (d == null) continue;
-                        depotKeySet.Add($"{d.Body ?? string.Empty}|{d.Biome ?? string.Empty}");
-                    }
-                }
+                EnsureDepotKeySet();
 
                 ConfigNode hoppersContainer = null;
                 foreach (var entry in hopperSnapshot)
@@ -2073,27 +2071,169 @@ namespace Server.System.Agency
                 }
             }
 
-            // [Phase 4 Slice E insertion point]
-            // Slice E inserts WOLF_CREWROUTES emit here — reuse depotKeySet
-            //   (CrewRoutes have origin + destination FK like routes).
+            // [Phase 4 Slice E] WOLF_CREWROUTES emit with FK integrity
+            // sweep against the per-agency depot pool. WOLF's
+            // CrewRoute.OnLoad at CrewRoute.cs:249-250 calls
+            // _registry.GetDepot(OriginBody, OriginBiome) AND
+            // _registry.GetDepot(DestinationBody, DestinationBiome) — both
+            // throw DepotDoesNotExistException on FK miss, killing OnLoad
+            // for the whole WOLF scenario. Same strict-FK behaviour as
+            // Slice C Routes; emit must enforce the contract.
             //
-            // Lazy-build pattern: depotKeySet may already be populated by
-            //   the Routes block (~line 1846) AND/OR the Hoppers block
-            //   (~line 1965). When all of Routes + Hoppers are empty but
-            //   CrewRoutes are present, Slice E needs the same
-            //   `if (depotKeySet == null && depotSnapshot.Length > 0) { ... }`
-            //   build at the top of its CrewRoutes block — see the Routes
-            //   block at lines 1846-1854 for the canonical idiom. If this
-            //   pattern repeats a third time, consider extracting to a
-            //   `BuildDepotKeySet(depotSnapshot)` static local function so
-            //   Slice E inherits one source of truth — cosmetic, not load-
-            //   bearing (the duplication is per-Slice scope-isolated).
-            //
-            // Slice E additionally consults the K1 kerbal-authority guard
-            //   per pre-spec §8 (separate from depotKeySet — kerbals are
-            //   tracked via their own per-vessel lmpOwningAgency stamps).
+            // The cross-agency kerbal authority gate (pre-spec §8) does
+            // NOT fire in the projector — it's authoritatively enforced
+            // upstream in AgencyWolfCrewRouter.RejectIfCrossAgencyPassenger
+            // (cross-agency passengers never reach AgencyState.WolfCrewRoutes
+            // in the first place). The projector trusts the persisted
+            // snapshot.
+            if (crewRouteSnapshot.Length > 0)
+            {
+                // Third consumer of the lazy depotKeySet. Routes block (~line
+                // 1864) + Hoppers block (~line 1963) are the prior consumers;
+                // the marker comment they share documented this extraction
+                // for Slice E. The local function keeps the lazy semantics
+                // (single build per projection, only when there are entries
+                // that consume it) while collapsing the duplicated 7-line
+                // build idiom to a single call site. Pure pure: no captured
+                // closures except the read-only depotSnapshot.
+                EnsureDepotKeySet();
+
+                ConfigNode crewRoutesContainer = null;
+                foreach (var entry in crewRouteSnapshot)
+                {
+                    if (entry == null)
+                        continue;
+                    try
+                    {
+                        if (string.IsNullOrEmpty(entry.UniqueId)
+                            || string.IsNullOrEmpty(entry.OriginBody) || string.IsNullOrEmpty(entry.OriginBiome)
+                            || string.IsNullOrEmpty(entry.DestinationBody) || string.IsNullOrEmpty(entry.DestinationBiome))
+                        {
+                            // Malformed entry — drop, keep siblings.
+                            continue;
+                        }
+
+                        // FK sweep: both origin AND destination depot must
+                        // be in the emitted pool — mirrors the Slice C
+                        // Routes block. CrewRoute.OnLoad is strict-FK like
+                        // Route.OnLoad (throws DepotDoesNotExistException);
+                        // emitting an FK-miss entry would crash WOLF's
+                        // entire scenario load.
+                        var originKey = $"{entry.OriginBody}|{entry.OriginBiome}";
+                        var destKey = $"{entry.DestinationBody}|{entry.DestinationBiome}";
+                        if (depotKeySet == null
+                            || !depotKeySet.Contains(originKey)
+                            || !depotKeySet.Contains(destKey))
+                        {
+                            LunaLog.Debug($"[fix:WOLF-R4] CrewRoute '{entry.UniqueId}' {originKey}→{destKey} dropped from projection (agency {targetAgency.AgencyId:N}): origin or destination depot missing from per-agency pool — will reappear once both depots' postfixes have routed.");
+                            continue;
+                        }
+
+                        // Lazy-allocate the CREWROUTES container so an
+                        // FK-sweep-empty result emits no container node at
+                        // all. Matches the Slice C Routes + Slice D Hoppers
+                        // lazy-allocate pattern.
+                        if (crewRoutesContainer == null)
+                        {
+                            crewRoutesContainer = new ConfigNode("") { Name = "CREWROUTES" };
+                            node.AddNode(crewRoutesContainer);
+                        }
+
+                        // Per WOLF CrewRoute.OnSave at CrewRoute.cs:253-276,
+                        // each crew route persists as a "ROUTE" child node
+                        // (NOT "CREWROUTE" — the per-entry name is "ROUTE",
+                        // matching WOLF's naming choice; cf. the
+                        // PASSENGER_NODE_NAME + ROUTE_NODE_NAME consts at
+                        // CrewRoute.cs:44-45). Field set + ordering mirrors
+                        // WOLF source exactly so OnLoad's value-by-name
+                        // lookup at CrewRoute.cs:200-223 succeeds. Doubles
+                        // round-trip via "R" + invariant culture (Invariant 9
+                        // / BUG-013 precedent — CrewRoute.OnLoad uses
+                        // double.Parse which is culture-sensitive in older
+                        // KSP; invariant string keeps load-side parse stable).
+                        var crNode = new ConfigNode("") { Name = "ROUTE" };
+                        crNode.CreateValue(new CfgNodeValue<string, string>("ArrivalTime", entry.ArrivalTime.ToString("R", CultureInfo.InvariantCulture)));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("DestinationBiome", entry.DestinationBiome));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("DestinationBody", entry.DestinationBody));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("Duration", entry.Duration.ToString("R", CultureInfo.InvariantCulture)));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("EconomyBerths", entry.EconomyBerths.ToString(CultureInfo.InvariantCulture)));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("FlightNumber", entry.FlightNumber ?? string.Empty));
+                        // FlightStatus emitted as the enum-NAME string per
+                        // CrewRoute.OnSave at CrewRoute.cs:262 (WOLF writes
+                        // routeNode.AddValue(nameof(FlightStatus),
+                        // FlightStatus) which stringifies the
+                        // WOLFUI.FlightStatus enum). Forward-compat against
+                        // enum reordering: the string form survives;
+                        // the int form would not. Empty string maps to
+                        // FlightStatus.Unknown at CrewRoute.cs:240-246 (then
+                        // recovered to Boarding + Passengers cleared) —
+                        // safe forward-compat for a malformed wire payload.
+                        crNode.CreateValue(new CfgNodeValue<string, string>("FlightStatus", entry.FlightStatus ?? string.Empty));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("LuxuryBerths", entry.LuxuryBerths.ToString(CultureInfo.InvariantCulture)));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("OriginBiome", entry.OriginBiome));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("OriginBody", entry.OriginBody));
+                        crNode.CreateValue(new CfgNodeValue<string, string>("UniqueId", entry.UniqueId));
+
+                        // Nested PASSENGERS → PASSENGER × N per
+                        // Passenger.OnSave at Passenger.cs:68-76. Container
+                        // name is PASSENGERS (WOLF const at CrewRoute.cs:44
+                        // PASSENGERS_NODE_NAME) — emitted only when there's
+                        // at least one valid passenger so an empty list
+                        // doesn't bloat the wire / disk. WOLF tolerates
+                        // missing PASSENGERS at OnLoad CrewRoute.cs:225-236.
+                        if (entry.Passengers != null && entry.Passengers.Count > 0)
+                        {
+                            ConfigNode passengersContainer = null;
+                            foreach (var passenger in entry.Passengers)
+                            {
+                                if (passenger == null || string.IsNullOrEmpty(passenger.Name))
+                                    continue;
+                                if (passengersContainer == null)
+                                {
+                                    passengersContainer = new ConfigNode("") { Name = "PASSENGERS" };
+                                    crNode.AddNode(passengersContainer);
+                                }
+                                var pNode = new ConfigNode("") { Name = "PASSENGER" };
+                                pNode.CreateValue(new CfgNodeValue<string, string>("Name", passenger.Name));
+                                pNode.CreateValue(new CfgNodeValue<string, string>("DisplayName", passenger.DisplayName ?? string.Empty));
+                                pNode.CreateValue(new CfgNodeValue<string, string>("IsTourist", passenger.IsTourist.ToString(CultureInfo.InvariantCulture)));
+                                pNode.CreateValue(new CfgNodeValue<string, string>("Occupation", passenger.Occupation ?? string.Empty));
+                                pNode.CreateValue(new CfgNodeValue<string, string>("Stars", passenger.Stars.ToString(CultureInfo.InvariantCulture)));
+                                passengersContainer.AddNode(pNode);
+                            }
+                        }
+
+                        crewRoutesContainer.AddNode(crNode);
+                    }
+                    catch (Exception)
+                    {
+                        // Per-entry isolation — drop this crew route, keep others.
+                    }
+                }
+            }
 
             return node.ToString();
+
+            // Local function: lazy-build the per-WOLF-emit depotKeySet
+            // shared by the Routes (~line 1864) + Hoppers (~line 1963) +
+            // CrewRoutes (above) FK consumers. Captures depotKeySet
+            // (out-var of the enclosing scope) and depotSnapshot. Build
+            // only once per projection — depotKeySet starts null and
+            // stays null until at least one FK consumer has entries.
+            // Extracted in Slice E as the third consumer per the prior
+            // Slices' insertion-point marker; cosmetic but collapses 7
+            // duplicated lines to a single call site.
+            void EnsureDepotKeySet()
+            {
+                if (depotKeySet != null || depotSnapshot.Length == 0)
+                    return;
+                depotKeySet = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var d in depotSnapshot)
+                {
+                    if (d == null) continue;
+                    depotKeySet.Add($"{d.Body ?? string.Empty}|{d.Biome ?? string.Empty}");
+                }
+            }
         }
     }
 }
