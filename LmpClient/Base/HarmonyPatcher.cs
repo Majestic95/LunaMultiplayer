@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Reflection;
 namespace LmpClient.Base
 {
@@ -9,6 +10,14 @@ namespace LmpClient.Base
         public static void Awake()
         {
             HarmonyInstance.PatchAll(Assembly.GetExecutingAssembly());
+            // Wire the production gate-state resolver into the WOLF debouncer.
+            // The debouncer can't reference SettingsSystem directly because the
+            // SettingsSystem type initializer pulls in UnityEngine.CoreModule
+            // which is unavailable in the LmpClientTest reference set; the
+            // resolver indirection keeps the debouncer pure and tests inject a
+            // bool-returning closure of their own.
+            LmpClient.Systems.Agency.WolfDepotDebouncer.GateResolver =
+                () => LmpClient.Systems.SettingsSys.SettingsSystem.ServerSettings.PerAgencyCareerEnabled;
             PatchOptionalMods();
         }
 
@@ -334,8 +343,8 @@ namespace LmpClient.Base
         }
 
         /// <summary>
-        /// [Phase 4 Slice B-2] WOLF-R4 — Patches three WOLF entry points with
-        /// per-agency depot mutation postfixes:
+        /// [Phase 4 Slice B-2 + B-3] WOLF-R4 — Patches five WOLF entry points
+        /// with per-agency depot mutation postfixes:
         /// <list type="bullet">
         ///   <item><c>WOLF.ScenarioPersister.CreateDepot(string body, string biome)</c>
         ///        — emits the new (or existing-idempotent) depot's snapshot.</item>
@@ -343,34 +352,34 @@ namespace LmpClient.Base
         ///        to <c>IsEstablished = true</c>.</item>
         ///   <item><c>WOLF.Depot.Survey()</c> — emits the depot post-flip
         ///        to <c>IsSurveyed = true</c>.</item>
+        ///   <item><c>WOLF.Depot.NegotiateProvider(Dictionary&lt;string, int&gt;)</c>
+        ///        — fires on every active producer-side resource conversion;
+        ///        debounced through <see cref="LmpClient.Systems.Agency.WolfDepotDebouncer"/>
+        ///        per pre-spec §3.e. <b>Slice B-3.</b></item>
+        ///   <item><c>WOLF.Depot.NegotiateConsumer(Dictionary&lt;string, int&gt;)</c>
+        ///        — fires on every active consumer-side resource conversion;
+        ///        same debounce path as NegotiateProvider. <b>Slice B-3.</b></item>
         /// </list>
-        ///
-        /// <para><b>Negotiate postfixes deferred to Slice B-3</b> per pre-spec
-        /// §3.e — <c>Depot.NegotiateProvider</c> + <c>NegotiateConsumer</c>
-        /// fire at MKS resource-conversion cadence (every <c>FixedUpdate</c>
-        /// on a busy depot) and need a debounce layer (collect on tick,
-        /// batch-emit on 1s timer). Slice B-3 will add the debounce + the
-        /// two postfixes. Until then, ResourceStreams sync lags behind WOLF
-        /// UI by the 30s SHA cadence under gate=on — functionally correct on
-        /// the per-agency router's read side (ResourceStreams round-trip
-        /// through AgencyState persistence + projector emit) but visibly
-        /// stale in operator gameplay.</para>
         ///
         /// <para><b>Brittleness mitigation</b> (pre-spec §6 + the per-postfix
         /// XML notes): WOLF type resolution via
         /// <see cref="HarmonyLib.AccessTools.TypeByName"/> at boot. A single
         /// <c>[fix:WOLF-R4]</c> warning fires on missing-type or signature-
-        /// rename and all three patches become no-ops for the session.
+        /// rename and all five patches become no-ops for the session.
         /// Graceful no-op when WOLF isn't installed — matches the MKS-R0 /
         /// R1 / R2 self-disable pattern + single grep namespace.</para>
         ///
-        /// <para><b>All-or-nothing on the three method resolves.</b> If
+        /// <para><b>All-or-nothing on the five method resolves.</b> If
         /// <c>CreateDepot</c> resolves but <c>Establish</c> doesn't, the
         /// state-flip events would silently disappear and operators would
         /// see depots register on creation but never advance to
-        /// Established/Surveyed under gate=on. Fail the entire patch group
-        /// in that case so the operator's signal is a single Warning
-        /// instead of "depots are slow to update, why?"</para>
+        /// Established/Surveyed under gate=on. Similarly, if the Slice B-2
+        /// trio resolves but a Slice B-3 Negotiate method does not, the
+        /// ResourceStreams sync silently lags by 30s SHA cadence (under
+        /// gate=on the legacy SHA is suppressed, so the lag is infinite).
+        /// Fail the entire patch group on any miss so the operator's
+        /// signal is a single Warning instead of "depots are slow to
+        /// update, why?"</para>
         /// </summary>
         internal static void PatchWolfDepot()
         {
@@ -387,16 +396,29 @@ namespace LmpClient.Base
                 var createMethod = HarmonyLib.AccessTools.Method(persisterType, "CreateDepot", new[] { typeof(string), typeof(string) });
                 var establishMethod = HarmonyLib.AccessTools.Method(depotType, "Establish", Type.EmptyTypes);
                 var surveyMethod = HarmonyLib.AccessTools.Method(depotType, "Survey", Type.EmptyTypes);
+                // Slice B-3 — Negotiate{Provider,Consumer}(Dictionary<string,int>).
+                // Both are public instance methods on WOLF.Depot per
+                // Depot.cs:131-217. The Dictionary<string,int> parameter
+                // is bound explicitly so a future signature drift (e.g.
+                // string-keyed-by-resourceName overload) fails resolution
+                // loudly rather than binding to the wrong overload.
+                var negotiateProviderMethod = HarmonyLib.AccessTools.Method(depotType, "NegotiateProvider", new[] { typeof(Dictionary<string, int>) });
+                var negotiateConsumerMethod = HarmonyLib.AccessTools.Method(depotType, "NegotiateConsumer", new[] { typeof(Dictionary<string, int>) });
 
-                if (createMethod == null || establishMethod == null || surveyMethod == null)
+                if (createMethod == null || establishMethod == null || surveyMethod == null
+                    || negotiateProviderMethod == null || negotiateConsumerMethod == null)
                 {
                     LunaLog.LogWarning(
                         $"[LMP]: [fix:WOLF-R4] WOLF method resolve failed " +
                         $"(CreateDepot={(createMethod != null ? "OK" : "MISSING")}, " +
                         $"Establish={(establishMethod != null ? "OK" : "MISSING")}, " +
-                        $"Survey={(surveyMethod != null ? "OK" : "MISSING")}) — " +
+                        $"Survey={(surveyMethod != null ? "OK" : "MISSING")}, " +
+                        $"NegotiateProvider={(negotiateProviderMethod != null ? "OK" : "MISSING")}, " +
+                        $"NegotiateConsumer={(negotiateConsumerMethod != null ? "OK" : "MISSING")}) — " +
                         "WOLF version mismatch? Per-agency WOLF depot routing NOT active; " +
-                        "shared-mode WOLF broadcast continues but per-agency partition will not see runtime mutations.");
+                        "under gate=on the legacy 30s SHA broadcast is suppressed so depot " +
+                        "state will not propagate at all (sync lag = infinite). Under gate=off " +
+                        "the shared-mode broadcast continues unchanged.");
                     return;
                 }
 
@@ -409,15 +431,24 @@ namespace LmpClient.Base
                 var surveyPostfix = new HarmonyLib.HarmonyMethod(
                     typeof(LmpClient.Harmony.Depot_SurveyPostfix),
                     nameof(LmpClient.Harmony.Depot_SurveyPostfix.Postfix));
+                var negotiateProviderPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.Depot_NegotiateProviderPostfix),
+                    nameof(LmpClient.Harmony.Depot_NegotiateProviderPostfix.Postfix));
+                var negotiateConsumerPostfix = new HarmonyLib.HarmonyMethod(
+                    typeof(LmpClient.Harmony.Depot_NegotiateConsumerPostfix),
+                    nameof(LmpClient.Harmony.Depot_NegotiateConsumerPostfix.Postfix));
 
                 HarmonyInstance.Patch(createMethod, postfix: createPostfix);
                 HarmonyInstance.Patch(establishMethod, postfix: establishPostfix);
                 HarmonyInstance.Patch(surveyMethod, postfix: surveyPostfix);
+                HarmonyInstance.Patch(negotiateProviderMethod, postfix: negotiateProviderPostfix);
+                HarmonyInstance.Patch(negotiateConsumerMethod, postfix: negotiateConsumerPostfix);
 
                 LunaLog.Log(
                     "[LMP]: [fix:WOLF-R4] Patched WOLF.ScenarioPersister.CreateDepot + " +
-                    "WOLF.Depot.Establish + WOLF.Depot.Survey — per-agency depot routing " +
-                    "active under PerAgencyCareerEnabled. (Negotiate postfixes deferred to Slice B-3.)");
+                    "WOLF.Depot.Establish + Survey + NegotiateProvider + NegotiateConsumer — " +
+                    "per-agency depot routing active under PerAgencyCareerEnabled. " +
+                    "Negotiate path debounced via WolfDepotDebouncer (1s flush interval).");
             }
             catch (Exception e)
             {

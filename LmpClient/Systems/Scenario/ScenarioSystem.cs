@@ -198,12 +198,13 @@ namespace LmpClient.Systems.Scenario
             // unchanged (pre-Phase-4 behaviour preserved). The companion
             // client-side Harmony postfixes on ScenarioPersister.CreateDepot
             // / Depot.Establish / Survey emit per-mutation per-agency wire
-            // in Slice B-2. The Depot.Negotiate* postfixes (debounced
-            // hot-path per pre-spec §3.e) are deferred to Slice B-3 — until
-            // then, ResourceStreams sync lags behind WOLF UI by the 30s
-            // SHA cadence under gate=on, but Depot.IsEstablished /
-            // IsSurveyed + depot creation events propagate immediately
-            // via the 3 postfixes that DID ship.
+            // in Slice B-2, and the Depot.Negotiate* postfixes ship the
+            // debounced hot-path per pre-spec §3.e in Slice B-3 (debounce
+            // buffer in WolfDepotDebouncer with 1s flush interval, full
+            // depot snapshot via WolfDepotReflection.BuildEntryFromDepot).
+            // ResourceStreams therefore propagate at most 1s after WOLF UI
+            // reflects them under gate=on; all 5 Slice-B postfixes share
+            // the same all-or-nothing reflection cache in HarmonyPatcher.
             "WOLF_ScenarioModule",
         };
 

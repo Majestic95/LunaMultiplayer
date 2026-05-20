@@ -52,6 +52,16 @@ namespace LmpClient.Harmony
 
         private static bool _depotResolved;
         private static bool _depotResolveFailed;
+        // Mirrors the depot-side one-shot pattern for the IResourceStream
+        // accessors. Slice B-3 fires the Negotiate postfixes at MKS
+        // resource-conversion cadence (~50 Hz on a busy depot); without this
+        // flag, a stream-side schema drift would re-attempt resolve + re-log
+        // a Warning on every Negotiate invocation, flooding KSP.log. Set on
+        // first TryResolveStreamAccessors failure; consulted at the lazy
+        // gate inside ExtractResourceStreams. (Slice B-2 latent for the
+        // low-cadence Create/Establish/Survey postfixes; promoted to
+        // load-bearing by Slice B-3's 50 Hz call path.)
+        private static bool _streamResolveFailed;
 
         // Once-only warning gate so a runtime extraction failure doesn't
         // flood KSP.log on the hot-path postfix.
@@ -142,6 +152,7 @@ namespace LmpClient.Harmony
             {
                 if (streamObj == null) continue;
 
+                if (_streamResolveFailed) return streams;
                 if (_streamResourceName == null)
                 {
                     // First non-null stream — resolve the IResourceStream
@@ -173,6 +184,8 @@ namespace LmpClient.Harmony
 
         private static bool TryResolveStreamAccessors(Type streamType)
         {
+            if (_streamResolveFailed) return false;
+
             const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
 
             try
@@ -184,6 +197,7 @@ namespace LmpClient.Harmony
             }
             catch (Exception e)
             {
+                _streamResolveFailed = true;
                 LunaLog.LogWarning($"[LMP]: [fix:WOLF-R4] WOLF.IResourceStream reflection resolve failed: {e.Message}. Per-agency WOLF ResourceStreams sync DISABLED for this session.");
                 return false;
             }

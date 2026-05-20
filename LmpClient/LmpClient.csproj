@@ -172,6 +172,8 @@
     <Compile Include="Harmony\ModuleDockingNode_Undock.cs" />
     <Compile Include="Harmony\ModuleDockingNode_UndockSameVessel.cs" />
     <Compile Include="Harmony\Depot_EstablishPostfix.cs" />
+    <Compile Include="Harmony\Depot_NegotiateConsumerPostfix.cs" />
+    <Compile Include="Harmony\Depot_NegotiateProviderPostfix.cs" />
     <Compile Include="Harmony\Depot_SurveyPostfix.cs" />
     <Compile Include="Harmony\KolonizationManager_TrackLogEntryPostfix.cs" />
     <Compile Include="Harmony\ModulePlanetaryLogistics_LevelResourcesPostfix.cs" />
@@ -305,6 +307,7 @@
     <Compile Include="Systems\Agency\AgencyMessageSender.cs" />
     <Compile Include="Systems\Agency\AgencySystem.cs" />
     <Compile Include="Systems\Agency\OrbitalDeliveryGate.cs" />
+    <Compile Include="Systems\Agency\WolfDepotDebouncer.cs" />
     <Compile Include="Systems\AsteroidComet\AsteroidCometEvents.cs" />
     <Compile Include="Systems\Label\LabelEvents.cs" />
     <Compile Include="Systems\Label\LabelSystem.cs" />
