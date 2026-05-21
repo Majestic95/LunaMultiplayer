@@ -88,6 +88,53 @@ namespace LmpClient.Systems.ShareContracts
         internal bool ContractsLoadedEventFired { get; set; }
 
         /// <summary>
+        /// Contract GUIDs the local user has taken a terminal action on this session
+        /// (Accept / Cancel / Decline / Complete / Fail). Populated by the matching
+        /// <see cref="ShareContractsEvents"/> handlers; checked by
+        /// <see cref="ShareContractsEvents.ContractOffered"/> via
+        /// <see cref="ShouldWithdrawReOffer"/> so a contract the user has already acted
+        /// on locally is withdrawn the moment <c>onOffered</c> fires for it again.
+        ///
+        /// <para><b>Why this exists.</b> When the user cancels an Active contract, KSP's
+        /// <c>ContractSystem.Update</c> runs <c>GenerateContracts</c> on the next tick to
+        /// fill the now-empty slot. KSPCF's <c>ContractPreLoader</c> keeps a persistent
+        /// contract cache (LMP populates it via
+        /// <c>ScenarioSystem.InjectServerContractsIntoPreLoader</c> on every scenario load),
+        /// and CC's patched generator restores from that cache rather than producing a
+        /// fresh contract. The just-cancelled contract pops back into Available ~1 second
+        /// after the click. Without this set, two existing paths in
+        /// <c>ContractOffered</c> both preserve the re-Offer instead of withdrawing it:
+        /// (1) the <see cref="ServerOfferedContractGuids"/> protection (intended for the
+        /// initial-load CC re-fire) shields the cancelled contract because the GUID is
+        /// still in the original snapshot; (2) the lock-holder branch silently
+        /// re-broadcasts the re-Offer as a fresh Offered contract to the server.</para>
+        ///
+        /// <para><b>Lifecycle.</b> Session-scoped — cleared on <see cref="OnDisabled"/>
+        /// so a reconnect starts with a clean slate. Not persisted to disk; not synced
+        /// across scenes (KSP's Contract objects survive scene loads but the user's
+        /// "I already acted on this" intent is purely a per-session invariant).</para>
+        ///
+        /// <para><b>Memory.</b> One short GUID string per terminal action — bounded by the
+        /// number of contracts the player interacts with per session. Negligible.</para>
+        /// </summary>
+        internal HashSet<string> LocallyActedOnContractGuids { get; }
+            = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Pure decision helper: returns <c>true</c> when an inbound
+        /// <c>onOffered</c> firing should be withdrawn because the local user has
+        /// already taken a terminal action on the same contract GUID. Extracted so
+        /// the decision is unit-testable in <c>LmpClientTest</c> without bringing
+        /// up the full KSP <c>ContractSystem</c> singleton.
+        /// </summary>
+        public static bool ShouldWithdrawReOffer(string contractGuid, ICollection<string> locallyActedOnGuids)
+        {
+            if (string.IsNullOrEmpty(contractGuid)) return false;
+            if (locallyActedOnGuids == null || locallyActedOnGuids.Count == 0) return false;
+            return locallyActedOnGuids.Contains(contractGuid);
+        }
+
+        /// <summary>
         /// Number of contracts dropped from the last received ContractSystem snapshot because
         /// they referenced a part not installed on this client.
         /// </summary>
@@ -162,6 +209,18 @@ namespace LmpClient.Systems.ShareContracts
 
             if (!CurrentGameModeIsRelevant) return;
 
+            // [fix:contract-popback] Belt-and-braces clear. OnDisabled also clears, but per
+            // [[reference-client-system-enable-convention]] the System<T> enable/disable
+            // event path is unreliable for transient states — an OnEnabled without a prior
+            // OnDisabled (re-enable after a half-completed disconnect, MainSystem re-init,
+            // reconnect to the same KSP process) would otherwise carry the previous session's
+            // acted-on GUIDs into the new session. A reconnect that brought back the same
+            // contract guids as Offered (server cleared its per-agency Cancelled state, or
+            // a different server's snapshot reused a guid) would then have those guids
+            // silently withdrawn. Clear on every enable so the set's contract is "this
+            // session only" regardless of which lifecycle path got us here.
+            LocallyActedOnContractGuids.Clear();
+
             ContractSystem.generateContractIterations = 0;
 
             // Protect the startup window: any ContractOffered events that fire between
@@ -196,6 +255,7 @@ namespace LmpClient.Systems.ShareContracts
 
             PendingUnavailableContracts.Clear();
             ServerOfferedContractNodes.Clear();
+            LocallyActedOnContractGuids.Clear();
             _contractSystemScenariaSendPending = false;
             ContractSystem.generateContractIterations = DefaultContractGenerateIterations;
 

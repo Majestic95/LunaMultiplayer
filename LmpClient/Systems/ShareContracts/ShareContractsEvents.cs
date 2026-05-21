@@ -53,6 +53,10 @@ namespace LmpClient.Systems.ShareContracts
         {
             if (System.IgnoreEvents) return;
 
+            // [fix:contract-popback] See LocallyActedOnContractGuids XML — terminal
+            // local actions populate this set so a CC ContractPreLoader re-fire of
+            // onOffered for the same GUID is withdrawn instead of preserved.
+            System.LocallyActedOnContractGuids.Add(contract.ContractGuid.ToString());
             System.MessageSender.SendContractMessage(contract);
             LunaLog.Log($"Contract accepted: {contract.ContractGuid}");
         }
@@ -61,6 +65,7 @@ namespace LmpClient.Systems.ShareContracts
         {
             if (System.IgnoreEvents) return;
 
+            System.LocallyActedOnContractGuids.Add(contract.ContractGuid.ToString());
             System.MessageSender.SendContractMessage(contract);
             LunaLog.Log($"Contract cancelled: {contract.ContractGuid}");
         }
@@ -69,6 +74,7 @@ namespace LmpClient.Systems.ShareContracts
         {
             if (System.IgnoreEvents) return;
 
+            System.LocallyActedOnContractGuids.Add(contract.ContractGuid.ToString());
             System.MessageSender.SendContractMessage(contract);
             LunaLog.Log($"Contract completed: {contract.ContractGuid}");
         }
@@ -490,6 +496,7 @@ namespace LmpClient.Systems.ShareContracts
         {
             if (System.IgnoreEvents) return;
 
+            System.LocallyActedOnContractGuids.Add(contract.ContractGuid.ToString());
             System.MessageSender.SendContractMessage(contract);
             LunaLog.Log($"Contract declined: {contract.ContractGuid}");
         }
@@ -498,6 +505,7 @@ namespace LmpClient.Systems.ShareContracts
         {
             if (System.IgnoreEvents) return;
 
+            System.LocallyActedOnContractGuids.Add(contract.ContractGuid.ToString());
             System.MessageSender.SendContractMessage(contract);
             LunaLog.Log($"Contract failed: {contract.ContractGuid}");
         }
@@ -521,6 +529,29 @@ namespace LmpClient.Systems.ShareContracts
             if (System.IgnoreEvents) return;
 
             var guidStr = contract.ContractGuid.ToString();
+
+            // [fix:contract-popback] Withdraw a re-Offer of a contract the local user has
+            // already taken a terminal action on (Accept/Cancel/Decline/Complete/Fail).
+            // KSP's ContractSystem.Update runs GenerateContracts on the next tick after the
+            // user clicks Cancel to fill the now-empty slot; KSPCF's ContractPreLoader does
+            // not always evict the cancelled contract from its cache before that tick, so
+            // CC's patched generator restores the just-cancelled contract and KSP fires
+            // onOffered for it again. Without this guard the contract pops back into the
+            // Available list ~1 second after the cancel click — neither of the two existing
+            // branches below catches it: the ServerOfferedContractGuids check returns early
+            // (because the original snapshot still names the GUID), and the lock-holder
+            // branch silently re-broadcasts the re-Offer as a fresh Offered contract to the
+            // server. Checked BEFORE the snapshot protection so the local terminal action
+            // wins over the initial-load preservation rule.
+            if (ShareContractsSystem.ShouldWithdrawReOffer(guidStr, System.LocallyActedOnContractGuids))
+            {
+                LunaLog.LogWarning(
+                    $"[ShareContracts]: ContractOffered — withdrawing re-Offer of locally-acted-on contract " +
+                    $"{guidStr} ({contract.GetType().Name}). Likely CC ContractPreLoader cache restoration " +
+                    $"after a user Cancel/Decline/Complete/Fail/Accept action this session.");
+                WithdrawAndRemoveContract(contract);
+                return;
+            }
 
             // Protect every contract that was part of the server's Offered snapshot.
             // ContractPreLoader (KSPCF) subscribes to onContractsLoaded and re-fires onOffered
