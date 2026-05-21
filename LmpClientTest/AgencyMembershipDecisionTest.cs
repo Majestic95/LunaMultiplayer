@@ -624,5 +624,137 @@ namespace LmpClientTest
             Assert.AreEqual("perAgencyKerbalRosterEnabled", parameters[0].Name,
                 "Parameter must be named for the COMBINED gate, not PerAgencyCareerEnabled alone");
         }
+
+        // -------------------------------------------------------------------
+        // [Phase 6 follow-up — foreign-vessel crew strip decision gate]
+        // Pins the four-state decision matrix for
+        // AgencyMembership.ShouldStripForeignCrew. Integration-lens review
+        // SHOULD FIX #6: extract a pure helper so LmpClientTest covers the
+        // gate without needing to construct a KSP ConfigNode. The truth
+        // table maps real connect-race scenarios from the live v8.1 soak.
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_False_WhenGateOff()
+        {
+            var ownership = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var localAgency = Guid.NewGuid();
+            ownership[vesselId] = Guid.NewGuid();
+            Assert.IsFalse(AgencyMembership.ShouldStripForeignCrew(
+                perAgencyKerbalRosterEnabled: false,
+                vesselId, localAgency, ownership));
+        }
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_False_WhenLocalAgencyEmpty()
+        {
+            // Pre-handshake state — per-agency mode isn't active for this
+            // client. Treat foreign-ness as unknown; don't disrupt the
+            // shared-roster behaviour.
+            var ownership = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            ownership[vesselId] = Guid.NewGuid();
+            Assert.IsFalse(AgencyMembership.ShouldStripForeignCrew(
+                perAgencyKerbalRosterEnabled: true,
+                vesselId, localAgencyId: Guid.Empty, ownership));
+        }
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_False_WhenOwnershipConfirmedLocal()
+        {
+            var ownership = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var localAgency = Guid.NewGuid();
+            ownership[vesselId] = localAgency;  // confirmed-local
+            Assert.IsFalse(AgencyMembership.ShouldStripForeignCrew(
+                perAgencyKerbalRosterEnabled: true,
+                vesselId, localAgency, ownership));
+        }
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_True_WhenOwnershipConfirmedForeign()
+        {
+            var ownership = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var localAgency = Guid.NewGuid();
+            var foreignAgency = Guid.NewGuid();
+            ownership[vesselId] = foreignAgency;
+            Assert.IsTrue(AgencyMembership.ShouldStripForeignCrew(
+                perAgencyKerbalRosterEnabled: true,
+                vesselId, localAgency, ownership));
+        }
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_True_WhenOwnershipMiss_PessimisticInitialConnectRace()
+        {
+            // Integration-lens Finding 1 — relay-stripped VesselProto arrives
+            // before VesselSync stamps the owning agency. Without pessimistic
+            // strip, A's CrewRoster would bind to the foreign vessel's seats
+            // via KSP's name-keyed lookup before the authoritative stamp
+            // ever arrived. After VesselSync arrives + RecordOwnership writes
+            // the real id, subsequent passes hit the confirmed-foreign or
+            // confirmed-local branch.
+            var ownership = new ConcurrentDictionary<Guid, Guid>();  // empty — registry MISS
+            var vesselId = Guid.NewGuid();
+            var localAgency = Guid.NewGuid();
+            Assert.IsTrue(AgencyMembership.ShouldStripForeignCrew(
+                perAgencyKerbalRosterEnabled: true,
+                vesselId, localAgency, ownership));
+        }
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_True_WhenOwnershipEmpty_UnassignedSentinelOrRelayStripped()
+        {
+            // Spec §10 Q3 Unassigned-sentinel vessels (pre-0.31 carry-over)
+            // AND the relay-stripped-then-Empty-inserted race window both
+            // resolve to ownership[V] = Empty. Either way, no agency
+            // legitimately "owns" the vessel's crew, so pessimistic strip
+            // is correct — binding to anyone's local roster would let one
+            // client claim a kerbal name across the cohort.
+            var ownership = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var localAgency = Guid.NewGuid();
+            ownership[vesselId] = Guid.Empty;
+            Assert.IsTrue(AgencyMembership.ShouldStripForeignCrew(
+                perAgencyKerbalRosterEnabled: true,
+                vesselId, localAgency, ownership));
+        }
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_True_WhenVesselOwnershipDictNull_DefensivePessimism()
+        {
+            // AgencySystem.Singleton?.VesselOwnership being null implies the
+            // agency singleton isn't initialised. Under combined gate=on
+            // with a known LocalAgencyId, we shouldn't trust any vessel's
+            // crew names — strip pessimistically. This branch is unreachable
+            // in steady state but defensive against a null-vessel-ownership
+            // failure during system init.
+            var vesselId = Guid.NewGuid();
+            var localAgency = Guid.NewGuid();
+            Assert.IsTrue(AgencyMembership.ShouldStripForeignCrew(
+                perAgencyKerbalRosterEnabled: true,
+                vesselId, localAgency, vesselOwnership: null));
+        }
+
+        [TestMethod]
+        public void ShouldStripForeignCrew_OwnershipStableAcrossRepeatedCalls()
+        {
+            // Pinning idempotency — the strip predicate must not mutate the
+            // ownership registry. Repeated calls yield the same answer.
+            var ownership = new ConcurrentDictionary<Guid, Guid>();
+            var vesselId = Guid.NewGuid();
+            var localAgency = Guid.NewGuid();
+            var foreignAgency = Guid.NewGuid();
+            ownership[vesselId] = foreignAgency;
+
+            for (var i = 0; i < 5; i++)
+            {
+                Assert.IsTrue(AgencyMembership.ShouldStripForeignCrew(
+                    perAgencyKerbalRosterEnabled: true,
+                    vesselId, localAgency, ownership));
+            }
+            Assert.AreEqual(foreignAgency, ownership[vesselId], "Helper must not mutate ownership");
+        }
     }
 }

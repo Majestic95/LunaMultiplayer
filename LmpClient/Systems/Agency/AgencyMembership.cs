@@ -386,5 +386,65 @@ namespace LmpClient.Systems.Agency
         {
             return perAgencyKerbalRosterEnabled;
         }
+
+        /// <summary>
+        /// [Phase 6 follow-up — foreign-vessel crew strip decision gate]
+        /// Composite predicate for whether
+        /// <see cref="VesselProtoSys.VesselProto.CreateProtoVessel"/>'s
+        /// pre-Load crew-strip should fire on the vessel being processed.
+        /// Pulled out as a pure helper so the four-state decision matrix
+        /// (gate off / local-confirmed / unassigned-or-unknown /
+        /// foreign-confirmed) is pinned by LmpClientTest without needing
+        /// to construct a KSP <c>ConfigNode</c>.
+        ///
+        /// <para><b>Behaviour matrix:</b>
+        /// <list type="bullet">
+        ///   <item>Gate off → <c>false</c> (dual-mode silence; same as v1-v7).</item>
+        ///   <item>Local agency unknown (Empty) → <c>false</c>. Pre-handshake
+        ///         state; per-agency mode isn't active for this client yet.</item>
+        ///   <item>Vessel ownership known + matches local agency → <c>false</c>.
+        ///         The local player's own vessel; crew names resolve correctly
+        ///         in the local roster.</item>
+        ///   <item>Vessel ownership known + differs from local agency → <c>true</c>
+        ///         (foreign-confirmed; strip).</item>
+        ///   <item>Vessel ownership MISS or Empty under gate=on → <c>true</c>
+        ///         (PESSIMISTIC strip). Closes the initial-connect race where
+        ///         a peer's relay-stripped VesselProto arrives BEFORE the
+        ///         authoritative VesselSync reply stamps the agency-id — the
+        ///         server's relay path forwards original bytes which lack the
+        ///         <c>lmpOwningAgency</c> top-level field (KSP's <c>BackupVessel</c>
+        ///         strips unknown fields on every local-owner resend; see
+        ///         CLAUDE.md Stack Notes "5.18b relay-vs-store"). Without the
+        ///         pessimistic strip the local CrewRoster would get bound to
+        ///         the foreign vessel's seats before the authoritative stamp
+        ///         arrived. The local player NEVER receives their OWN vessel's
+        ///         bytes back via relay (server excludes sender), so this
+        ///         branch only fires for genuinely-foreign or Unassigned-
+        ///         sentinel vessels. Unassigned vessels (spec §10 Q3, pre-0.31)
+        ///         also strip-clean by design — no agency "owns" them so
+        ///         binding to anyone's local roster would be wrong.</item>
+        /// </list></para>
+        ///
+        /// <para><b>Self-heal property.</b> After a brief race-window pollution
+        /// is prevented by the pessimistic strip, subsequent VesselSync from
+        /// the server (which serialises with the authoritative <c>lmpOwningAgency</c>)
+        /// updates the registry to the real agency-id. The next periodic
+        /// vessel-proto pass-through then runs through the same predicate
+        /// with the now-known ownership and continues stripping correctly
+        /// for foreign vessels / passing-through for local vessels.</para>
+        /// </summary>
+        public static bool ShouldStripForeignCrew(
+            bool perAgencyKerbalRosterEnabled,
+            Guid vesselId,
+            Guid localAgencyId,
+            ConcurrentDictionary<Guid, Guid> vesselOwnership)
+        {
+            if (!perAgencyKerbalRosterEnabled) return false;
+            if (localAgencyId == Guid.Empty) return false;
+            if (vesselOwnership == null) return true;
+            if (!vesselOwnership.TryGetValue(vesselId, out var owningAgencyId)) return true;
+            if (owningAgencyId == Guid.Empty) return true;
+            return owningAgencyId != localAgencyId;
+        }
     }
 }

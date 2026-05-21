@@ -508,8 +508,23 @@ namespace LmpClient.VesselUtilities
                     // AgencyMembership.ShouldRecordForeignCrewCount so the contract
                     // is pinned by an LmpClientTest unit-test, NOT enforced only
                     // by the inline `if (...PerAgencyKerbalRosterEnabled)` here.
+                    //
+                    // [Phase 6 follow-up] Skip when the vessel is foreign — the
+                    // pre-Load strip in VesselProto.CreateProtoVessel already
+                    // populated ForeignCrewCount with the AUTHORITATIVE count
+                    // (the actual crew aboard the foreign vessel per its wire
+                    // bytes). The post-Load null-scrub on a foreign vessel
+                    // always finds 0 entries (we stripped them pre-Load), so
+                    // totalRemoved would be 0 and this branch wouldn't fire
+                    // anyway — but the guard documents the ownership: pre-Load
+                    // owns the registry for foreign vessels; post-Load owns it
+                    // for local vessels that hit the BUG-023 race.
                     if (AgencyMembership.ShouldRecordForeignCrewCount(
-                            SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled))
+                            SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled)
+                        && !AgencyLabelFormatter.IsForeignVessel(
+                            vesselProto.vesselID,
+                            AgencySystem.Singleton?.LocalAgencyId ?? Guid.Empty,
+                            AgencySystem.Singleton?.VesselOwnership))
                     {
                         AgencySystem.Singleton.ForeignCrewCount[vesselProto.vesselID] = totalRemoved;
                     }
@@ -538,8 +553,25 @@ namespace LmpClient.VesselUtilities
                     // [v8.1 audit cross-phase (g)] Mirror the population branch:
                     // gate via the AgencyMembership pure helper so both write
                     // and evict are pinned by the same regression test.
+                    //
+                    // [Phase 6 follow-up] Symmetric foreign-vessel skip — the
+                    // pre-Load strip site in VesselProto.CreateProtoVessel
+                    // owns ForeignCrewCount on foreign vessels and re-writes
+                    // it on every proto pass-through (even when the post-Load
+                    // path is skipped via UnchangedEarlyOut / UpdateProtoInPlace,
+                    // which was a known cosmetic limitation of the original
+                    // Phase 6.6 design). Letting the post-Load eviction fire
+                    // here would wipe the pre-Load population for foreign
+                    // vessels — because totalRemoved on a foreign vessel is
+                    // always 0 (everything was stripped before Load), so this
+                    // else branch is the one that fires for every foreign-
+                    // vessel pass-through.
                     if (AgencyMembership.ShouldRecordForeignCrewCount(
-                            SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled))
+                            SettingsSystem.ServerSettings.PerAgencyKerbalRosterEnabled)
+                        && !AgencyLabelFormatter.IsForeignVessel(
+                            vesselProto.vesselID,
+                            AgencySystem.Singleton?.LocalAgencyId ?? Guid.Empty,
+                            AgencySystem.Singleton?.VesselOwnership))
                     {
                         AgencySystem.Singleton.ForeignCrewCount.TryRemove(vesselProto.vesselID, out _);
                     }
