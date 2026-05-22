@@ -6,6 +6,7 @@ using LmpClient.Systems.SettingsSys;
 using LmpClient.VesselUtilities;
 using LmpCommon.Locks;
 using System;
+using System.Runtime.CompilerServices;
 
 namespace LmpClient.Systems.VesselLockSys
 {
@@ -91,8 +92,19 @@ namespace LmpClient.Systems.VesselLockSys
 
         #region Public methods
 
-        public void StartSpectating(Guid spectatingVesselId)
+        public void StartSpectating(Guid spectatingVesselId, [CallerMemberName] string trigger = null)
         {
+            // [diag:revert] Capture which caller flipped IsSpectating=true so we
+            // can correlate post-launch spectating bites with the trigger path
+            // (OnVesselChange vs. LockAcquire). Includes the current Control-lock
+            // owner — for a just-launched vessel, the lock should be either us
+            // or "(none)"; anything else is a smoking gun for a cross-agency or
+            // stale-lock race.
+            var lockOwner = LockSystem.LockQuery.GetControlLockOwner(spectatingVesselId);
+            LunaLog.Log($"[diag:revert] start-spectating vessel={spectatingVesselId:N} " +
+                        $"trigger={trigger ?? "(unknown)"} " +
+                        $"lock-owner='{(string.IsNullOrEmpty(lockOwner) ? "(none)" : lockOwner)}'");
+
             VesselCommon.IsSpectating = true;
 
             //Lock all vessel controls
@@ -106,8 +118,16 @@ namespace LmpClient.Systems.VesselLockSys
             SpectateEvent.onStartSpectating.Fire();
         }
 
-        public void StopSpectating()
+        public void StopSpectating([CallerMemberName] string trigger = null)
         {
+            // [diag:revert] Symmetric exit event so the spectating window is
+            // bracketable in the log. CallerMemberName tells us whether the
+            // exit was triggered by vessel-change, scene-load, or lock-acquire.
+            if (VesselCommon.IsSpectating)
+            {
+                LunaLog.Log($"[diag:revert] stop-spectating trigger={trigger ?? "(unknown)"}");
+            }
+
             VesselCommon.IsSpectating = false;
 
             //Unlock all vessel controls

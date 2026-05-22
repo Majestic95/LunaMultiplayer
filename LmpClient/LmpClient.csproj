@@ -332,6 +332,7 @@
     <Compile Include="Systems\Label\LabelEvents.cs" />
     <Compile Include="Systems\Label\LabelSystem.cs" />
     <Compile Include="Systems\Revert\RevertEvents.cs" />
+    <Compile Include="Systems\Revert\RevertGate.cs" />
     <Compile Include="Systems\Revert\RevertSystem.cs" />
     <Compile Include="Systems\SafetyBubble\SpawnPointLocation.cs" />
     <Compile Include="Systems\SafetyBubble\SafetyBubbleEvents.cs" />
