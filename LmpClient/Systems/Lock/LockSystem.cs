@@ -1,6 +1,7 @@
 ﻿using LmpClient.Base;
 using LmpClient.Events;
 using LmpClient.Network;
+using LmpClient.Systems.Agency;
 using LmpClient.Systems.SettingsSys;
 using LmpClient.Utilities;
 using LmpCommon.Locks;
@@ -97,21 +98,83 @@ namespace LmpClient.Systems.Lock
         }
 
         /// <summary>
-        /// Acquire the update lock on the given vessel
+        /// Acquire the update lock on the given vessel.
+        ///
+        /// <para>[fix:per-agency-career] Per-agency auto-acquire suppression —
+        /// passive callers (LockReleased on other-player vessel-switch,
+        /// LevelLoaded blanket pass, VesselLoaded on physics-range entry) fire
+        /// for every vessel in scope regardless of agency. Without the
+        /// <see cref="AgencyMembership.IsAutoAcquireBlockedByAgency"/> gate,
+        /// each foreign-agency acquire produces a Server-side
+        /// <see cref="LmpCommon.Message.Types.LockRejectReason.CrossAgency"/>
+        /// reject + a "Cannot interact with this vessel: it belongs to..."
+        /// toast on the player's screen — fired by no user action. The
+        /// <paramref name="force"/> path skips the gate because chain-fired
+        /// acquires from a just-granted Control / parent-Update have
+        /// established local authority already (see helper XML).</para>
         /// </summary>
         public void AcquireUpdateLock(Guid vesselId, bool force = false, bool immediate = false)
         {
-            if (!LockQuery.UpdateLockBelongsToPlayer(vesselId, SettingsSystem.CurrentSettings.PlayerName))
-                AcquireLock(new LockDefinition(LockType.Update, SettingsSystem.CurrentSettings.PlayerName, vesselId), force, immediate);
+            if (LockQuery.UpdateLockBelongsToPlayer(vesselId, SettingsSystem.CurrentSettings.PlayerName))
+                return;
+            if (!force && IsAutoAcquireBlockedForVessel(vesselId))
+                return;
+            AcquireLock(new LockDefinition(LockType.Update, SettingsSystem.CurrentSettings.PlayerName, vesselId), force, immediate);
         }
 
         /// <summary>
-        /// Acquire the unloaded update lock on the given vessel
+        /// Acquire the unloaded update lock on the given vessel.
+        ///
+        /// <para>[fix:per-agency-career] Same per-agency auto-acquire
+        /// suppression as <see cref="AcquireUpdateLock"/> — see that XML for
+        /// the full rationale (passive paths fire blanket cross-agency
+        /// acquires that produce stray "Cannot interact..." toasts; the
+        /// <paramref name="force"/> path bypasses for chain-fired
+        /// authoritative acquires from Decouple/Undock/Control-grant).</para>
         /// </summary>
         public void AcquireUnloadedUpdateLock(Guid vesselId, bool force = false, bool immediate = false)
         {
-            if (!LockQuery.UnloadedUpdateLockBelongsToPlayer(vesselId, SettingsSystem.CurrentSettings.PlayerName))
-                AcquireLock(new LockDefinition(LockType.UnloadedUpdate, SettingsSystem.CurrentSettings.PlayerName, vesselId), force, immediate);
+            if (LockQuery.UnloadedUpdateLockBelongsToPlayer(vesselId, SettingsSystem.CurrentSettings.PlayerName))
+                return;
+            if (!force && IsAutoAcquireBlockedForVessel(vesselId))
+                return;
+            AcquireLock(new LockDefinition(LockType.UnloadedUpdate, SettingsSystem.CurrentSettings.PlayerName, vesselId), force, immediate);
+        }
+
+        /// <summary>
+        /// Resolves the local <see cref="AgencySystem"/> state for
+        /// <paramref name="vesselId"/> and delegates to the pure
+        /// <see cref="AgencyMembership.IsAutoAcquireBlockedByAgency"/> helper.
+        /// Resolution pattern matches
+        /// <c>VesselRemoveEvents.TryBlockCrossAgencyAction</c> — null-safe on
+        /// the singleton, treats registry MISS as "vessel unknown to client"
+        /// (permit), and reads the same <c>PerAgencyCareerEnabled</c> server-
+        /// settings mirror that 5.18a establishes.
+        ///
+        /// <para>Distinct name from
+        /// <see cref="AgencyMembership.IsAutoAcquireBlockedByAgency"/> so IDE
+        /// auto-complete on the call site at
+        /// <see cref="AcquireUpdateLock"/> / <see cref="AcquireUnloadedUpdateLock"/>
+        /// surfaces this wrapper unambiguously; the pure helper is the
+        /// testable decision math, this wrapper is the singleton-resolution
+        /// adapter.</para>
+        /// </summary>
+        private static bool IsAutoAcquireBlockedForVessel(Guid vesselId)
+        {
+            var agencySystem = AgencySystem.Singleton;
+            var gateOn = SettingsSystem.ServerSettings.PerAgencyCareerEnabled;
+            var localAgencyId = agencySystem?.LocalAgencyId ?? Guid.Empty;
+
+            var vesselKnown = false;
+            var vesselOwningAgencyId = Guid.Empty;
+            if (agencySystem != null && agencySystem.TryGetOwningAgency(vesselId, out var owner))
+            {
+                vesselKnown = true;
+                vesselOwningAgencyId = owner;
+            }
+
+            return AgencyMembership.IsAutoAcquireBlockedByAgency(
+                localAgencyId, vesselKnown, vesselOwningAgencyId, gateOn);
         }
 
         /// <summary>

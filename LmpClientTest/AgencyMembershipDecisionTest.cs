@@ -432,6 +432,159 @@ namespace LmpClientTest
                 "Unassigned-sentinel vessel → permit per spec §10 Q3");
         }
 
+        // --- IsAutoAcquireBlockedByAgency — passive Update/UnloadedUpdate
+        // lock auto-acquire suppression. Backs the
+        // LockSystem.AcquireUpdateLock + AcquireUnloadedUpdateLock client-
+        // side suppression that prevents stray "Cannot interact with this
+        // vessel: it belongs to ..." toasts from four KSP-driven passive
+        // paths: (1) VesselLockEvents.LockReleased on other-player vessel-
+        // switch (the most frequent path), (2) VesselLockEvents.LevelLoaded
+        // blanket pass on Flight/TrackStation entry, (3) VesselLockEvents.
+        // VesselLoaded on physics-range entry, (4) VesselLockSystem.
+        // StopSpectating blanket pass after a spectator session ends. Same
+        // 6-branch bypass shape as IsRecoveryBlockedByAgency — only the
+        // gate-on / known / non-Empty-different-agency case blocks. Call
+        // sites at LockSystem.AcquireUpdateLock + AcquireUnloadedUpdateLock
+        // additionally short-circuit on force=true (chain-fired acquires
+        // from Decouple/Undock/Control-grant have established local
+        // authority upstream); IsAutoAcquireBlockedByAgency_ParameterShape
+        // pins the helper's 4-param signature so a refactor lifting force
+        // into the helper would have to deliberately break that test.
+
+        [TestMethod]
+        public void IsAutoAcquireBlockedByAgency_DifferentAgency_Blocks()
+        {
+            // The motivating case: foreign player B (agency Y) switches
+            // craft → server fans out LockRelease for vessel V_B's prior
+            // Update lock → every client's LockReleased handler re-fires
+            // AcquireUpdateLock(V_B). Local player A (agency X) was about
+            // to send a useless cross-agency acquire that the server would
+            // reject + toast. Helper blocks the send.
+            var local = Guid.NewGuid();
+            var other = Guid.NewGuid();
+            Assert.IsTrue(AgencyMembership.IsAutoAcquireBlockedByAgency(
+                localAgencyId: local,
+                vesselKnown: true,
+                vesselOwningAgencyId: other,
+                perAgencyEnabledClientGate: true),
+                "gate on + known vessel + different non-Empty agency → BLOCK");
+        }
+
+        [TestMethod]
+        public void IsAutoAcquireBlockedByAgency_SameAgency_Permits()
+        {
+            // Forward-compat with multi-player-per-agency: a same-agency
+            // peer SHOULD be able to take an Update lock on a fellow
+            // agency-mate's vessel — the 5.17a server-side guard already
+            // permits this case. The 1:1-today design doesn't trigger it
+            // in practice (each agency has one owner) but the contract
+            // must hold for any future relaxation.
+            var same = Guid.NewGuid();
+            Assert.IsFalse(AgencyMembership.IsAutoAcquireBlockedByAgency(
+                localAgencyId: same,
+                vesselKnown: true,
+                vesselOwningAgencyId: same,
+                perAgencyEnabledClientGate: true),
+                "same agency → permit");
+        }
+
+        [TestMethod]
+        public void IsAutoAcquireBlockedByAgency_GateOff_PermitsEvenWhenDifferentAgency()
+        {
+            // Dual-mode silence (spec §11): under gate-off the per-agency
+            // surface is invisible; lock-acquire behaviour matches the
+            // legacy shared-agency UX (any player can grab any unowned
+            // Update / UnloadedUpdate lock). Without this branch, a
+            // gate-off cohort would never auto-acquire after a peer
+            // released — the entire passive lock-acquire chain would
+            // break.
+            Assert.IsFalse(AgencyMembership.IsAutoAcquireBlockedByAgency(
+                localAgencyId: Guid.NewGuid(),
+                vesselKnown: true,
+                vesselOwningAgencyId: Guid.NewGuid(),
+                perAgencyEnabledClientGate: false),
+                "gate off → permit regardless of agency match");
+        }
+
+        [TestMethod]
+        public void IsAutoAcquireBlockedByAgency_LocalEmpty_Permits()
+        {
+            // Pre-handshake (Handshake hasn't arrived yet) / post-
+            // deleteagency-of-own-agency. Player has no agency mapping —
+            // matches the 5.17a "requester has no agency mapping" server-
+            // side bypass. Permit locally; the server-side guard catches
+            // anything actually problematic.
+            Assert.IsFalse(AgencyMembership.IsAutoAcquireBlockedByAgency(
+                localAgencyId: Guid.Empty,
+                vesselKnown: true,
+                vesselOwningAgencyId: Guid.NewGuid(),
+                perAgencyEnabledClientGate: true),
+                "local agency-less → permit (let server decide)");
+        }
+
+        [TestMethod]
+        public void IsAutoAcquireBlockedByAgency_VesselUnknown_Permits()
+        {
+            // Registry MISS — vessel hasn't been seen via VesselProto relay
+            // or VesselSync yet (initial-connect window, or vessel just
+            // spawned and the local mirror hasn't caught up). Permit; the
+            // server will reject if it's actually cross-agency, and the
+            // 5s per-(player, vessel, type) debounce at the server end
+            // means one toast at most for the brief race window. Matches
+            // IsRecoveryBlockedByAgency's same bypass — the helper does
+            // not pessimistically block on unknowns.
+            Assert.IsFalse(AgencyMembership.IsAutoAcquireBlockedByAgency(
+                localAgencyId: Guid.NewGuid(),
+                vesselKnown: false,
+                vesselOwningAgencyId: Guid.Empty,
+                perAgencyEnabledClientGate: true),
+                "vessel unknown to client → permit");
+        }
+
+        [TestMethod]
+        public void IsAutoAcquireBlockedByAgency_UnassignedSentinel_Permits()
+        {
+            // Spec §10 Q3 — Unassigned-sentinel vessels (Empty agency id)
+            // are interactable by ANY agency. Pre-0.31 vessels persisted
+            // without lmpOwningAgency carry this sentinel; /deleteagency
+            // cascade lands every demoted vessel here. The passive auto-
+            // acquire MUST be permitted, otherwise no agency could take
+            // over an orphaned vessel's update simulation.
+            Assert.IsFalse(AgencyMembership.IsAutoAcquireBlockedByAgency(
+                localAgencyId: Guid.NewGuid(),
+                vesselKnown: true,
+                vesselOwningAgencyId: Guid.Empty,
+                perAgencyEnabledClientGate: true),
+                "Unassigned-sentinel vessel → permit per spec §10 Q3");
+        }
+
+        [TestMethod]
+        public void IsAutoAcquireBlockedByAgency_ParameterShape()
+        {
+            // Consumer-lens review [SHOULD FIX] #3: pin the helper's 4-param
+            // signature so a "refactor for clarity" lifting `force` into the
+            // helper would trip loudly. The force-bypass contract lives at
+            // the call site (LockSystem.AcquireUpdateLock +
+            // AcquireUnloadedUpdateLock via `!force && IsAutoAcquireBlockedForVessel(...)`),
+            // NOT in the helper itself — the helper is pure decision math
+            // over agency-state inputs. Adding a `force` parameter to the
+            // helper would invert that contract and make the call-site
+            // gate ambiguous.
+            var method = typeof(AgencyMembership).GetMethod(nameof(AgencyMembership.IsAutoAcquireBlockedByAgency));
+            Assert.IsNotNull(method, "IsAutoAcquireBlockedByAgency must exist as a public static helper");
+            var parameters = method.GetParameters();
+            Assert.AreEqual(4, parameters.Length, "Helper must take exactly 4 parameters; force lives at the call site");
+            Assert.AreEqual("localAgencyId", parameters[0].Name);
+            Assert.AreEqual("vesselKnown", parameters[1].Name);
+            Assert.AreEqual("vesselOwningAgencyId", parameters[2].Name);
+            Assert.AreEqual("perAgencyEnabledClientGate", parameters[3].Name);
+            foreach (var p in parameters)
+            {
+                Assert.IsFalse(p.Name.IndexOf("force", StringComparison.OrdinalIgnoreCase) >= 0,
+                    $"Helper parameter '{p.Name}' contains 'force' — force-bypass MUST stay at the call site");
+            }
+        }
+
         [TestMethod]
         public void ForceRecordOwnership_Idempotent_WhenSameValueWrittenTwice()
         {

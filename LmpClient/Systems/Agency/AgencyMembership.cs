@@ -243,6 +243,101 @@ namespace LmpClient.Systems.Agency
         }
 
         /// <summary>
+        /// Per-agency auto-acquire suppression for client-side passive
+        /// <see cref="LmpCommon.Locks.LockType.Update"/> /
+        /// <see cref="LmpCommon.Locks.LockType.UnloadedUpdate"/> lock acquires.
+        /// Returns <c>true</c> when the local player should NOT send a
+        /// <c>LockAcquireMsgData</c> for the given vessel because it belongs to
+        /// a different agency.
+        ///
+        /// <para><b>Why this exists.</b> Several KSP-driven passive paths
+        /// auto-acquire Update / UnloadedUpdate locks across <em>all</em>
+        /// in-scope vessels without checking ownership:
+        /// <list type="bullet">
+        ///   <item><c>VesselLockEvents.LockReleased</c> — when ANY player switches
+        ///         craft, the server fans out the previous holder's
+        ///         <c>LockRelease</c> to every client, and each client's handler
+        ///         unconditionally re-acquires. This is the most frequent path
+        ///         (fires on every cohort-wide vessel-switch).</item>
+        ///   <item><c>VesselLockEvents.LevelLoaded</c> — iterates every
+        ///         <c>FlightGlobals.Vessels</c> on Flight / TrackStation entry
+        ///         attempting <c>AcquireUnloadedUpdateLock</c> on each.</item>
+        ///   <item><c>VesselLockSystem.StopSpectating</c> — same blanket
+        ///         iteration after a spectator session ends.</item>
+        ///   <item><c>VesselLockEvents.VesselLoaded</c> — <c>AcquireUpdateLock</c>
+        ///         fires whenever KSP's physics-range auto-load brings a vessel
+        ///         into the loaded set, including foreign-agency vessels.</item>
+        /// </list>
+        /// The server's Stage 5.17a guard correctly rejects each cross-agency
+        /// acquire with <see cref="LmpCommon.Message.Types.LockRejectReason.CrossAgency"/>,
+        /// firing a "Cannot interact with this vessel: it belongs to..." toast
+        /// on the player's screen at every passive event — even though the
+        /// player did nothing. The server-side 5s per-(player, vessel, type)
+        /// debounce in <c>LockSystemSender.CrossAgencyRejectLastEmitMs</c>
+        /// prevents stacking but doesn't suppress single firings, producing
+        /// the "random but very dependable" toast cadence cohort soak
+        /// reported.</para>
+        ///
+        /// <para><b>Scope: passive auto-acquires only.</b> Callers gate this
+        /// helper at <c>LockSystem.AcquireUpdateLock</c> +
+        /// <c>AcquireUnloadedUpdateLock</c> — NOT <c>AcquireControlLock</c>.
+        /// Control acquires are mostly user-driven (vessel-switch click,
+        /// <c>FlightStarted</c>); the existing toast on a user-initiated
+        /// cross-agency control attempt is meaningful UX ("you can't fly
+        /// this") and routes the player into the spectator path via
+        /// <c>OnVesselChange</c>'s pre-acquire branch. Update /
+        /// UnloadedUpdate are passive housekeeping that no user clicked for;
+        /// the toast there is pure noise. <c>AcquireKerbalLock</c> is also
+        /// not gated — the 5.17a server-side cross-agency classifier only
+        /// applies to vessel-scoped lock types (Control / Update /
+        /// UnloadedUpdate, per
+        /// <c>Server/System/LockSystem.ClassifyCrossAgency</c>), so there is
+        /// no kerbal-lock cross-agency reject path to suppress.</para>
+        ///
+        /// <para><b>Bypass shape (mirrors <see cref="IsRecoveryBlockedByAgency"/>):</b>
+        /// <list type="bullet">
+        ///   <item>Gate off → permit (dual-mode silence).</item>
+        ///   <item>Local <see cref="Guid.Empty"/> agency (pre-handshake / post-
+        ///         deleteagency-of-own-agency) → permit; let server decide.</item>
+        ///   <item>Vessel not in client's registry → permit; relay-path lag
+        ///         may not have stamped yet, server-side guard catches real
+        ///         cross-agency attempts downstream.</item>
+        ///   <item>Owning agency <see cref="Guid.Empty"/> (Unassigned-sentinel
+        ///         per spec §10 Q3) → permit; any agency may interact.</item>
+        ///   <item>Same agency → permit; forward-compat with multi-player-
+        ///         per-agency (today 1:1, but a same-agency peer SHOULD be
+        ///         able to take an Update lock on a fellow agency-mate's
+        ///         vessel — the 5.17a server guard already allows this).</item>
+        ///   <item>Otherwise (gate on, non-Empty local agency, vessel known
+        ///         with non-Empty + different agency) → BLOCK.</item>
+        /// </list></para>
+        ///
+        /// <para><b>Force-acquire bypass.</b> Callers pass <c>force=true</c>
+        /// when an upstream lock-acquire (Control / parent-vessel Update)
+        /// has already established the local player's authority — e.g.
+        /// <c>VesselLockEvents.LockAcquire</c>'s Control branch chain-fires
+        /// <c>AcquireUpdateLock(..., force: true)</c>, and
+        /// <c>VesselDecoupleEvents.DecoupleComplete</c> fires
+        /// <c>AcquireUnloadedUpdateLock(..., force: true)</c> after verifying
+        /// the local player owns the parent's Update lock. Those callers
+        /// must NOT be gated by this helper; pass through unconditionally
+        /// at the call site (see <c>LockSystem.AcquireUpdateLock</c>'s
+        /// <c>!force</c> guard).</para>
+        /// </summary>
+        public static bool IsAutoAcquireBlockedByAgency(
+            Guid localAgencyId,
+            bool vesselKnown,
+            Guid vesselOwningAgencyId,
+            bool perAgencyEnabledClientGate)
+        {
+            if (!perAgencyEnabledClientGate) return false;
+            if (localAgencyId == Guid.Empty) return false;
+            if (!vesselKnown) return false;
+            if (vesselOwningAgencyId == Guid.Empty) return false;
+            return vesselOwningAgencyId != localAgencyId;
+        }
+
+        /// <summary>
         /// Mod-compat S6 — outbound-proto agency stamp decision helper. Returns the
         /// agency id that <c>VesselSerializer.PreSerializationChecks</c> should write
         /// into the outbound ConfigNode's <c>lmpOwningAgency</c> top-level field, or
