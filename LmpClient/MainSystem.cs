@@ -208,10 +208,15 @@ namespace LmpClient
                 Enabled = false;
                 DisclaimerDialog.SpawnDialog();
             }
-            else
-            {
-                StartCoroutine(UpdateHandler.CheckForUpdates());
-            }
+            // Auto-updater note: the in-game UpdateHandler/UpdateWindow that
+            // used to poll upstream LunaMultiplayer/releases/latest here was
+            // removed on the auto-updater branch. The standalone Tools/
+            // PlayerUpdater exe is the single source of truth for fork
+            // version polling now - upstream's tag format
+            // (vMAJOR.MINOR.PATCH) was the only one System.Version could
+            // parse, and the fork's tags (v0.31.0-per-agency-private-N)
+            // threw at the parser site, so the in-game path was
+            // structurally dead on this fork regardless.
         }
 
         public void Awake()
