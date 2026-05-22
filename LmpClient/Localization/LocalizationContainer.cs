@@ -27,7 +27,6 @@ namespace LmpClient.Localization
         public static ScreenshotWindowText ScreenshotWindowText = new ScreenshotWindowText();
         public static ScreenText ScreenText = new ScreenText();
         public static ButtonTooltips ButtonTooltips = new ButtonTooltips();
-        public static UpdateWindowText UpdateWindowText = new UpdateWindowText();
         public static CompatibleDialogText CompatibleDialogText = new CompatibleDialogText();
         public static RevertDialogText RevertDialogText = new RevertDialogText();
         public static ServerListFiltersText ServerListFiltersText = new ServerListFiltersText();
@@ -88,7 +87,6 @@ namespace LmpClient.Localization
             LoadWindowTexts(language, ref ScreenshotWindowText);
             LoadWindowTexts(language, ref ScreenText);
             LoadWindowTexts(language, ref ButtonTooltips);
-            LoadWindowTexts(language, ref UpdateWindowText);
             LoadWindowTexts(language, ref CompatibleDialogText);
             LoadWindowTexts(language, ref RevertDialogText);
             LoadWindowTexts(language, ref ServerListFiltersText);
@@ -120,7 +118,6 @@ namespace LmpClient.Localization
                 LunaXmlSerializer.WriteToXmlFile(ScreenshotWindowText, CommonUtil.CombinePaths(LocalizationFolder, language, $"{nameof(ScreenshotWindowText)}.xml"));
                 LunaXmlSerializer.WriteToXmlFile(ScreenText, CommonUtil.CombinePaths(LocalizationFolder, language, $"{nameof(ScreenText)}.xml"));
                 LunaXmlSerializer.WriteToXmlFile(ButtonTooltips, CommonUtil.CombinePaths(LocalizationFolder, language, $"{nameof(ButtonTooltips)}.xml"));
-                LunaXmlSerializer.WriteToXmlFile(UpdateWindowText, CommonUtil.CombinePaths(LocalizationFolder, language, $"{nameof(UpdateWindowText)}.xml"));
                 LunaXmlSerializer.WriteToXmlFile(CompatibleDialogText, CommonUtil.CombinePaths(LocalizationFolder, language, $"{nameof(CompatibleDialogText)}.xml"));
                 LunaXmlSerializer.WriteToXmlFile(RevertDialogText, CommonUtil.CombinePaths(LocalizationFolder, language, $"{nameof(RevertDialogText)}.xml"));
                 LunaXmlSerializer.WriteToXmlFile(ServerListFiltersText, CommonUtil.CombinePaths(LocalizationFolder, language, $"{nameof(ServerListFiltersText)}.xml"));

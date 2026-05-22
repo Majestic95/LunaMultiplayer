@@ -42,12 +42,23 @@
     Produces Debug-flavoured zips for diagnostic soak.
 
 .NOTES
-    Distribution gotcha: LmpGlobal/RepoConstants.cs + LunaMultiplayer.version
-    both point at upstream LunaMultiplayer/LunaMultiplayer. Testers who click
-    "check for updates" in-game will downgrade to upstream's no-fixes build.
-    Release notes MUST tell testers not to click update. When the cohort grows
-    beyond a handful of people, fork-edit RepoConstants + regenerate the version
-    file with our fork pointers (see project_release_distribution memory note).
+    Distribution updates (auto-updater branch, 2026-05-20):
+
+    - LunaMultiplayer.version is now TEMPLATED at build time (not copied
+      verbatim from the on-disk file, which is still pinned at upstream
+      0.29.1 with upstream URLs - kept on disk as a legacy fallback only).
+      Pass -ReleaseTag to populate the file with the actual fork tag,
+      Majestic95 GitHub URLs, and channel + revision so the PlayerUpdater
+      exe can recognise the player's installed line.
+    - The in-game UpdateHandler / UpdateWindow was removed in Piece B of
+      the auto-updater workstream (commit 9330cc5c). Clients no longer
+      poll any URL on session start; version checking lives entirely in
+      Tools/PlayerUpdater (Piece A, forthcoming on the same branch).
+    - LmpGlobal/RepoConstants.cs is still on upstream URLs, but the only
+      consumers are server-side (VersionChecker for master-server
+      registration, MasterServer for the dedicated-servers list). Player
+      clients no longer read RepoConstants. Repoint when cohort scale
+      makes the master-server registration relevant.
 #>
 
 [CmdletBinding()]
@@ -70,7 +81,24 @@ param(
     # absent).
     [string]$LunaCompatRepoPath = "$PSScriptRoot\..\..\luna-compat-perAgency",
 
-    [switch]$SkipBuildLunaCompat
+    [switch]$SkipBuildLunaCompat,
+
+    # Fork release tag to embed in GameData/LunaMultiplayer/LunaMultiplayer.version
+    # Examples: 'v0.31.0-per-agency-private-8', 'v0.30.0-private-2', 'v0.31.0'.
+    #
+    # The PlayerUpdater exe (Tools/PlayerUpdater) reads this from a player's
+    # install to determine which release channel they are on and whether an
+    # update is available. The legacy on-disk LunaMultiplayer.version was
+    # frozen at upstream's 0.29.1 with upstream URLs - shipping that to every
+    # player meant the file lied about both the version AND the repo. This
+    # parameter forces a fresh fork-aware version file at every release.
+    #
+    # If empty, the script falls back to a local-dev sentinel ('v0.0.0-dev',
+    # channel=dev) so local non-release builds still get a fork-pointed file
+    # rather than the stale upstream-pointed one on disk. The dev sentinel
+    # can also be passed explicitly as '-ReleaseTag v0.0.0-dev' if your CI
+    # script always emits a tag value.
+    [string]$ReleaseTag = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -105,6 +133,108 @@ foreach ($lib in $requiredKspLibs) {
     }
 }
 Write-Host "KSP libs present at $kspLibs" -ForegroundColor Cyan
+
+# ---------- Parse the release tag ----------
+# Grammar (Majestic95 fork tags):
+#   v<MAJOR>.<MINOR>.<PATCH>                                        -> stable
+#   v<MAJOR>.<MINOR>.<PATCH>-private-<REV>                          -> stability private
+#   v<MAJOR>.<MINOR>.<PATCH>-private-<REV>.<HOTFIX>                 -> stability private hotfix
+#   v<MAJOR>.<MINOR>.<PATCH>-per-agency-private-<REV>               -> per-agency private
+#   v<MAJOR>.<MINOR>.<PATCH>-per-agency-private-<REV>.<HOTFIX>      -> per-agency private hotfix
+#   v0.0.0-dev                                                      -> local non-release sentinel
+#
+# CANONICAL: this grammar is mirrored in Tools/PlayerUpdater/Core/VersionParser.cs.
+# If you extend it here (e.g. to add an 'rc' channel), extend the C# parser in
+# lockstep, or installed PlayerUpdaters will refuse to classify the new tags.
+function Get-LmpVersionMetadata {
+    param([string]$Tag)
+
+    # Accept empty OR the literal dev sentinel as the local-dev path - either
+    # 'unspecified' or 'explicitly dev' route to the same metadata.
+    if ([string]::IsNullOrWhiteSpace($Tag) -or $Tag -eq 'v0.0.0-dev') {
+        return @{
+            Tag = 'v0.0.0-dev'
+            Major = 0; Minor = 0; Patch = 0
+            Channel = 'dev'
+            Revision = $null
+            Hotfix = $null
+        }
+    }
+
+    # Channel + revision are a SINGLE optional group. Tags either have BOTH
+    # ('-private-7', '-per-agency-private-3') or NEITHER (stable releases).
+    # A bare '-private' with no '-N' is a typo, not a valid shape - throw.
+    # Hotfix is an INNER optional dot-suffix on the revision ('-private-8.1');
+    # rejects bare trailing dot ('-private-8.') and multi-segment hotfix
+    # ('-private-8.1.2'). No stable-release hotfix path - 'v0.31.0.1' is invalid.
+    # Hotfix-zero ('-private-8.0') is REJECTED on purpose - it would tie with
+    # bare '-8' under the planned coalesce-to-zero ordering rule, letting two
+    # distinct tags map to the same release ordinal. Bump '-8' to '-8.1' or '-9'.
+    $rx = '^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(-(?<channel>private|per-agency-private)-(?<rev>\d+)(\.(?<hotfix>[1-9]\d*))?)?$'
+    $m = [regex]::Match($Tag, $rx)
+    if (-not $m.Success) {
+        throw "ReleaseTag '$Tag' does not match the expected grammar (v<MAJOR>.<MINOR>.<PATCH>[-private-N[.H]|-per-agency-private-N[.H]]). The PlayerUpdater exe relies on this grammar to classify channels - either pass a conformant tag or extend the grammar here and in Tools/PlayerUpdater/Core/VersionParser.cs together."
+    }
+
+    $channel = if ($m.Groups['channel'].Success) { $m.Groups['channel'].Value } else { 'stable' }
+    $rev     = if ($m.Groups['rev'].Success)     { [int]$m.Groups['rev'].Value } else { $null }
+    $hotfix  = if ($m.Groups['hotfix'].Success)  { [int]$m.Groups['hotfix'].Value } else { $null }
+
+    return @{
+        Tag      = $Tag
+        Major    = [int]$m.Groups['major'].Value
+        Minor    = [int]$m.Groups['minor'].Value
+        Patch    = [int]$m.Groups['patch'].Value
+        Channel  = $channel
+        Revision = $rev
+        Hotfix   = $hotfix
+    }
+}
+
+$versionMeta = Get-LmpVersionMetadata -Tag $ReleaseTag
+Write-Host "Release tag: $($versionMeta.Tag) (channel=$($versionMeta.Channel), revision=$($versionMeta.Revision), hotfix=$($versionMeta.Hotfix))" -ForegroundColor Cyan
+
+function New-LmpVersionFile {
+    param(
+        [Parameter(Mandatory)][hashtable]$Meta,
+        [Parameter(Mandatory)][string]$DestinationPath
+    )
+
+    # Manually construct JSON to keep the field ordering predictable + match
+    # what the PlayerUpdater reads. ConvertTo-Json would reorder keys.
+    $revToken    = if ($null -eq $Meta.Revision) { 'null' } else { [string]$Meta.Revision }
+    $hotfixToken = if ($null -eq $Meta.Hotfix)   { 'null' } else { [string]$Meta.Hotfix }
+
+    $json = @"
+{
+    "NAME":    "Luna Multiplayer (Majestic95 fork)",
+    "URL":     "https://github.com/Majestic95/LunaMultiplayer/raw/master/LunaMultiplayer.version",
+    "DOWNLOAD": "https://github.com/Majestic95/LunaMultiplayer/releases",
+    "GITHUB": {
+        "USERNAME":   "Majestic95",
+        "REPOSITORY": "LunaMultiplayer"
+    },
+    "VERSION": {
+        "MAJOR": $($Meta.Major),
+        "MINOR": $($Meta.Minor),
+        "PATCH": $($Meta.Patch)
+    },
+    "TAG":      "$($Meta.Tag)",
+    "CHANNEL":  "$($Meta.Channel)",
+    "REVISION": $revToken,
+    "HOTFIX":   $hotfixToken,
+    "KSP_VERSION": {
+        "MAJOR": 1,
+        "MINOR": 12
+    }
+}
+"@
+
+    # The on-disk legacy file is UTF-8 no BOM (see git history). Match that
+    # so a diff of an installed file against a checked-in one shows only
+    # the genuine field changes, not encoding noise.
+    [System.IO.File]::WriteAllText($DestinationPath, $json, [System.Text.UTF8Encoding]::new($false))
+}
 
 # ---------- Output staging area ----------
 $ReleasesRoot = Join-Path $RepoRoot "Releases\$Configuration"
@@ -165,8 +295,14 @@ Copy-Item -Recurse -Force -Path (Join-Path $RepoRoot 'LmpClient\ModuleStore\XML\
 Copy-Item -Force -Path (Join-Path $RepoRoot 'LmpClient\Resources\Icons\*.*')         -Destination (Join-Path $lmpFolder 'Icons')
 Copy-Item -Force -Path (Join-Path $RepoRoot 'LmpClient\Resources\Flags\*.*')         -Destination (Join-Path $lmpFolder 'Flags')
 
-# Update-check metadata file.
-Copy-Item -Force -Path (Join-Path $RepoRoot 'LunaMultiplayer.version') -Destination (Join-Path $lmpFolder 'LunaMultiplayer.version')
+# Update-check metadata file - templated, NOT copied verbatim from disk.
+# The on-disk LunaMultiplayer.version is frozen at upstream's 0.29.1 with
+# upstream URLs; shipping that to every player would tell their installed
+# PlayerUpdater (and the legacy in-game updater pre-Piece-B) to poll the
+# wrong repo. We regenerate the file here with the actual release tag +
+# Majestic95 URLs every time. See Get-LmpVersionMetadata / New-LmpVersionFile
+# at the top of this script.
+New-LmpVersionFile -Meta $versionMeta -DestinationPath (Join-Path $lmpFolder 'LunaMultiplayer.version')
 
 # Readme alongside the GameData folder.
 $readmeSrc = Join-Path $RepoRoot 'LMP Readme.txt'
@@ -310,6 +446,70 @@ foreach ($rid in $serverRids) {
     if ($LASTEXITCODE -ne 0) { throw "Server publish for $($rid.Name) failed (exit $LASTEXITCODE)." }
 }
 
+# ---------- Build + publish the PlayerUpdater (Tools/PlayerUpdater) ----------
+# Two flavours per the auto-updater workstream's locked design decision:
+#   * framework-dependent single-file .exe (~5 MB) - requires .NET 10 Desktop
+#     Runtime on the player machine; ideal for the cohort majority who already
+#     have it or are happy to install it once
+#   * self-contained folder zipped (~70 MB) - bundles the runtime, no .NET
+#     dependency on the player machine; ideal for players who can't or won't
+#     install runtimes
+#
+# Shipped via the SAME Majestic95/LunaMultiplayer release that carries the
+# Client + Server zips, so the PlayerUpdater can fetch its OWN newer versions
+# from the same release feed it already polls for LMP versions (the
+# GitHubClient in Tools/PlayerUpdater hard-codes the Majestic95 repo URL -
+# do NOT swap that for LmpGlobal/RepoConstants.cs, which still points at
+# upstream).
+# PlayerUpdater asset paths are computed ONCE in this block (when the
+# publish gates pass) and re-used by the zip-emission block below. This
+# avoids the maintenance hazard of re-deriving the same path twice - a
+# refactor of `$puFdOut` / `$puScOut` would otherwise drift the zip-time
+# gate silently. `$script:` scope makes the assignments visible at the
+# emission block; defaults are `$null` so the gate naturally skips when
+# the publish step skipped.
+$script:PlayerUpdaterFdExe = $null
+$script:PlayerUpdaterScDir = $null
+
+$playerUpdaterProject = Join-Path $RepoRoot 'Tools\PlayerUpdater\PlayerUpdater.csproj'
+if (Test-Path $playerUpdaterProject) {
+    # Framework-dependent single-file. PublishSingleFile=true bundles the
+    # LunaMultiplayer-PlayerUpdater.exe + its small DLL into one self-
+    # extracting exe. IncludeNativeLibrariesForSelfExtract handles the
+    # WinForms native lib bundling. We do NOT trim - WinForms metadata
+    # isn't trim-safe on net10.0. DebugType=none is already pinned in
+    # the csproj's Release block but we pass it on the command line for
+    # belt-and-braces in case the csproj is ever rebalanced.
+    Write-Host "Publishing PlayerUpdater (framework-dependent single-file)..." -ForegroundColor Cyan
+    $puFdOut = Join-Path $FinalFiles 'PlayerUpdater-frameworkdep'
+    $cmd = "$DotNet publish `"$playerUpdaterProject`" --configuration $Configuration --runtime win-x64 --self-contained false --output `"$puFdOut`" -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false --nologo"
+    Invoke-Expression $cmd
+    if ($LASTEXITCODE -ne 0) { throw "PlayerUpdater framework-dependent publish failed (exit $LASTEXITCODE)." }
+    $puFdExe = Join-Path $puFdOut 'LunaMultiplayer-PlayerUpdater.exe'
+    if (-not (Test-Path $puFdExe)) {
+        throw "Expected $puFdExe after publish - verify the AssemblyName in PlayerUpdater.csproj is still 'LunaMultiplayer-PlayerUpdater'."
+    }
+    $script:PlayerUpdaterFdExe = $puFdExe
+
+    # Self-contained folder publish. NOT single-file because the runtime
+    # bundle is ~70 MB and single-file would force a slow self-extract on
+    # every launch; shipping as a folder-in-zip means one extract by the
+    # player + fast subsequent launches. We copy the publish dir whole
+    # so any sidecar DLL / config that the runtime needs is included.
+    Write-Host "Publishing PlayerUpdater (self-contained)..." -ForegroundColor Cyan
+    $puScOut = Join-Path $FinalFiles 'PlayerUpdater-selfcontained\LMPPlayerUpdater'
+    $cmd = "$DotNet publish `"$playerUpdaterProject`" --configuration $Configuration --runtime win-x64 --self-contained true --output `"$puScOut`" -p:PublishSingleFile=false -p:PublishTrimmed=false --nologo"
+    Invoke-Expression $cmd
+    if ($LASTEXITCODE -ne 0) { throw "PlayerUpdater self-contained publish failed (exit $LASTEXITCODE)." }
+    $puScExe = Join-Path $puScOut 'LunaMultiplayer-PlayerUpdater.exe'
+    if (-not (Test-Path $puScExe)) {
+        throw "Expected $puScExe after self-contained publish."
+    }
+    $script:PlayerUpdaterScDir = $puScOut
+} else {
+    Write-Host "Tools/PlayerUpdater not found - skipping PlayerUpdater publish step. (Expected when building from a branch that predates the auto-updater workstream.)" -ForegroundColor Yellow
+}
+
 # ---------- Compress to zip ----------
 # Compress-Archive is built-in (no 7zip dependency) but does NOT preserve Unix
 # execute bits. Linux/ARM hosts must `chmod +x Server` (or `dotnet Server.dll`
@@ -342,6 +542,37 @@ foreach ($rid in $serverRids) {
     )
 }
 
+# PlayerUpdater assets - ship two flavours alongside the Client + Server
+# zips so a fresh player can pick whichever matches their .NET 10 install
+# state without needing to read release notes.
+#
+# (a) framework-dependent: single .exe shipped DIRECTLY (not zipped) so a
+#     player downloads one file + double-clicks it.
+# (b) self-contained: folder zipped with the readme so the player extracts
+#     to a known location, then double-clicks the .exe inside.
+#
+# Both variants are gated on the publish-time `$script:PlayerUpdaterFdExe`
+# / `$script:PlayerUpdaterScDir` having been set by the publish block
+# above (`$null` when the publish step skipped or failed verification),
+# so we never ship a stale/orphan asset from a prior partial run.
+if ($null -ne $script:PlayerUpdaterFdExe -and (Test-Path $script:PlayerUpdaterFdExe)) {
+    $puFdAsset = "LunaMultiplayer-PlayerUpdater-win-x64-$Configuration.exe"
+    Copy-Item -Force -Path $script:PlayerUpdaterFdExe -Destination (Join-Path $ReleasesRoot $puFdAsset)
+    $sizeBytes = (Get-Item (Join-Path $ReleasesRoot $puFdAsset)).Length
+    "{0}  {1,10:N0} bytes" -f $puFdAsset, $sizeBytes | Write-Host -ForegroundColor Green
+}
+# Re-check the .exe inside the SC dir before zipping - `Test-Path` on the
+# directory alone would let an empty-dir failure mode (msbuild outputs
+# only an obj-shape when --output is preexisting from a prior failed run)
+# silently ship a useless zip.
+if ($null -ne $script:PlayerUpdaterScDir `
+    -and (Test-Path (Join-Path $script:PlayerUpdaterScDir 'LunaMultiplayer-PlayerUpdater.exe'))) {
+    New-ReleaseZip -ZipName "LunaMultiplayer-PlayerUpdater-win-x64-selfcontained-$Configuration.zip" -SourcePaths @(
+        (Join-Path $FinalFiles 'LMP Readme.txt'),
+        $script:PlayerUpdaterScDir
+    )
+}
+
 # ---------- Summary ----------
 Write-Host ""
 Write-Host "Done. Zips are in: $ReleasesRoot" -ForegroundColor Cyan
@@ -357,7 +588,9 @@ Write-Host "      $ReleasesRoot\LunaMultiplayer-Client-$Configuration.zip ``"
 Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-win-x64-$Configuration.zip ``"
 Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-linux-x64-$Configuration.zip ``"
 Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-linux-arm64-$Configuration.zip ``"
-Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-any-$Configuration.zip"
+Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-any-$Configuration.zip ``"
+Write-Host "      $ReleasesRoot\LunaMultiplayer-PlayerUpdater-win-x64-$Configuration.exe ``"
+Write-Host "      $ReleasesRoot\LunaMultiplayer-PlayerUpdater-win-x64-selfcontained-$Configuration.zip"
 Write-Host ""
 Write-Host "  IMPORTANT: the --repo flag is mandatory because this repo has both"
 Write-Host "  origin (Majestic95) and upstream (LunaMultiplayer) remotes configured."

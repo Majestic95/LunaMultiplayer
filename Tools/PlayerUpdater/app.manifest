@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="LunaMultiplayer.PlayerUpdater" />
+
+  <!-- asInvoker by design: the updater MUST NOT trigger an automatic UAC
+       prompt. It probes the target KSP install for write access at startup
+       and refuses with operator-recovery instructions when the path is
+       read-only (typically a Program Files install). Silent elevation
+       would hide the failure mode from players whose Steam library is in
+       a non-default location and whose install is actually writable. -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
+    <security>
+      <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
+        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 / 11 -->
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!-- Per-monitor DPI awareness. The manifest is authoritative when
+       embedded; Program.Main also calls Application.SetHighDpiMode for the
+       dotnet-run case where the manifest isn't embedded. Both elements
+       declared per Microsoft guidance — dpiAware (legacy) for pre-1607
+       paths inside WinForms, dpiAwareness (Win10 1607+) for the modern
+       per-monitor v2 chain. Lowercase tokens are the documented canonical
+       form. -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">permonitorv2, permonitor</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/PM</dpiAware>
+    </windowsSettings>
+  </application>
+
+</assembly>

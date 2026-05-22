@@ -285,7 +285,6 @@
     <Compile Include="Localization\Structures\ButtonTooltips.cs" />
     <Compile Include="Localization\Structures\ScreenshotWindowText.cs" />
     <Compile Include="Localization\Structures\CompatibleDialogText.cs" />
-    <Compile Include="Localization\Structures\UpdateWindowText.cs" />
     <Compile Include="LunaScreenMsg.cs" />
     <Compile Include="Harmony\ModuleEngines_Activate.cs" />
     <Compile Include="ModuleStore\Patching\FieldChangeTranspiler.cs" />
@@ -487,7 +486,6 @@
     <Compile Include="Systems\VesselUpdateSys\VesselUpdate.cs" />
     <Compile Include="Systems\VesselUpdateSys\VesselUpdateQueue.cs" />
     <Compile Include="Utilities\EvaReady.cs" />
-    <Compile Include="Utilities\UpdateHandler.cs" />
     <Compile Include="Utilities\CompatibilityChecker.cs" />
     <Compile Include="Utilities\CoroutineUtil.cs" />
     <Compile Include="Utilities\Detourer.cs" />
@@ -630,8 +628,6 @@
     <Compile Include="Windows\Options\OptionsWindow.cs" />
     <Compile Include="Windows\Status\StatusDrawer.cs" />
     <Compile Include="Windows\Status\StatusWindow.cs" />
-    <Compile Include="Windows\Update\UpdateDrawer.cs" />
-    <Compile Include="Windows\Update\UpdateWindow.cs" />
     <Compile Include="Windows\Vessels\VesselFilter.cs" />
     <Compile Include="Windows\Vessels\Structures\VesselBaseDisplay.cs" />
     <Compile Include="Windows\Vessels\Structures\VesselDataDisplay.cs" />
@@ -663,7 +659,6 @@
     <Content Include="Localization\XML\Danish\ScreenText.xml" />
     <Content Include="Localization\XML\Danish\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Danish\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Danish\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Dutch\AdminWindowText.xml" />
     <Content Include="Localization\XML\Dutch\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Dutch\ButtonTooltips.xml" />
@@ -680,7 +675,6 @@
     <Content Include="Localization\XML\Dutch\ScreenText.xml" />
     <Content Include="Localization\XML\Dutch\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Dutch\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Dutch\UpdateWindowText.xml" />
     <Content Include="Localization\XML\English\AdminWindowText.xml" />
     <Content Include="Localization\XML\English\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\English\ButtonTooltips.xml" />
@@ -697,7 +691,6 @@
     <Content Include="Localization\XML\English\ScreenText.xml" />
     <Content Include="Localization\XML\English\ServerListWindowText.xml" />
     <Content Include="Localization\XML\English\StatusWindowText.xml" />
-    <Content Include="Localization\XML\English\UpdateWindowText.xml" />
     <Content Include="Localization\XML\French\AdminWindowText.xml" />
     <Content Include="Localization\XML\French\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\French\ButtonTooltips.xml" />
@@ -714,7 +707,6 @@
     <Content Include="Localization\XML\French\ScreenText.xml" />
     <Content Include="Localization\XML\French\ServerListWindowText.xml" />
     <Content Include="Localization\XML\French\StatusWindowText.xml" />
-    <Content Include="Localization\XML\French\UpdateWindowText.xml" />
     <Content Include="Localization\XML\German\AdminWindowText.xml" />
     <Content Include="Localization\XML\German\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\German\ButtonTooltips.xml" />
@@ -731,7 +723,6 @@
     <Content Include="Localization\XML\German\ScreenText.xml" />
     <Content Include="Localization\XML\German\ServerListWindowText.xml" />
     <Content Include="Localization\XML\German\StatusWindowText.xml" />
-    <Content Include="Localization\XML\German\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Italian\AdminWindowText.xml" />
     <Content Include="Localization\XML\Italian\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Italian\ButtonTooltips.xml" />
@@ -748,7 +739,6 @@
     <Content Include="Localization\XML\Italian\ScreenText.xml" />
     <Content Include="Localization\XML\Italian\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Italian\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Italian\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Japanese\AdminWindowText.xml" />
     <Content Include="Localization\XML\Japanese\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Japanese\ButtonTooltips.xml" />
@@ -765,7 +755,6 @@
     <Content Include="Localization\XML\Japanese\ScreenText.xml" />
     <Content Include="Localization\XML\Japanese\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Japanese\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Japanese\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Polish\AdminWindowText.xml" />
     <Content Include="Localization\XML\Polish\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Polish\ButtonTooltips.xml" />
@@ -782,7 +771,6 @@
     <Content Include="Localization\XML\Polish\ScreenText.xml" />
     <Content Include="Localization\XML\Polish\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Polish\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Polish\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Russian\AdminWindowText.xml" />
     <Content Include="Localization\XML\Russian\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Russian\ButtonTooltips.xml" />
@@ -799,7 +787,6 @@
     <Content Include="Localization\XML\Russian\ScreenText.xml" />
     <Content Include="Localization\XML\Russian\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Russian\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Russian\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Simplified Chinese\AdminWindowText.xml" />
     <Content Include="Localization\XML\Simplified Chinese\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Simplified Chinese\ButtonTooltips.xml" />
@@ -816,7 +803,6 @@
     <Content Include="Localization\XML\Simplified Chinese\ScreenText.xml" />
     <Content Include="Localization\XML\Simplified Chinese\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Simplified Chinese\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Simplified Chinese\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Spanish\AdminWindowText.xml" />
     <Content Include="Localization\XML\Spanish\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Spanish\ButtonTooltips.xml" />
@@ -833,7 +819,6 @@
     <Content Include="Localization\XML\Spanish\ScreenText.xml" />
     <Content Include="Localization\XML\Spanish\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Spanish\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Spanish\UpdateWindowText.xml" />
     <Content Include="Localization\XML\Swedish\AdminWindowText.xml" />
     <Content Include="Localization\XML\Swedish\BannedPartsResourcesWindowText.xml" />
     <Content Include="Localization\XML\Swedish\ButtonTooltips.xml" />
@@ -850,7 +835,6 @@
     <Content Include="Localization\XML\Swedish\ScreenText.xml" />
     <Content Include="Localization\XML\Swedish\ServerListWindowText.xml" />
     <Content Include="Localization\XML\Swedish\StatusWindowText.xml" />
-    <Content Include="Localization\XML\Swedish\UpdateWindowText.xml" />
     <Content Include="ModuleStore\XML\Squad\FlagDecalBackground.xml" />
     <Content Include="ModuleStore\XML\Squad\FlagDecal.xml" />
     <Content Include="ModuleStore\XML\Squad\KerbalSeat.xml" />
