@@ -312,6 +312,70 @@ foreach ($rid in $serverRids) {
     if ($LASTEXITCODE -ne 0) { throw "Server publish for $($rid.Name) failed (exit $LASTEXITCODE)." }
 }
 
+# ---------- Build + publish the PlayerUpdater (Tools/PlayerUpdater) ----------
+# Two flavours per the auto-updater workstream's locked design decision:
+#   * framework-dependent single-file .exe (~5 MB) - requires .NET 10 Desktop
+#     Runtime on the player machine; ideal for the cohort majority who already
+#     have it or are happy to install it once
+#   * self-contained folder zipped (~70 MB) - bundles the runtime, no .NET
+#     dependency on the player machine; ideal for players who can't or won't
+#     install runtimes
+#
+# Shipped via the SAME Majestic95/LunaMultiplayer release that carries the
+# Client + Server zips, so the PlayerUpdater can fetch its OWN newer versions
+# from the same release feed it already polls for LMP versions (the
+# GitHubClient in Tools/PlayerUpdater hard-codes the Majestic95 repo URL -
+# do NOT swap that for LmpGlobal/RepoConstants.cs, which still points at
+# upstream).
+# PlayerUpdater asset paths are computed ONCE in this block (when the
+# publish gates pass) and re-used by the zip-emission block below. This
+# avoids the maintenance hazard of re-deriving the same path twice - a
+# refactor of `$puFdOut` / `$puScOut` would otherwise drift the zip-time
+# gate silently. `$script:` scope makes the assignments visible at the
+# emission block; defaults are `$null` so the gate naturally skips when
+# the publish step skipped.
+$script:PlayerUpdaterFdExe = $null
+$script:PlayerUpdaterScDir = $null
+
+$playerUpdaterProject = Join-Path $RepoRoot 'Tools\PlayerUpdater\PlayerUpdater.csproj'
+if (Test-Path $playerUpdaterProject) {
+    # Framework-dependent single-file. PublishSingleFile=true bundles the
+    # LunaMultiplayer-PlayerUpdater.exe + its small DLL into one self-
+    # extracting exe. IncludeNativeLibrariesForSelfExtract handles the
+    # WinForms native lib bundling. We do NOT trim - WinForms metadata
+    # isn't trim-safe on net10.0. DebugType=none is already pinned in
+    # the csproj's Release block but we pass it on the command line for
+    # belt-and-braces in case the csproj is ever rebalanced.
+    Write-Host "Publishing PlayerUpdater (framework-dependent single-file)..." -ForegroundColor Cyan
+    $puFdOut = Join-Path $FinalFiles 'PlayerUpdater-frameworkdep'
+    $cmd = "$DotNet publish `"$playerUpdaterProject`" --configuration $Configuration --runtime win-x64 --self-contained false --output `"$puFdOut`" -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:PublishTrimmed=false --nologo"
+    Invoke-Expression $cmd
+    if ($LASTEXITCODE -ne 0) { throw "PlayerUpdater framework-dependent publish failed (exit $LASTEXITCODE)." }
+    $puFdExe = Join-Path $puFdOut 'LunaMultiplayer-PlayerUpdater.exe'
+    if (-not (Test-Path $puFdExe)) {
+        throw "Expected $puFdExe after publish - verify the AssemblyName in PlayerUpdater.csproj is still 'LunaMultiplayer-PlayerUpdater'."
+    }
+    $script:PlayerUpdaterFdExe = $puFdExe
+
+    # Self-contained folder publish. NOT single-file because the runtime
+    # bundle is ~70 MB and single-file would force a slow self-extract on
+    # every launch; shipping as a folder-in-zip means one extract by the
+    # player + fast subsequent launches. We copy the publish dir whole
+    # so any sidecar DLL / config that the runtime needs is included.
+    Write-Host "Publishing PlayerUpdater (self-contained)..." -ForegroundColor Cyan
+    $puScOut = Join-Path $FinalFiles 'PlayerUpdater-selfcontained\LMPPlayerUpdater'
+    $cmd = "$DotNet publish `"$playerUpdaterProject`" --configuration $Configuration --runtime win-x64 --self-contained true --output `"$puScOut`" -p:PublishSingleFile=false -p:PublishTrimmed=false --nologo"
+    Invoke-Expression $cmd
+    if ($LASTEXITCODE -ne 0) { throw "PlayerUpdater self-contained publish failed (exit $LASTEXITCODE)." }
+    $puScExe = Join-Path $puScOut 'LunaMultiplayer-PlayerUpdater.exe'
+    if (-not (Test-Path $puScExe)) {
+        throw "Expected $puScExe after self-contained publish."
+    }
+    $script:PlayerUpdaterScDir = $puScOut
+} else {
+    Write-Host "Tools/PlayerUpdater not found - skipping PlayerUpdater publish step. (Expected when building from a branch that predates the auto-updater workstream.)" -ForegroundColor Yellow
+}
+
 # ---------- Compress to zip ----------
 # Compress-Archive is built-in (no 7zip dependency) but does NOT preserve Unix
 # execute bits. Linux/ARM hosts must `chmod +x Server` (or `dotnet Server.dll`
@@ -344,6 +408,37 @@ foreach ($rid in $serverRids) {
     )
 }
 
+# PlayerUpdater assets - ship two flavours alongside the Client + Server
+# zips so a fresh player can pick whichever matches their .NET 10 install
+# state without needing to read release notes.
+#
+# (a) framework-dependent: single .exe shipped DIRECTLY (not zipped) so a
+#     player downloads one file + double-clicks it.
+# (b) self-contained: folder zipped with the readme so the player extracts
+#     to a known location, then double-clicks the .exe inside.
+#
+# Both variants are gated on the publish-time `$script:PlayerUpdaterFdExe`
+# / `$script:PlayerUpdaterScDir` having been set by the publish block
+# above (`$null` when the publish step skipped or failed verification),
+# so we never ship a stale/orphan asset from a prior partial run.
+if ($null -ne $script:PlayerUpdaterFdExe -and (Test-Path $script:PlayerUpdaterFdExe)) {
+    $puFdAsset = "LunaMultiplayer-PlayerUpdater-win-x64-$Configuration.exe"
+    Copy-Item -Force -Path $script:PlayerUpdaterFdExe -Destination (Join-Path $ReleasesRoot $puFdAsset)
+    $sizeBytes = (Get-Item (Join-Path $ReleasesRoot $puFdAsset)).Length
+    "{0}  {1,10:N0} bytes" -f $puFdAsset, $sizeBytes | Write-Host -ForegroundColor Green
+}
+# Re-check the .exe inside the SC dir before zipping - `Test-Path` on the
+# directory alone would let an empty-dir failure mode (msbuild outputs
+# only an obj-shape when --output is preexisting from a prior failed run)
+# silently ship a useless zip.
+if ($null -ne $script:PlayerUpdaterScDir `
+    -and (Test-Path (Join-Path $script:PlayerUpdaterScDir 'LunaMultiplayer-PlayerUpdater.exe'))) {
+    New-ReleaseZip -ZipName "LunaMultiplayer-PlayerUpdater-win-x64-selfcontained-$Configuration.zip" -SourcePaths @(
+        (Join-Path $FinalFiles 'LMP Readme.txt'),
+        $script:PlayerUpdaterScDir
+    )
+}
+
 # ---------- Summary ----------
 Write-Host ""
 Write-Host "Done. Zips are in: $ReleasesRoot" -ForegroundColor Cyan
@@ -359,7 +454,9 @@ Write-Host "      $ReleasesRoot\LunaMultiplayer-Client-$Configuration.zip ``"
 Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-win-x64-$Configuration.zip ``"
 Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-linux-x64-$Configuration.zip ``"
 Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-linux-arm64-$Configuration.zip ``"
-Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-any-$Configuration.zip"
+Write-Host "      $ReleasesRoot\LunaMultiplayer-Server-any-$Configuration.zip ``"
+Write-Host "      $ReleasesRoot\LunaMultiplayer-PlayerUpdater-win-x64-$Configuration.exe ``"
+Write-Host "      $ReleasesRoot\LunaMultiplayer-PlayerUpdater-win-x64-selfcontained-$Configuration.zip"
 Write-Host ""
 Write-Host "  IMPORTANT: the --repo flag is mandatory because this repo has both"
 Write-Host "  origin (Majestic95) and upstream (LunaMultiplayer) remotes configured."
