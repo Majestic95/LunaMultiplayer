@@ -123,10 +123,12 @@ Write-Host "KSP libs present at $kspLibs" -ForegroundColor Cyan
 
 # ---------- Parse the release tag ----------
 # Grammar (Majestic95 fork tags):
-#   v<MAJOR>.<MINOR>.<PATCH>                                  -> stable
-#   v<MAJOR>.<MINOR>.<PATCH>-private-<REV>                    -> stability private
-#   v<MAJOR>.<MINOR>.<PATCH>-per-agency-private-<REV>         -> per-agency private
-#   v0.0.0-dev                                                -> local non-release sentinel
+#   v<MAJOR>.<MINOR>.<PATCH>                                        -> stable
+#   v<MAJOR>.<MINOR>.<PATCH>-private-<REV>                          -> stability private
+#   v<MAJOR>.<MINOR>.<PATCH>-private-<REV>.<HOTFIX>                 -> stability private hotfix
+#   v<MAJOR>.<MINOR>.<PATCH>-per-agency-private-<REV>               -> per-agency private
+#   v<MAJOR>.<MINOR>.<PATCH>-per-agency-private-<REV>.<HOTFIX>      -> per-agency private hotfix
+#   v0.0.0-dev                                                      -> local non-release sentinel
 #
 # CANONICAL: this grammar is mirrored in Tools/PlayerUpdater/Core/VersionParser.cs.
 # If you extend it here (e.g. to add an 'rc' channel), extend the C# parser in
@@ -142,20 +144,28 @@ function Get-LmpVersionMetadata {
             Major = 0; Minor = 0; Patch = 0
             Channel = 'dev'
             Revision = $null
+            Hotfix = $null
         }
     }
 
     # Channel + revision are a SINGLE optional group. Tags either have BOTH
     # ('-private-7', '-per-agency-private-3') or NEITHER (stable releases).
     # A bare '-private' with no '-N' is a typo, not a valid shape - throw.
-    $rx = '^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(-(?<channel>private|per-agency-private)-(?<rev>\d+))?$'
+    # Hotfix is an INNER optional dot-suffix on the revision ('-private-8.1');
+    # rejects bare trailing dot ('-private-8.') and multi-segment hotfix
+    # ('-private-8.1.2'). No stable-release hotfix path - 'v0.31.0.1' is invalid.
+    # Hotfix-zero ('-private-8.0') is REJECTED on purpose - it would tie with
+    # bare '-8' under the planned coalesce-to-zero ordering rule, letting two
+    # distinct tags map to the same release ordinal. Bump '-8' to '-8.1' or '-9'.
+    $rx = '^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(-(?<channel>private|per-agency-private)-(?<rev>\d+)(\.(?<hotfix>[1-9]\d*))?)?$'
     $m = [regex]::Match($Tag, $rx)
     if (-not $m.Success) {
-        throw "ReleaseTag '$Tag' does not match the expected grammar (v<MAJOR>.<MINOR>.<PATCH>[-private-N|-per-agency-private-N]). The PlayerUpdater exe relies on this grammar to classify channels - either pass a conformant tag or extend the grammar here and in Tools/PlayerUpdater/Core/VersionParser.cs together."
+        throw "ReleaseTag '$Tag' does not match the expected grammar (v<MAJOR>.<MINOR>.<PATCH>[-private-N[.H]|-per-agency-private-N[.H]]). The PlayerUpdater exe relies on this grammar to classify channels - either pass a conformant tag or extend the grammar here and in Tools/PlayerUpdater/Core/VersionParser.cs together."
     }
 
     $channel = if ($m.Groups['channel'].Success) { $m.Groups['channel'].Value } else { 'stable' }
     $rev     = if ($m.Groups['rev'].Success)     { [int]$m.Groups['rev'].Value } else { $null }
+    $hotfix  = if ($m.Groups['hotfix'].Success)  { [int]$m.Groups['hotfix'].Value } else { $null }
 
     return @{
         Tag      = $Tag
@@ -164,11 +174,12 @@ function Get-LmpVersionMetadata {
         Patch    = [int]$m.Groups['patch'].Value
         Channel  = $channel
         Revision = $rev
+        Hotfix   = $hotfix
     }
 }
 
 $versionMeta = Get-LmpVersionMetadata -Tag $ReleaseTag
-Write-Host "Release tag: $($versionMeta.Tag) (channel=$($versionMeta.Channel), revision=$($versionMeta.Revision))" -ForegroundColor Cyan
+Write-Host "Release tag: $($versionMeta.Tag) (channel=$($versionMeta.Channel), revision=$($versionMeta.Revision), hotfix=$($versionMeta.Hotfix))" -ForegroundColor Cyan
 
 function New-LmpVersionFile {
     param(
@@ -178,7 +189,8 @@ function New-LmpVersionFile {
 
     # Manually construct JSON to keep the field ordering predictable + match
     # what the PlayerUpdater reads. ConvertTo-Json would reorder keys.
-    $revToken = if ($null -eq $Meta.Revision) { 'null' } else { [string]$Meta.Revision }
+    $revToken    = if ($null -eq $Meta.Revision) { 'null' } else { [string]$Meta.Revision }
+    $hotfixToken = if ($null -eq $Meta.Hotfix)   { 'null' } else { [string]$Meta.Hotfix }
 
     $json = @"
 {
@@ -197,6 +209,7 @@ function New-LmpVersionFile {
     "TAG":      "$($Meta.Tag)",
     "CHANNEL":  "$($Meta.Channel)",
     "REVISION": $revToken,
+    "HOTFIX":   $hotfixToken,
     "KSP_VERSION": {
         "MAJOR": 1,
         "MINOR": 12

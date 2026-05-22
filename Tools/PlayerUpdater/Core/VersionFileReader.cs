@@ -10,17 +10,19 @@ namespace LunaMultiplayer.PlayerUpdater.Core
     // are supported:
     //
     // Piece-C+ (templated by Scripts/build-release.ps1):
-    //   { "TAG": "v0.31.0-per-agency-private-7", "CHANNEL": "per-agency-private",
-    //     "REVISION": 7, "VERSION": { "MAJOR": 0, "MINOR": 31, "PATCH": 0 }, ... }
-    //   The TAG field is authoritative; CHANNEL + REVISION + VERSION are
-    //   build-time outputs of the parser and used as cross-checks during
-    //   defensive reads — never re-derived here.
+    //   { "TAG": "v0.31.0-per-agency-private-8.1", "CHANNEL": "per-agency-private",
+    //     "REVISION": 8, "HOTFIX": 1, "VERSION": { "MAJOR": 0, "MINOR": 31, "PATCH": 0 }, ... }
+    //   The TAG field is authoritative; CHANNEL + REVISION + HOTFIX + VERSION
+    //   are build-time outputs of the parser and used as cross-checks during
+    //   defensive reads — never re-derived here. HOTFIX is null when absent
+    //   (e.g. 'v0.31.0-per-agency-private-7').
     //
     // Pre-Piece-C (legacy on-disk file, byte-for-byte from upstream 0.29.1):
     //   { "VERSION": { "MAJOR": 0, "MINOR": 29, "PATCH": 1 }, "GITHUB": {...}, ... }
-    //   No TAG / CHANNEL / REVISION fields. We synthesise a "vMAJOR.MINOR.PATCH"
-    //   tag, default the channel to stable (these installs were never on a
-    //   private cohort; upstream only ships stable), and return revision=null.
+    //   No TAG / CHANNEL / REVISION / HOTFIX fields. We synthesise a
+    //   "vMAJOR.MINOR.PATCH" tag, default the channel to stable (these installs
+    //   were never on a private cohort; upstream only ships stable), and return
+    //   revision=null + hotfix=null.
     //
     // Any I/O or JSON failure returns null — callers should treat null as
     // "could not detect installed version" and let the player pick from a
@@ -127,7 +129,8 @@ namespace LunaMultiplayer.PlayerUpdater.Core
                     Minor: minor,
                     Patch: patch,
                     Channel: VersionMetadata.ChannelStable,
-                    Revision: null);
+                    Revision: null,
+                    Hotfix: null);
             }
         }
 
