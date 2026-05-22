@@ -244,7 +244,20 @@ namespace LunaMultiplayer.PlayerUpdater.Core
                 return new OverlayAction(entry.FullName, null, ActionKind.Skip, SkipReason.EmptyName, entry.Length);
             }
 
-            if (entry.FullName.EndsWith("/", StringComparison.Ordinal))
+            // Directory-entry detection has to accept BOTH `/` (the zip-spec
+            // separator that .NET's ZipFile.CreateFromDirectory emits) AND `\`
+            // (Windows PowerShell's Compress-Archive emits these on net472 /
+            // PS 5.1). Without the backslash branch, Compress-Archive-produced
+            // zips ship directory markers like
+            // `GameData\LunaMultiplayer\Localization\` that we'd treat as files
+            // and then fail on with DirectoryNotFoundException (the empty file
+            // can't be created inside a non-existent directory). The
+            // `entry.Name == ""` check is the defense-in-depth signal — every
+            // .NET ZipArchiveEntry representing a directory has an empty Name
+            // regardless of how the FullName separators were spelled.
+            if (entry.FullName.EndsWith("/", StringComparison.Ordinal)
+                || entry.FullName.EndsWith("\\", StringComparison.Ordinal)
+                || string.IsNullOrEmpty(entry.Name))
             {
                 return new OverlayAction(entry.FullName, null, ActionKind.Skip, SkipReason.Directory, entry.Length);
             }
