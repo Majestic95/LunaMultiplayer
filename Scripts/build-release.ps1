@@ -232,13 +232,110 @@ if (Test-Path $FinalFiles) { Remove-Item -Recurse -Force $FinalFiles }
 New-Item -ItemType Directory -Force -Path $FinalFiles  | Out-Null
 New-Item -ItemType Directory -Force -Path $ReleasesRoot | Out-Null
 
+# ---------- Embed release tag in LmpClient.dll assembly metadata ----------
+# Rewrites the three [assembly: Assembly*Version(...)] attribute lines in
+# LmpClient/Properties/AssemblyInfo.cs based on $versionMeta, so the built
+# DLL carries the FULL release tag in its AssemblyInformationalVersion
+# (e.g. "v0.31.0-per-agency-private-11"). PlayerUpdater's VersionFileReader
+# uses this as a fallback source of truth when LunaMultiplayer.version is
+# stale, missing, or unparseable - covers the partial-extract scenario
+# where players ship the new DLLs but their unzip skipped the metadata
+# file. AssemblyVersion + AssemblyFileVersion stay MAJOR.MINOR.PATCH only
+# so KSP's [assembly: KSPAssembly("LMP", major, minor)] compatibility
+# check still matches.
+#
+# Dev sentinel ($versionMeta.Tag == 'v0.0.0-dev') SKIPS the rewrite -
+# rewriting to "0.0.0" would break KSP's KSPAssembly version check on
+# local dev builds. Release builds (non-dev tag) always rewrite.
+#
+# Caller responsibility: wrap LmpClient build in a try/finally that
+# restores the original file content on success OR failure, so the source
+# tree is never left modified.
+function Set-LmpClientAssemblyInfoVersion {
+    param(
+        [Parameter(Mandatory)][string]$AssemblyInfoPath,
+        [Parameter(Mandatory)][hashtable]$Meta
+    )
+
+    $original = [System.IO.File]::ReadAllText($AssemblyInfoPath)
+
+    # Dev builds: leave the source-tree values untouched. They have
+    # KSPAssembly compatibility implications and there is no meaningful
+    # tag to embed.
+    if ($Meta.Tag -eq 'v0.0.0-dev') {
+        Write-Host "Dev tag - skipping AssemblyInfo.cs rewrite" -ForegroundColor Yellow
+        return $original
+    }
+
+    $shortVersion = "$($Meta.Major).$($Meta.Minor).$($Meta.Patch)"
+    $tagValue     = $Meta.Tag
+
+    # Pre-rewrite assertion: every regex MUST match. A silent no-match would
+    # leave one of the three attributes stuck on the source-tree value while
+    # the other two get the embedded tag - producing a DLL with mismatched
+    # metadata that the PlayerUpdater's DLL-fallback then mis-classifies.
+    # Upgrade-lens S3 hardening.
+    $patterns = @(
+        @{ Name='AssemblyVersion';              Regex='(?m)^\[assembly:\s*AssemblyVersion\("[^"]*"\)\]';              Replacement="[assembly: AssemblyVersion(`"$shortVersion`")]" },
+        @{ Name='AssemblyFileVersion';          Regex='(?m)^\[assembly:\s*AssemblyFileVersion\("[^"]*"\)\]';          Replacement="[assembly: AssemblyFileVersion(`"$shortVersion`")]" },
+        @{ Name='AssemblyInformationalVersion'; Regex='(?m)^\[assembly:\s*AssemblyInformationalVersion\("[^"]*"\)\]'; Replacement="[assembly: AssemblyInformationalVersion(`"$tagValue`")]" }
+    )
+
+    $rewritten = $original
+    foreach ($p in $patterns) {
+        if (-not [regex]::IsMatch($rewritten, $p.Regex)) {
+            throw "Set-LmpClientAssemblyInfoVersion: pattern '$($p.Name)' did NOT match in $AssemblyInfoPath. If the attribute lines were reformatted or moved, update the regex in build-release.ps1 to match - a release build with one missing rewrite would silently ship a mismatched DLL."
+        }
+        $rewritten = [regex]::Replace($rewritten, $p.Regex, $p.Replacement)
+    }
+
+    [System.IO.File]::WriteAllText($AssemblyInfoPath, $rewritten, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "Embedded tag in AssemblyInfo.cs: $tagValue (short=$shortVersion)" -ForegroundColor Cyan
+    return $original
+}
+
 # ---------- Build LmpClient (net472, Mono - the KSP plugin DLL) ----------
 if ($SkipBuildLmpClient) {
+    # NOTE: -SkipBuildLmpClient deliberately also skips the AssemblyInfo
+    # rewrite. The reused LmpClient.dll carries whatever embedded tag (or
+    # lack thereof) was in it from a previous build - intentional, because
+    # rewriting source without rebuilding produces a DLL whose embedded
+    # metadata lies about the source.
     Write-Host "Skipping LmpClient build (-SkipBuildLmpClient). Reusing LmpClient/bin/$Configuration." -ForegroundColor Yellow
 } else {
-    Write-Host "Building LmpClient ($Configuration, net472)..." -ForegroundColor Cyan
-    & $DotNet build (Join-Path $RepoRoot 'LmpClient\LmpClient.csproj') -c $Configuration -nologo
-    if ($LASTEXITCODE -ne 0) { throw "LmpClient build failed (exit $LASTEXITCODE)." }
+    $assemblyInfoPath = Join-Path $RepoRoot 'LmpClient\Properties\AssemblyInfo.cs'
+
+    # Sanity-check the source tree BEFORE rewriting. If AssemblyInfo.cs
+    # carries uncommitted edits (likely from a prior interrupted release
+    # where the PowerShell host did NOT run our `finally`-block on Ctrl-C),
+    # refuse to start - otherwise the operator's existing edits would be
+    # snapshotted and treated as the "original" to restore.
+    # Upgrade-lens U2.
+    & git -C $RepoRoot diff --quiet -- 'LmpClient/Properties/AssemblyInfo.cs' 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "LmpClient/Properties/AssemblyInfo.cs has uncommitted edits. This usually means a prior release build was interrupted before its finally-block could restore the file (PowerShell finally is not guaranteed to run on Ctrl-C in all hosts). Restore the file via 'git checkout -- LmpClient/Properties/AssemblyInfo.cs' and re-run, OR commit your intentional edits first."
+    }
+
+    $assemblyInfoOriginal = $null
+    try {
+        $assemblyInfoOriginal = Set-LmpClientAssemblyInfoVersion -AssemblyInfoPath $assemblyInfoPath -Meta $versionMeta
+        Write-Host "Building LmpClient ($Configuration, net472)..." -ForegroundColor Cyan
+        & $DotNet build (Join-Path $RepoRoot 'LmpClient\LmpClient.csproj') -c $Configuration -nologo
+        if ($LASTEXITCODE -ne 0) { throw "LmpClient build failed (exit $LASTEXITCODE)." }
+    } finally {
+        # Always restore the source-tree file - whether build succeeded,
+        # threw, or the rewrite itself silently produced an empty diff
+        # (dev tag). This keeps git clean across the release cycle.
+        #
+        # Caveat: PowerShell's `finally` block does NOT reliably run when
+        # the user hits Ctrl-C in some hosts (Windows Terminal pwsh in
+        # particular). The pre-build `git diff --quiet` sanity check above
+        # is the safety net - a next-run refuses to start if the prior
+        # run was interrupted mid-rewrite.
+        if ($null -ne $assemblyInfoOriginal) {
+            [System.IO.File]::WriteAllText($assemblyInfoPath, $assemblyInfoOriginal, [System.Text.UTF8Encoding]::new($false))
+        }
+    }
 }
 
 $lmpClientBin = Join-Path $RepoRoot "LmpClient\bin\$Configuration"
