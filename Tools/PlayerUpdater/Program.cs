@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Windows.Forms;
+using LunaMultiplayer.PlayerUpdater.Forms;
 
 namespace LunaMultiplayer.PlayerUpdater
 {
@@ -34,23 +35,74 @@ namespace LunaMultiplayer.PlayerUpdater
                 return 1;
             }
 
+            // SetCompatibleTextRenderingDefault MUST be called before
+            // EnableVisualStyles per Microsoft docs — reversing the order
+            // produces undefined behaviour on text-rendering paths used by
+            // older controls. Set DPI mode first (required before any
+            // window is created), then the two text/style toggles in their
+            // documented order.
             Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
-            Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            Application.EnableVisualStyles();
 
-            // Forms land in a follow-up commit (Piece A — core modules + WinForms).
-            // The scaffold proves the project builds, the single-instance mutex
-            // works, and the manifest is honoured (asInvoker / PerMonitorV2).
-            MessageBox.Show(
-                "Luna Multiplayer Player Updater (scaffold).\n\n" +
-                "The real updater UI lands in a follow-up commit. This build " +
-                "only verifies that the project compiles and the single-instance " +
-                "guard works.",
-                "PlayerUpdater scaffold",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+            // Async-void event handlers in MainForm / ProgressForm cannot
+            // be reached by the synchronous catch around Application.Run.
+            // Wire the WinForms thread-exception event AND the AppDomain
+            // unhandled-exception event so:
+            //   - exceptions on the UI thread land in ShowCrashDialog
+            //   - exceptions on a worker thread (rare — Core uses async
+            //     but the continuations marshal back to the UI thread)
+            //     also land in ShowCrashDialog before the process dies.
+            // Application.SetUnhandledExceptionMode(CatchException) routes
+            // ALL exceptions through Application.ThreadException, even
+            // those that would otherwise crash via the AppDomain path.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, args) => ShowCrashDialog(args.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            {
+                if (args.ExceptionObject is Exception ex) ShowCrashDialog(ex);
+            };
 
-            return 0;
+            try
+            {
+                Application.Run(new MainForm());
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                // Top-level guard for SYNCHRONOUS construction throws (e.g.
+                // a MainForm constructor failure). Async-void handler
+                // exceptions are caught by the ThreadException wire-up
+                // above and never reach here.
+                ShowCrashDialog(ex);
+                return 2;
+            }
+        }
+
+        // Renders a copy-paste-friendly crash dialog. Process exits after
+        // the operator dismisses — we do NOT keep running post-exception
+        // because any in-flight install / file copy is in an undefined
+        // state and continuing risks compounding the damage.
+        private static void ShowCrashDialog(Exception ex)
+        {
+            try
+            {
+                MessageBox.Show(
+                    "Luna Multiplayer Player Updater encountered an unhandled error and must close.\n\n" +
+                    $"{ex.GetType().Name}: {ex.Message}\n\n" +
+                    $"{ex.StackTrace}\n\n" +
+                    "Copy this message body into the cohort Discord support channel.",
+                    "PlayerUpdater error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch
+            {
+                // Last-ditch — if the dialog itself fails (rare; usually
+                // means the UI thread is in an exotic state), there's
+                // nothing left to do.
+            }
+            Environment.Exit(2);
         }
     }
 }
