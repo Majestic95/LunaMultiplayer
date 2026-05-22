@@ -698,11 +698,42 @@ namespace LunaMultiplayer.PlayerUpdater.Forms
 
             // Refusal. Build error text including the per-outcome explanation
             // + the raw Error string from the pipeline (often the most useful
-            // diagnostic).
+            // diagnostic) + a path to the per-entry log when the failure
+            // reached the extract stage (where OverlayResult.Outcomes carries
+            // the actionable detail). Without the log path the operator only
+            // sees "3 failed entries" and has no way to identify which files
+            // were locked — InstallLogWriter writes the per-entry trail and
+            // we surface the path in the dialog so the operator can read or
+            // attach it to a bug report.
+            string? logPath = null;
+            try
+            {
+                logPath = InstallLogWriter.WriteFailureLog(
+                    result,
+                    installPath,
+                    _candidateAsset.Name,
+                    _installedVersion?.Tag ?? string.Empty,
+                    AppContext.BaseDirectory,
+                    DateTime.UtcNow);
+            }
+            catch (Exception ex) when (
+                ex is IOException
+                or UnauthorizedAccessException
+                or System.Security.SecurityException)
+            {
+                // Belt-and-braces — InstallLogWriter.WriteFailureLog is
+                // already best-effort + catches its own IO failures, but a
+                // future refactor must not let a log-write surprise replace
+                // the actual install-failure dialog with a misleading error.
+                logPath = null;
+            }
+
+            var details = BuildErrorDetails(result.Error, logPath);
+
             using (var dialog = new ErrorDialog(
                 title: FormatOutcomeTitle(result.Outcome),
                 summary: FormatOutcomeSummary(result.Outcome),
-                details: result.Error ?? "(no diagnostic)",
+                details: details,
                 offerRollback: result.BackupDir != null))
             {
                 var dlgResult = dialog.ShowDialog(this);
@@ -1055,5 +1086,19 @@ namespace LunaMultiplayer.PlayerUpdater.Forms
                 "The extract step failed partway through. The KSP install may be in a mixed state — Rollback is recommended.",
             _ => "The install did not complete cleanly.",
         };
+
+        // Composes the ErrorDialog `details` body. The pipeline's raw Error
+        // string (single-line diagnostic like "Extract completed with 3
+        // failed entries...") is the primary content; the optional log path
+        // is appended on a fresh line so a player or maintainer can find
+        // the per-entry trail. Visible-for-testing via `internal static` to
+        // pin the format without spinning up the WinForms surface.
+        internal static string BuildErrorDetails(string? pipelineError, string? logPath)
+        {
+            var primary = string.IsNullOrEmpty(pipelineError) ? "(no diagnostic)" : pipelineError;
+            if (string.IsNullOrEmpty(logPath)) return primary;
+
+            return primary + "\n\nPer-entry log written to:\n  " + logPath;
+        }
     }
 }
