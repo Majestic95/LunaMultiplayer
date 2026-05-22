@@ -73,6 +73,54 @@ namespace LunaMultiplayer.PlayerUpdater.Tests.Core
         }
 
         [TestMethod]
+        public void PlanOverlay_BackslashTerminatedDirectoryEntry_SkippedWithReasonDirectory()
+        {
+            // Windows PowerShell's Compress-Archive emits directory markers
+            // with `\` instead of the zip-spec `/`. Without explicit handling,
+            // those entries slip past the `EndsWith("/")` check, get classified
+            // as Create/Overwrite, and fail at extract time with
+            // DirectoryNotFoundException. This pins the fix that recognises
+            // both separators.
+            WriteZipWithDirectories(
+                new[] { "GameData\\", "GameData\\LunaMultiplayer\\Localization\\" },
+                new[] { ("GameData/LunaMultiplayer/Plugins/LmpClient.dll", "new") });
+
+            var plan = ZipInstaller.PlanOverlay(_zipPath, _installDir);
+
+            var skipped = plan.Where(p => p.Kind == ZipInstaller.ActionKind.Skip).ToList();
+            Assert.AreEqual(2, skipped.Count);
+            Assert.IsTrue(skipped.All(p => p.SkipReason == ZipInstaller.SkipReason.Directory));
+        }
+
+        [TestMethod]
+        public void PlanOverlay_EmptyNameDirectoryEntry_SkippedWithReasonDirectory()
+        {
+            // Defense in depth: ZipArchiveEntry.Name is empty for directory
+            // entries regardless of which separator the FullName uses. This
+            // is the canonical "this is a directory" signal in .NET's zip
+            // API and should be honoured even if both `/` and `\` checks
+            // somehow miss (e.g. a future zip-creator emits no trailing
+            // separator at all but still flags the entry as a directory).
+            using (var archive = ZipFile.Open(_zipPath, ZipArchiveMode.Create))
+            {
+                // Note: CreateEntry with a name that has Name == "" requires
+                // a trailing separator on the FullName. We construct one
+                // manually to exercise the empty-Name detection path.
+                archive.CreateEntry("EmptyDir/");
+                var fileEntry = archive.CreateEntry("file.txt");
+                using var s = fileEntry.Open();
+                using var w = new StreamWriter(s);
+                w.Write("real");
+            }
+
+            var plan = ZipInstaller.PlanOverlay(_zipPath, _installDir);
+
+            var dirSkip = plan.SingleOrDefault(p => p.Kind == ZipInstaller.ActionKind.Skip);
+            Assert.IsNotNull(dirSkip);
+            Assert.AreEqual(ZipInstaller.SkipReason.Directory, dirSkip!.SkipReason);
+        }
+
+        [TestMethod]
         public void PlanOverlay_PathTraversal_SkippedWithReasonPathTraversal()
         {
             // The cornerstone ZipSlip defense — a '../' segment that
