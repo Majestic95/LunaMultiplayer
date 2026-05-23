@@ -169,6 +169,13 @@ namespace Server.System.Vessel
                                 vessel.OwningAgencyId = Guid.Empty;
                             }
                         }
+                        //[perf:relay-body Phase 2] Seed CurrentBodyName from the parsed
+                        //ConfigNode's Orbit (which has body / IDENT populated from the
+                        //incoming proto bytes). MessageQueuer.ResolveSenderBody reads
+                        //this lock-free off the Vessel record. The seed runs once per
+                        //proto ingest, then WritePositionDataToFile keeps it in sync as
+                        //inbound Position updates change SOI mid-flight.
+                        vessel.CurrentBodyName = vessel.GetOrbitingBodyName();
                         VesselStoreSystem.CurrentVessels.AddOrUpdate(vesselId, vessel, (key, existingVal) => vessel);
                     }
                 }

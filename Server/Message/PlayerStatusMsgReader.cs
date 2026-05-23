@@ -28,6 +28,15 @@ namespace Server.Message
 
                     client.PlayerStatus.VesselText = data.PlayerStatus.VesselText;
                     client.PlayerStatus.StatusText = data.PlayerStatus.StatusText;
+                    //[perf:relay-scene Phase 1] Capture the client's reported scene so
+                    //MessageQueuer.RelayMessageToFlightScene can gate on it. Pre-Phase-1
+                    //clients leave data.Scene at Unknown (the deserializer tail-bit-read
+                    //default) and the filter treats Unknown as "relay always" for compat
+                    //— see ShouldReceiveVesselUpdate. Scene lives on PlayerStatusSetMsgData
+                    //directly (not on the embedded PlayerStatusInfo) to avoid the array-
+                    //corruption hazard in PlayerStatusReplyMsgData; see XML on
+                    //PlayerStatusSetMsgData.Scene for the design constraint.
+                    client.PlayerStatus.Scene = data.Scene;
                     MessageQueuer.RelayMessage<PlayerStatusSrvMsg>(client, data);
                     break;
             }

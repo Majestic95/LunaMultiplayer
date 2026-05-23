@@ -57,6 +57,34 @@ namespace Server.Client
         public int Subspace { get; set; } = int.MinValue; //Leave it as min value. When client connect we force them client side to go to latest subspace
         public float SubspaceRate { get; set; } = 1f;
 
+        /// <summary>
+        /// Phase 2 of server-side-offload — most-recently reported active vessel id for
+        /// this client. Set in <see cref="Server.Message.VesselMsgReader.HandleMessage"/>'s
+        /// Flightstate case (Flightstate is by design the local-active-vessel-only path —
+        /// <see cref="LmpClient.Systems.VesselFlightStateSys.VesselFlightStateSystem.SendFlightState"/>
+        /// calls SendCurrentFlightState only for the active vessel). Drives the
+        /// recipient-side resolution in <see cref="MessageQueuer.ResolveRecipientBody"/>
+        /// for the same-body filter — when a Position relay arrives, the server matches
+        /// the sender's vessel body against the recipient's active-vessel body and drops
+        /// the relay if they're at different celestial bodies. <see cref="Guid.Empty"/>
+        /// = "client hasn't sent first Flightstate yet" → same-body filter falls back to
+        /// permissive (relay always). Synchronously written on the Lidgren receive
+        /// thread; read by the same thread during the next relay decision (no race).
+        /// </summary>
+        public Guid ActiveVesselId { get; set; } = Guid.Empty;
+
+        /// <summary>
+        /// Phase 2 of server-side-offload — body name of <see cref="ActiveVesselId"/>'s
+        /// orbit. Updated in <see cref="Server.Message.VesselMsgReader.HandleMessage"/>'s
+        /// Position case when the inbound Position's VesselId matches
+        /// <see cref="ActiveVesselId"/>. Synchronous fast path so the same-body filter
+        /// at relay time doesn't have to round-trip through <c>VesselStoreSystem</c> +
+        /// <c>Vessel.GetOrbitingBodyName</c> (which is eventually-consistent — populated
+        /// by the 2.5s-throttled <see cref="Server.System.Vessel.VesselDataUpdater.WritePositionDataToFile"/>
+        /// path). <c>null</c>/empty = "recipient body unknown" → filter goes permissive.
+        /// </summary>
+        public string ActiveVesselBodyName { get; set; }
+
         public DateTime ConnectionTime { get; } = DateTime.UtcNow;
 
         public Task SendThread { get; }

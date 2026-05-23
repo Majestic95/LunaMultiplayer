@@ -26,6 +26,16 @@ namespace LmpClient.Systems.Status
             msgData.PlayerStatus.PlayerName = SettingsSystem.CurrentSettings.PlayerName;
             msgData.PlayerStatus.StatusText = System.MyPlayerStatus.StatusText;
             msgData.PlayerStatus.VesselText = System.MyPlayerStatus.VesselText;
+            //Phase 1 of server-side-offload — include current KSP scene so server
+            //can filter continuous vessel-state relays (Position / Flightstate /
+            //etc.) to recipients whose scene will actually render them.
+            //StatusSystem.CheckPlayerStatus's StatusIsDifferent comparator already
+            //includes Scene, so a scene change automatically triggers SendOwnStatus.
+            //Set on the message directly (NOT on the embedded PlayerStatusInfo)
+            //because PlayerStatusInfo is also embedded in PlayerStatusReplyMsgData
+            //as an unframed array — a tail-bit-read field there would corrupt
+            //subsequent array elements. See PlayerStatusSetMsgData.Scene XML.
+            msgData.Scene = System.MyPlayerStatus.Scene;
 
             SendMessage(msgData);
         }

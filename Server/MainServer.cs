@@ -92,6 +92,41 @@ namespace Server
 
                 Universe.CheckUniverse();
                 LoadSettingsAndGroups();
+
+                //[perf:relay-scene Phase 1] Per-feature state diagnostic after settings
+                //load so operators can grep `[perf:relay-scene]` to verify the gate state.
+                //The ForkBuildInfo banner above lists "perf:relay-scene" as one of N
+                //tokens — which only tells you the binary CAN do it, not whether it's
+                //ACTIVE. The consumer-lens review flagged this as a MUST FIX: an operator
+                //setting SceneAwareRelayEnabled=false would otherwise see no signal that
+                //they're back on the baseline RelayMessage path.
+                if (OptimizationSettings.SettingsStore.SceneAwareRelayEnabled)
+                    LunaLog.Normal("[perf:relay-scene] enabled — vessel Position/Flightstate/Update/Resource/PartSync*/ActionGroup/Fairing relays will be dropped to clients NOT in Flight or TrackingStation. Set OptimizationSettings.SceneAwareRelayEnabled=false to restore baseline broadcast behaviour.");
+                else
+                    LunaLog.Normal("[perf:relay-scene] DISABLED via OptimizationSettings.xml — baseline RelayMessage path active (every vessel relay fans to every client regardless of recipient scene).");
+
+                //[perf:relay-body Phase 2] Per-feature state diagnostic for same-body
+                //filtering. Independent of [perf:relay-scene] above — both compose in
+                //RelayMessageToFlightSceneSameBody; either can be operator-disabled.
+                if (OptimizationSettings.SettingsStore.SameBodyFilterEnabled)
+                    LunaLog.Normal("[perf:relay-body] enabled — vessel relays will be dropped when sender and recipient are at different celestial bodies. Conservative same-body-only filter (Mun-from-Kerbin-orbit IS dropped — modded planet packs handled). Set OptimizationSettings.SameBodyFilterEnabled=false to restore scene-only Phase 1 behaviour.");
+                else
+                    LunaLog.Normal("[perf:relay-body] DISABLED via OptimizationSettings.xml — same-body filtering inactive (Phase 1 scene gate still applies per [perf:relay-scene] above).");
+
+                //[perf:relay-cadence Phase 3] Per-vessel cadence throttle by lock holder.
+                //Independent from Phase 1 / 2 — only affects Position relays for vessels
+                //with no active Control lock.
+                var cadenceMultiplier = OptimizationSettings.SettingsStore.UnpilotedVesselCadenceMultiplier;
+                if (cadenceMultiplier > 1)
+                {
+                    var secondaryMs = IntervalSettings.SettingsStore.SecondaryVesselUpdatesMsInterval;
+                    //Cast to long mirrors the hot-path math in MessageQueuer.ShouldRelayPositionByCadence —
+                    //prevents wraparound-negative log lines under absurd operator dials (Phase 3 review S1).
+                    LunaLog.Normal($"[perf:relay-cadence] enabled — Position relays for vessels without an active Control lock throttled to one per ~{(long)secondaryMs * cadenceMultiplier}ms (SecondaryVesselUpdatesMsInterval={secondaryMs}ms × UnpilotedVesselCadenceMultiplier={cadenceMultiplier}). Set UnpilotedVesselCadenceMultiplier=1 in OptimizationSettings.xml to disable.");
+                }
+                else
+                    LunaLog.Normal("[perf:relay-cadence] DISABLED via OptimizationSettings.xml (UnpilotedVesselCadenceMultiplier<=1) — all Position relays fire at full cadence regardless of Control lock state.");
+
                 VesselStoreSystem.LoadExistingVessels();
                 var scenariosCreated = ScenarioSystem.GenerateDefaultScenarios();
                 ScenarioStoreSystem.LoadExistingScenarios(scenariosCreated);
