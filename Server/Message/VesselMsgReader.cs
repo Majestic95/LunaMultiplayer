@@ -33,53 +33,63 @@ namespace Server.Message
                 case VesselMessageType.Remove:
                     HandleVesselRemove(client, messageData);
                     break;
+                //[perf:relay-scene Phase 1] Continuous vessel-state relays use
+                //RelayMessageToFlightScene so recipients not in Flight/TrackingStation
+                //drop the message at the relay decision (no SendToClient → no
+                //serialization → no main-thread receive-queue depth). Catch-up /
+                //structural relays (Proto / Sync / Couple / Remove handled below)
+                //stay on the unconditional RelayMessage path — they must populate
+                //FlightGlobals.Vessels in EVERY scene so scene entry into Flight
+                //finds a fully populated world.
                 case VesselMessageType.Position:
                     if (RejectIfPastSubspace(client, messageData)) break;
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     if (client.Subspace == WarpContext.LatestSubspace.Id)
                         VesselDataUpdater.WritePositionDataToFile(messageData);
                     break;
                 case VesselMessageType.Flightstate:
                     if (RejectIfPastSubspace(client, messageData)) break;
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     VesselDataUpdater.WriteFlightstateDataToFile(messageData);
                     break;
                 case VesselMessageType.Update:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteUpdateDataToFile(messageData);
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Resource:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteResourceDataToFile(messageData);
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncField:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WritePartSyncFieldDataToFile(messageData);
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncUiField:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WritePartSyncUiFieldDataToFile(messageData);
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncCall:
                     if (RejectIfPastSubspace(client, messageData)) break;
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.ActionGroup:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteActionGroupDataToFile(messageData);
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Fairing:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteFairingDataToFile(messageData);
-                    MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Decouple:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    //Structural: recipients need to know the vessel was decoupled
+                    //regardless of scene so their CurrentVessels stays in sync.
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Couple:
@@ -87,6 +97,7 @@ namespace Server.Message
                     break;
                 case VesselMessageType.Undock:
                     if (RejectIfPastSubspace(client, messageData)) break;
+                    //Structural (see Decouple comment).
                     MessageQueuer.RelayMessage<VesselSrvMsg>(client, messageData);
                     break;
                 default:

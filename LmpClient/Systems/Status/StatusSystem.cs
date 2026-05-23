@@ -6,6 +6,7 @@ using LmpClient.Systems.SafetyBubble;
 using LmpClient.Systems.SettingsSys;
 using LmpClient.VesselUtilities;
 using LmpCommon;
+using LmpCommon.Enums;
 
 namespace LmpClient.Systems.Status
 {
@@ -21,7 +22,14 @@ namespace LmpClient.Systems.Status
 
         private bool StatusIsDifferent =>
             MyPlayerStatus.VesselText != LastPlayerStatus.VesselText ||
-            MyPlayerStatus.StatusText != LastPlayerStatus.StatusText;
+            MyPlayerStatus.StatusText != LastPlayerStatus.StatusText ||
+            //Phase 1 of server-side-offload — Scene change must trigger a SendOwnStatus
+            //so the server's relay filter (MessageQueuer.RelayMessageToFlightScene)
+            //sees the new scene within ~1s of transition. The existing 1000ms
+            //CheckPlayerStatus routine drives the send via the same StatusIsDifferent
+            //gate, so no new event-hook is needed; just including Scene here covers
+            //transitions in either direction (Flight↔SC, Flight→Editor, etc.).
+            MyPlayerStatus.Scene != LastPlayerStatus.Scene;
 
         private static readonly StringBuilder StrBuilder = new StringBuilder();
 
@@ -40,6 +48,13 @@ namespace LmpClient.Systems.Status
             MyPlayerStatus.PlayerName = SettingsSystem.CurrentSettings.PlayerName;
             MyPlayerStatus.StatusText = LastPlayerStatus.StatusText = StatusTexts.Syncing;
             MyPlayerStatus.VesselText = LastPlayerStatus.VesselText = string.Empty;
+            //Phase 1 of server-side-offload — initialize Scene BEFORE the first
+            //SendOwnStatus below so the server sees the joining client's true scene
+            //immediately instead of Unknown-for-one-second. Without this, the joining
+            //client gets full-relay-always for ~1s after handshake (compat path) then
+            //the next CheckPlayerStatus tick fires the real scene. Functionally
+            //harmless but wastes one tick of bandwidth on the join.
+            MyPlayerStatus.Scene = LastPlayerStatus.Scene = MapKspSceneToClientSceneType(HighLogic.LoadedScene);
 
             MessageSender.SendOwnStatus();
 
@@ -83,18 +98,65 @@ namespace LmpClient.Systems.Status
 
         private void CheckPlayerStatus()
         {
-            if (Enabled && HighLogic.LoadedScene >= GameScenes.SPACECENTER && HighLogic.LoadedScene <= GameScenes.TRACKSTATION)
+            if (!Enabled) return;
+
+            //Phase 1 of server-side-offload — track Scene regardless of LoadedScene
+            //so transitions to/from Editor / MainMenu also send a PlayerStatusSet
+            //(needed so the server can filter relays to that scene's recipients).
+            //Vessel/Status text is still only refreshed in the SC..TS range — those
+            //getters dereference FlightGlobals.ActiveVessel which is only valid in
+            //Flight, and the existing UI consumers only read VesselText/StatusText
+            //in SC..TS anyway.
+            MyPlayerStatus.Scene = MapKspSceneToClientSceneType(HighLogic.LoadedScene);
+
+            if (HighLogic.LoadedScene >= GameScenes.SPACECENTER && HighLogic.LoadedScene <= GameScenes.TRACKSTATION)
             {
                 MyPlayerStatus.VesselText = GetVesselText();
                 MyPlayerStatus.StatusText = GetStatusText();
+            }
 
-                if (StatusIsDifferent)
-                {
-                    LastPlayerStatus.VesselText = MyPlayerStatus.VesselText;
-                    LastPlayerStatus.StatusText = MyPlayerStatus.StatusText;
+            if (StatusIsDifferent)
+            {
+                LastPlayerStatus.VesselText = MyPlayerStatus.VesselText;
+                LastPlayerStatus.StatusText = MyPlayerStatus.StatusText;
+                LastPlayerStatus.Scene = MyPlayerStatus.Scene;
 
-                    MessageSender.SendOwnStatus();
-                }
+                MessageSender.SendOwnStatus();
+            }
+        }
+
+        /// <summary>
+        /// Phase 1 of server-side-offload — pure mapping from KSP's GameScenes enum
+        /// to the wire-shape <see cref="ClientSceneType"/>. Drives the server's
+        /// scene-aware relay filter. No R&D scene exists in stock KSP (it's a UI
+        /// child of SPACECENTER), so ResearchAndDevelopment in the enum is
+        /// future-proofing for mods that may introduce scene-like UIs.
+        /// </summary>
+        internal static ClientSceneType MapKspSceneToClientSceneType(GameScenes scene)
+        {
+            switch (scene)
+            {
+                case GameScenes.MAINMENU:
+                case GameScenes.SETTINGS:
+                case GameScenes.CREDITS:
+                    return ClientSceneType.MainMenu;
+                case GameScenes.SPACECENTER:
+                    return ClientSceneType.SpaceCenter;
+                case GameScenes.TRACKSTATION:
+                    return ClientSceneType.TrackingStation;
+                case GameScenes.EDITOR:
+                    return ClientSceneType.Editor;
+                case GameScenes.FLIGHT:
+                    return ClientSceneType.Flight;
+                case GameScenes.MISSIONBUILDER:
+                    return ClientSceneType.Mission;
+                default:
+                    //LOADING / LOADINGBUFFER / PSYSTEM — not user-visible scenes.
+                    //Falls into Other; server treats Other as "not Flight/TS" → drops
+                    //continuous vessel-state relays. Recipients spending real time in
+                    //LOADING are between scenes anyway (sub-second usually) and
+                    //wouldn't render the relays.
+                    return ClientSceneType.Other;
             }
         }
 

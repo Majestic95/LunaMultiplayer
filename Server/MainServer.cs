@@ -91,6 +91,19 @@ namespace Server
 
                 Universe.CheckUniverse();
                 LoadSettingsAndGroups();
+
+                //[perf:relay-scene Phase 1] Per-feature state diagnostic after settings
+                //load so operators can grep `[perf:relay-scene]` to verify the gate state.
+                //The ForkBuildInfo banner above lists "perf:relay-scene" as one of N
+                //tokens — which only tells you the binary CAN do it, not whether it's
+                //ACTIVE. The consumer-lens review flagged this as a MUST FIX: an operator
+                //setting SceneAwareRelayEnabled=false would otherwise see no signal that
+                //they're back on the baseline RelayMessage path.
+                if (OptimizationSettings.SettingsStore.SceneAwareRelayEnabled)
+                    LunaLog.Normal("[perf:relay-scene] enabled — vessel Position/Flightstate/Update/Resource/PartSync*/ActionGroup/Fairing relays will be dropped to clients NOT in Flight or TrackingStation. Set OptimizationSettings.SceneAwareRelayEnabled=false to restore baseline broadcast behaviour.");
+                else
+                    LunaLog.Normal("[perf:relay-scene] DISABLED via OptimizationSettings.xml — baseline RelayMessage path active (every vessel relay fans to every client regardless of recipient scene).");
+
                 VesselStoreSystem.LoadExistingVessels();
                 var scenariosCreated = ScenarioSystem.GenerateDefaultScenarios();
                 ScenarioStoreSystem.LoadExistingScenarios(scenariosCreated);
