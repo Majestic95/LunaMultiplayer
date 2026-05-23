@@ -1,8 +1,11 @@
 ﻿using LmpCommon.Enums;
+using LmpCommon.Message.Data.Vessel;
 using LmpCommon.Message.Interface;
 using Server.Client;
 using Server.Context;
 using Server.Settings.Structures;
+using Server.System;
+using System;
 using System.Linq;
 
 namespace Server.Server
@@ -97,6 +100,119 @@ namespace Server.Server
             //non-relay scenes is MainMenu / SpaceCenter / Editor / RD / Mission /
             //Other; all of them discard continuous vessel state after decode.
             return scene == ClientSceneType.Flight || scene == ClientSceneType.TrackingStation;
+        }
+
+        /// <summary>
+        /// [perf:relay-body Phase 2] Composed Phase 1 + Phase 2 filter for continuous
+        /// vessel-state relays. Drops the message to a recipient when EITHER scene
+        /// filter rejects (recipient not in Flight/TrackingStation) OR body filter
+        /// rejects (sender's vessel orbiting a different celestial body than the
+        /// recipient's active vessel).
+        ///
+        /// Either gate can be operator-disabled independently via OptimizationSettings.
+        /// When both are off the call is byte-equivalent to <see cref="RelayMessage{T}"/>.
+        ///
+        /// Use this at the same 9 continuous-state sites that Phase 1 wired —
+        /// Position / Flightstate / Update / Resource / PartSync{Field,UiField,Call} /
+        /// ActionGroup / Fairing. Structural relays (Proto / Sync / Couple / Remove /
+        /// Decouple / Undock) stay on <see cref="RelayMessage{T}"/> for the same
+        /// reason as Phase 1: recipients need them in every scene + at every body to
+        /// keep <c>FlightGlobals.Vessels</c> consistent for the eventual scene/body
+        /// entry that lets them see the vessel.
+        /// </summary>
+        public static void RelayMessageToFlightSceneSameBody<T>(ClientStructure exceptClient, IMessageData data) where T : class, IServerMessageBase
+        {
+            if (data == null) return;
+
+            var sceneEnabled = OptimizationSettings.SettingsStore.SceneAwareRelayEnabled;
+            var bodyEnabled = OptimizationSettings.SettingsStore.SameBodyFilterEnabled;
+
+            if (!sceneEnabled && !bodyEnabled)
+            {
+                //Both gates off → exact pre-Phase-1 broadcast.
+                RelayMessage<T>(exceptClient, data);
+                return;
+            }
+
+            //Resolve sender's vessel body once outside the loop (constant across
+            //recipients for a given message). Cheap for Position (BodyName is in
+            //the msg); single ConcurrentDictionary lookup for other types.
+            var senderBody = bodyEnabled ? ResolveSenderBody(data) : null;
+
+            foreach (var otherClient in ServerContext.Clients.Values)
+            {
+                if (Equals(otherClient, exceptClient)) continue;
+                if (sceneEnabled && !ShouldReceiveVesselUpdate(otherClient)) continue;
+                if (bodyEnabled && !ShouldRelayToBody(senderBody, otherClient.ActiveVesselBodyName)) continue;
+                SendToClient(otherClient, GenerateMessage<T>(data));
+            }
+        }
+
+        /// <summary>
+        /// Pure helper (Phase 2). True iff a vessel orbiting <paramref name="vesselBody"/>
+        /// should be relayed to a recipient whose active vessel orbits
+        /// <paramref name="recipientBody"/>.
+        ///
+        /// Three branches:
+        ///   - <paramref name="vesselBody"/> null/empty → true (sender hasn't reported
+        ///     body yet, or message type doesn't carry one and server-side lookup
+        ///     missed — permissive).
+        ///   - <paramref name="recipientBody"/> null/empty → true (recipient hasn't
+        ///     sent first Flightstate or first Position-for-active-vessel — permissive
+        ///     for the join window).
+        ///   - Both non-empty → exact <see cref="StringComparison.Ordinal"/> match.
+        ///     Different bodies = drop.
+        ///
+        /// Same-body-only by design — Mun is NOT considered "same body" as Kerbin
+        /// even though Mun orbits in Kerbin's SOI. Avoiding the SOI graph keeps the
+        /// filter robust against modded planet packs (RSS / OPM / GPP / etc.).
+        ///
+        /// Public for ServerTest direct invocation.
+        /// </summary>
+        public static bool ShouldRelayToBody(string vesselBody, string recipientBody)
+        {
+            if (string.IsNullOrEmpty(vesselBody)) return true;
+            if (string.IsNullOrEmpty(recipientBody)) return true;
+            return string.Equals(vesselBody, recipientBody, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// Phase 2 helper. Resolves the body that <paramref name="data"/>'s subject
+        /// vessel is orbiting.
+        ///
+        /// VesselPositionMsgData carries BodyName on the wire (line 14 of
+        /// LmpCommon/Message/Data/Vessel/VesselPositionMsgData.cs) — use it directly
+        /// for the cheap synchronous case (Position is the dominant volume).
+        ///
+        /// Other vessel-state messages don't carry the body. Fall back to a
+        /// VesselStoreSystem lookup — the body is round-tripped onto Vessel.Orbit.IDENT
+        /// by VesselDataUpdater.WritePositionDataToFile every 2.5s, so the lookup is
+        /// eventually-consistent. A vessel that just transitioned SOI may be ~2.5s
+        /// stale relative to the latest Position, but Phase 2's worst case is "one
+        /// extra tick of cross-body relay" which is the same cost as the pre-Phase-2
+        /// baseline.
+        ///
+        /// Internal — only the composed filter needs to call it.
+        /// </summary>
+        internal static string ResolveSenderBody(IMessageData data)
+        {
+            //Position carries body inline — cheapest path, no store lookup.
+            if (data is VesselPositionMsgData posMsg) return posMsg.BodyName;
+            //Non-Position relays: read the atomic CurrentBodyName cache on Vessel
+            //(set by VesselDataUpdater's proto ingest + WritePositionDataToFile,
+            //both under the per-vessel semaphore). LOCK-FREE here because the cache
+            //is a simple string field — assignment is atomic per ECMA-335 §I.12.6.6,
+            //so the reader sees either the previous or the new reference, never torn.
+            //Pre-Phase-2 implementation called Vessel.GetOrbitingBodyName() which
+            //enumerated the Orbit MixedCollection on the receive thread — racy with
+            //the background WritePositionDataToFile mutating the same collection.
+            //Phase 2 M1 review fix.
+            if (data is VesselBaseMsgData vesselMsg
+                && VesselStoreSystem.CurrentVessels.TryGetValue(vesselMsg.VesselId, out var vessel))
+            {
+                return vessel.CurrentBodyName;
+            }
+            return null;
         }
 
         /// <summary>

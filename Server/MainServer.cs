@@ -104,6 +104,14 @@ namespace Server
                 else
                     LunaLog.Normal("[perf:relay-scene] DISABLED via OptimizationSettings.xml — baseline RelayMessage path active (every vessel relay fans to every client regardless of recipient scene).");
 
+                //[perf:relay-body Phase 2] Per-feature state diagnostic for same-body
+                //filtering. Independent of [perf:relay-scene] above — both compose in
+                //RelayMessageToFlightSceneSameBody; either can be operator-disabled.
+                if (OptimizationSettings.SettingsStore.SameBodyFilterEnabled)
+                    LunaLog.Normal("[perf:relay-body] enabled — vessel relays will be dropped when sender and recipient are at different celestial bodies. Conservative same-body-only filter (Mun-from-Kerbin-orbit IS dropped — modded planet packs handled). Set OptimizationSettings.SameBodyFilterEnabled=false to restore scene-only Phase 1 behaviour.");
+                else
+                    LunaLog.Normal("[perf:relay-body] DISABLED via OptimizationSettings.xml — same-body filtering inactive (Phase 1 scene gate still applies per [perf:relay-scene] above).");
+
                 VesselStoreSystem.LoadExistingVessels();
                 var scenariosCreated = ScenarioSystem.GenerateDefaultScenarios();
                 ScenarioStoreSystem.LoadExistingScenarios(scenariosCreated);

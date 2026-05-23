@@ -43,48 +43,76 @@ namespace Server.Message
                 //finds a fully populated world.
                 case VesselMessageType.Position:
                     if (RejectIfPastSubspace(client, messageData)) break;
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    //[perf:relay-body Phase 2] If this Position is for the sender's
+                    //tracked active vessel, snapshot the body name onto ClientStructure
+                    //so the same-body filter at relay time can read RECIPIENT bodies
+                    //(every recipient's own ActiveVesselBodyName is set the same way
+                    //from their own prior Position updates).
+                    //
+                    //Sender's active VesselId is captured below in the Flightstate case
+                    //(Flightstate is the local-active-vessel-only message per
+                    //VesselFlightStateSystem.SendFlightState).
+                    //
+                    //Ordering note (Phase 2 review S1): this write happens BEFORE the
+                    //relay below; the just-updated value is not consumed by THIS
+                    //message's relay (which reads recipients' bodies, never the
+                    //sender's) — it's prepared for the NEXT inbound Position from a
+                    //different sender that targets this client as recipient.
+                    //
+                    //Thread-safe: written + read on the same Lidgren receive thread
+                    //per LidgrenServer.StartReceivingMessagesAsync (single-threaded
+                    //sequential dispatch).
+                    if (messageData is VesselPositionMsgData posMsg && posMsg.VesselId == client.ActiveVesselId)
+                        client.ActiveVesselBodyName = posMsg.BodyName;
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     if (client.Subspace == WarpContext.LatestSubspace.Id)
                         VesselDataUpdater.WritePositionDataToFile(messageData);
                     break;
                 case VesselMessageType.Flightstate:
                     if (RejectIfPastSubspace(client, messageData)) break;
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    //[perf:relay-body Phase 2] Capture the sender's active vessel id —
+                    //Flightstate by design is sent only for the local active vessel
+                    //(LmpClient.Systems.VesselFlightStateSys.VesselFlightStateSystem.SendFlightState
+                    //calls SendCurrentFlightState only for ActiveVessel). On the next
+                    //Position for this vessel, we'll cache the body name onto the
+                    //client structure for fast same-body filter lookups.
+                    client.ActiveVesselId = messageData.VesselId;
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     VesselDataUpdater.WriteFlightstateDataToFile(messageData);
                     break;
                 case VesselMessageType.Update:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteUpdateDataToFile(messageData);
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Resource:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteResourceDataToFile(messageData);
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncField:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WritePartSyncFieldDataToFile(messageData);
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncUiField:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WritePartSyncUiFieldDataToFile(messageData);
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.PartSyncCall:
                     if (RejectIfPastSubspace(client, messageData)) break;
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.ActionGroup:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteActionGroupDataToFile(messageData);
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Fairing:
                     if (RejectIfPastSubspace(client, messageData)) break;
                     VesselDataUpdater.WriteFairingDataToFile(messageData);
-                    MessageQueuer.RelayMessageToFlightScene<VesselSrvMsg>(client, messageData);
+                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
                     break;
                 case VesselMessageType.Decouple:
                     if (RejectIfPastSubspace(client, messageData)) break;

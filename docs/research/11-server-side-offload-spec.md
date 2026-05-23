@@ -213,26 +213,21 @@ MockClientTest end-to-end (`MockClientTest/SceneAwareRelayTest.cs`):
 ### §4.a Problem statement
 A player flying around Kerbin receives every position update for vessels orbiting Jool, Eeloo, Eve, etc. Even with Phase 1 filtering (recipient must be in Flight/TrackingStation), interplanetary vessel relays are wasteful: the recipient's KSP rendering loop is going to immediately discard updates for vessels not in the local SOI.
 
-### §4.b Server-side state additions
-New field on `Server/System/Vessel/Classes/Vessel.cs`:
+### §4.b Server-side state additions (implementation diverged from initial spec)
+
+**Vessel-side body resolution** — NO new field needed on `Server/System/Vessel/Classes/Vessel.cs`. The existing `GetOrbitingBodyName()` method reads from `Orbit.body` / `Orbit.IDENT`, and `VesselDataUpdater.WritePositionDataToFile` → `ApplyOrbitIdent` already round-trips the body name from inbound Position into `Orbit.IDENT`. For non-Position relay decisions, the filter falls back to `Vessel.GetOrbitingBodyName()` via the existing eventually-consistent store path (2.5s throttle on WritePositionDataToFile is acceptable for the worst case: "one extra tick of cross-body relay = same as pre-Phase-2 baseline").
+
+**Position-message fast path** — `VesselPositionMsgData.BodyName` is already on the wire (LmpCommon/Message/Data/Vessel/VesselPositionMsgData.cs:14). Read it directly at relay time without any store round-trip. Position is the dominant message volume (50ms cadence) so this fast path covers the majority of filter decisions.
+
+**Per-client active-vessel cache on `ClientStructure`:**
 ```csharp
-public string CurrentBodyName { get; set; }  // populated from inbound VesselPositionMsgData.BodyName
+public Guid ActiveVesselId { get; set; } = Guid.Empty;
+public string ActiveVesselBodyName { get; set; }
 ```
 
-Populated in `VesselDataUpdater.WritePositionDataToFile` (and the equivalent path for proto ingest, which carries the body in the ConfigNode).
+→ **Q-signoff item 3 (resolved):** Active vessel id derived from **Flightstate** (not Position). Flightstate is by design the local-active-vessel-only path — see [LmpClient/Systems/VesselFlightStateSys/VesselFlightStateSystem.cs:142](../../LmpClient/Systems/VesselFlightStateSys/VesselFlightStateSystem.cs#L142): `MessageSender.SendCurrentFlightState()` only fires for the active vessel. The Position path sends for ACTIVE + SECONDARY vessels and can't reliably distinguish them on the wire. Capturing `ActiveVesselId = data.VesselId` on inbound Flightstate is unambiguous.
 
-New per-client cache on `ClientStructure`:
-```csharp
-public string ActiveVesselBodyName { get; set; }  // derived from the client's own most recent VesselPositionMsgData broadcast
-```
-
-Updated in `VesselMsgReader.HandleMessage` Position case before relay: if `messageData.VesselId == client.ActiveVesselId` (already tracked via client-side `PlayerStatus.VesselText` parsing — wait, NO, that's display text; we don't reliably know the client's active vessel id from existing state).
-
-→ **Q-signoff item 3:** How does the server know which vessel is the client's active vessel?
-- (a) **Sender of Position update is the active vessel of that client.** Defensible — the client only sends Position for its own active vessel (per `VesselPositionSystem.SendVesselPositionUpdates` at [LmpClient/Systems/VesselPositionSys/VesselPositionSystem.cs:114-125](../../LmpClient/Systems/VesselPositionSys/VesselPositionSystem.cs#L114-L125) which calls `MessageSender.SendVesselPositionUpdate(ActiveVessel)`). Secondary vessels go through a separate path. Server can pin `client.ActiveVesselId = lastPositionSenderVesselId`. Simple, no new wire.
-- (b) **New wire surface to communicate active vessel id explicitly.** More robust but adds a message type.
-
-**Recommendation: (a)** — derive from existing traffic. Same shape as the body-name derivation.
+`ActiveVesselBodyName` is then updated synchronously on the receive thread inside the Position case when `messageData.VesselId == client.ActiveVesselId`. No race (Lidgren receive runs single-threaded per `LidgrenServer.StartReceivingMessagesAsync`).
 
 ### §4.c Filter rule
 ```csharp

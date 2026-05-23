@@ -42,6 +42,17 @@ namespace Server.System.Vessel
                     {
                         if (!VesselStoreSystem.CurrentVessels.TryGetValue(msgData.VesselId, out var vessel)) return;
 
+                        //[perf:relay-body Phase 2] Cache the body name onto a dedicated
+                        //atomic-write Vessel field so MessageQueuer.ResolveSenderBody can
+                        //read it lock-free during same-body relay decisions on the
+                        //receive thread. Direct write under the existing per-vessel
+                        //semaphore — readers see either the prior or the new reference,
+                        //never torn state (ECMA-335 §I.12.6.6 aligned reference atomicity).
+                        //Avoids the GetOrbitingBodyName() Orbit-MixedCollection traversal
+                        //race that the multi-lens review caught (Phase 2 M1).
+                        if (!string.IsNullOrEmpty(msgData.BodyName))
+                            vessel.CurrentBodyName = msgData.BodyName;
+
                         vessel.Fields.Update("lat", msgData.LatLonAlt[0].ToString(CultureInfo.InvariantCulture));
                         vessel.Fields.Update("lon", msgData.LatLonAlt[1].ToString(CultureInfo.InvariantCulture));
                         vessel.Fields.Update("alt", msgData.LatLonAlt[2].ToString(CultureInfo.InvariantCulture));

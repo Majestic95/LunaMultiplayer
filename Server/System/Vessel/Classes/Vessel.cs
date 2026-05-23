@@ -47,6 +47,32 @@ namespace Server.System.Vessel.Classes
             }
         }
 
+        /// <summary>
+        /// Phase 2 of server-side-offload — atomic string cache of the celestial body
+        /// this vessel is currently orbiting. WRITTEN by
+        /// <see cref="Server.System.Vessel.VesselDataUpdater"/> under the per-vessel
+        /// <c>Semaphore</c> (proto ingest path) and
+        /// <see cref="Server.System.Vessel.VesselDataUpdater.WritePositionDataToFile"/>
+        /// under the same semaphore (Position update path).
+        ///
+        /// READ lock-free from <see cref="Server.Server.MessageQueuer.ResolveSenderBody"/>
+        /// on the Lidgren receive thread during same-body relay decisions. Reference
+        /// assignment to a <c>string</c> field is atomic in .NET (ECMA-335 §I.12.6.6
+        /// — aligned reference loads and stores are atomic up to native word size).
+        ///
+        /// Phase-2 review M1 fix: the prior implementation read
+        /// <see cref="GetOrbitingBodyName"/> on the receive thread, which enumerates
+        /// the <c>Orbit</c> MixedCollection — racy with the WritePositionDataToFile
+        /// background task that mutates Orbit.IDENT inside the per-vessel semaphore.
+        /// Same shape as BUG-033's race-on-ConfigNode.ToString. The cached field
+        /// removes the MixedCollection traversal entirely; reader sees either the
+        /// stale-but-coherent previous value or the new value, never torn state.
+        ///
+        /// <c>null</c> = body unknown (vessel just minted via proto, no position
+        /// update has landed yet) → same-body filter falls back to permissive.
+        /// </summary>
+        public string CurrentBodyName { get; set; }
+
         public Vessel(ConfigNode cfgNode)
         {
             Fields = new MixedCollection<string, string>(cfgNode.GetAllValues());
