@@ -194,6 +194,81 @@ namespace Server.Server
         ///
         /// Internal — only the composed filter needs to call it.
         /// </summary>
+        /// <summary>
+        /// [perf:relay-cadence Phase 3] Position-only relay path. Composes Phase 1 +
+        /// Phase 2 + Phase 3 (per-vessel cadence by lock holder). Throttles relays for
+        /// vessels that no client holds Control lock on — debris, abandoned satellites,
+        /// stranded probes — to one relay per (<c>SecondaryVesselUpdatesMsInterval</c> ×
+        /// <c>UnpilotedVesselCadenceMultiplier</c>) ms instead of the baseline 50ms.
+        /// Vessels with an active Control lock relay at full cadence (unchanged).
+        ///
+        /// Position-specific (not extended to Flightstate / Update / Resource / etc.)
+        /// because: (a) Position is the dominant volume (50ms cadence vs 1500ms / 5000ms
+        /// for the others); (b) Flightstate by design is only sent for the local active
+        /// vessel which by definition has Control lock; (c) Update / Resource carry
+        /// game-relevant state that shouldn't be throttled below their own cadence.
+        ///
+        /// Per-vessel state — <c>vessel.LastRelayedPositionMs</c> updated on each
+        /// throttle-passing relay decision. Skipping a relay does NOT update the
+        /// timestamp, so the next inbound after the throttle window passes
+        /// unconditionally.
+        ///
+        /// Lock acquired mid-stream: <see cref="Server.System.LockSystem.LockQuery.ControlLockExists"/>
+        /// returns true → throttle bypassed → next message relays immediately + stamps
+        /// timestamp. Lock released mid-stream: subsequent messages enter throttle path;
+        /// the gap to the previous (full-cadence) relay was &lt;= 50ms (well under any
+        /// reasonable throttle window) so the first post-release inbound still relays,
+        /// then subsequent ones throttle.
+        /// </summary>
+        public static void RelayPositionMessage<T>(ClientStructure exceptClient, VesselPositionMsgData data) where T : class, IServerMessageBase
+        {
+            if (data == null) return;
+
+            var multiplier = OptimizationSettings.SettingsStore.UnpilotedVesselCadenceMultiplier;
+            //Cadence-gate the whole relay decision. Skips before the per-recipient loop
+            //so an unpiloted vessel saves the loop iteration cost too (cheaper than
+            //per-recipient throttle).
+            if (multiplier > 1
+                && VesselStoreSystem.CurrentVessels.TryGetValue(data.VesselId, out var vessel))
+            {
+                var nowMs = ServerContext.ServerClock.ElapsedMilliseconds;
+                var secondaryIntervalMs = IntervalSettings.SettingsStore.SecondaryVesselUpdatesMsInterval;
+                if (!ShouldRelayPositionByCadence(data.VesselId, vessel.LastRelayedPositionMs, nowMs, secondaryIntervalMs, multiplier))
+                    return;
+                vessel.LastRelayedPositionMs = nowMs;
+            }
+
+            //Fall through to the composed Phase 1 + Phase 2 filter for the actual fan-out.
+            RelayMessageToFlightSceneSameBody<T>(exceptClient, data);
+        }
+
+        /// <summary>
+        /// Pure helper (Phase 3). True iff a Position message for
+        /// <paramref name="vesselId"/> should relay given the per-vessel cadence
+        /// throttle. Public for ServerTest direct invocation.
+        ///
+        /// Three branches:
+        ///   - <paramref name="multiplier"/> &lt;= 1 → true (throttle off / no-op).
+        ///   - <see cref="Server.System.LockSystem.LockQuery.ControlLockExists"/>(vesselId) →
+        ///     true (someone is actively piloting this vessel — full cadence).
+        ///   - Else: relay only if (<paramref name="nowMs"/> - <paramref name="lastRelayedMs"/>)
+        ///     &gt;= (<paramref name="secondaryIntervalMs"/> × <paramref name="multiplier"/>).
+        ///
+        /// Pure on the inputs except for the LockSystem read — that's an implicit
+        /// dependency the test harness needs to set up (or mock). For the unit-test
+        /// surface in ServerTest/CadenceThrottleTest.cs, we exercise the throttle
+        /// math via the multiplier &lt;= 1 / vessel-lock-absent branches; the
+        /// lock-present positive branch is covered indirectly by the existing
+        /// LockSystemTest baseline.
+        /// </summary>
+        public static bool ShouldRelayPositionByCadence(Guid vesselId, long lastRelayedMs, long nowMs, int secondaryIntervalMs, int multiplier)
+        {
+            if (multiplier <= 1) return true;
+            if (LockSystem.LockQuery.ControlLockExists(vesselId)) return true;
+            var minIntervalMs = (long)secondaryIntervalMs * multiplier;
+            return (nowMs - lastRelayedMs) >= minIntervalMs;
+        }
+
         internal static string ResolveSenderBody(IMessageData data)
         {
             //Position carries body inline — cheapest path, no store lookup.

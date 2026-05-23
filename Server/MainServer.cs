@@ -112,6 +112,20 @@ namespace Server
                 else
                     LunaLog.Normal("[perf:relay-body] DISABLED via OptimizationSettings.xml — same-body filtering inactive (Phase 1 scene gate still applies per [perf:relay-scene] above).");
 
+                //[perf:relay-cadence Phase 3] Per-vessel cadence throttle by lock holder.
+                //Independent from Phase 1 / 2 — only affects Position relays for vessels
+                //with no active Control lock.
+                var cadenceMultiplier = OptimizationSettings.SettingsStore.UnpilotedVesselCadenceMultiplier;
+                if (cadenceMultiplier > 1)
+                {
+                    var secondaryMs = IntervalSettings.SettingsStore.SecondaryVesselUpdatesMsInterval;
+                    //Cast to long mirrors the hot-path math in MessageQueuer.ShouldRelayPositionByCadence —
+                    //prevents wraparound-negative log lines under absurd operator dials (Phase 3 review S1).
+                    LunaLog.Normal($"[perf:relay-cadence] enabled — Position relays for vessels without an active Control lock throttled to one per ~{(long)secondaryMs * cadenceMultiplier}ms (SecondaryVesselUpdatesMsInterval={secondaryMs}ms × UnpilotedVesselCadenceMultiplier={cadenceMultiplier}). Set UnpilotedVesselCadenceMultiplier=1 in OptimizationSettings.xml to disable.");
+                }
+                else
+                    LunaLog.Normal("[perf:relay-cadence] DISABLED via OptimizationSettings.xml (UnpilotedVesselCadenceMultiplier<=1) — all Position relays fire at full cadence regardless of Control lock state.");
+
                 VesselStoreSystem.LoadExistingVessels();
                 var scenariosCreated = ScenarioSystem.GenerateDefaultScenarios();
                 ScenarioStoreSystem.LoadExistingScenarios(scenariosCreated);

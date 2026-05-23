@@ -43,5 +43,17 @@ namespace Server.Settings.Definition
                             "active-vessel body is unknown. Set false to revert to scene-only Phase 1 behavior. Composes with " +
                             "SceneAwareRelayEnabled (both filters apply when both true). Default: true.")]
         public bool SameBodyFilterEnabled { get; set; } = true;
+
+        [XmlComment(Value = "Phase 3 of server-side-offload. Per-vessel cadence throttle for Position relays. When > 1, " +
+                            "vessels WITHOUT an active Control lock (debris, abandoned satellites, stranded probes) have " +
+                            "their Position relays throttled to one per (SecondaryVesselUpdatesMsInterval × this multiplier) " +
+                            "milliseconds. At the default 150ms secondary interval × 5 = 750ms per relay (vs the baseline 50ms " +
+                            "primary cadence — ~93% reduction in relay volume for inactive vessels). Vessels under active " +
+                            "Control (someone is flying them) relay at full cadence, unchanged. " +
+                            "Set to 1 to disable throttling and restore pre-Phase-3 behavior. Higher values save more bandwidth " +
+                            "but produce visible 'drift' on inactive vessels in tracking station view (1.5s lag at 10, etc.). " +
+                            "Range: 1-20 (values <1 treated as 1). Applies only to Position relays — Flightstate/Update/etc. " +
+                            "have their own cadences (1500ms/5000ms) that are already low. Default: 5.")]
+        public int UnpilotedVesselCadenceMultiplier { get; set; } = 5;
     }
 }

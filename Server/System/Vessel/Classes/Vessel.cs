@@ -73,6 +73,23 @@ namespace Server.System.Vessel.Classes
         /// </summary>
         public string CurrentBodyName { get; set; }
 
+        /// <summary>
+        /// Phase 3 of server-side-offload — millisecond timestamp of the last Position
+        /// relay decision for this vessel, read from <see cref="Server.Context.ServerContext.ServerClock"/>.
+        /// Drives the per-vessel cadence-by-lock-holder throttle: when no client holds the
+        /// Control lock on this vessel, the server downsamples Position relays to one per
+        /// (<see cref="Server.Settings.Definition.IntervalSettingsDefinition.SecondaryVesselUpdatesMsInterval"/>
+        /// * <see cref="Server.Settings.Definition.OptimizationSettingsDefinition.UnpilotedVesselCadenceMultiplier"/>) ms.
+        /// Default cadence: 150ms × 5 = 750ms (vs the baseline 50ms primary cadence — ~93%
+        /// reduction in inactive-vessel relay volume).
+        ///
+        /// Written + read on the Lidgren receive thread (single-threaded sequential
+        /// dispatch per <c>LidgrenServer.StartReceivingMessagesAsync</c>); no lock
+        /// required. 0 = no relay decision recorded yet → first inbound relays
+        /// unconditionally.
+        /// </summary>
+        public long LastRelayedPositionMs { get; set; }
+
         public Vessel(ConfigNode cfgNode)
         {
             Fields = new MixedCollection<string, string>(cfgNode.GetAllValues());

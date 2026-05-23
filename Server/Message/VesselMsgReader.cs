@@ -62,9 +62,18 @@ namespace Server.Message
                     //Thread-safe: written + read on the same Lidgren receive thread
                     //per LidgrenServer.StartReceivingMessagesAsync (single-threaded
                     //sequential dispatch).
-                    if (messageData is VesselPositionMsgData posMsg && posMsg.VesselId == client.ActiveVesselId)
-                        client.ActiveVesselBodyName = posMsg.BodyName;
-                    MessageQueuer.RelayMessageToFlightSceneSameBody<VesselSrvMsg>(client, messageData);
+                    if (messageData is VesselPositionMsgData posMsg)
+                    {
+                        if (posMsg.VesselId == client.ActiveVesselId)
+                            client.ActiveVesselBodyName = posMsg.BodyName;
+                        //[perf:relay-cadence Phase 3] Position has its own composed
+                        //relay entry point that adds the per-vessel cadence throttle
+                        //on top of the Phase 1 + Phase 2 filters. Other vessel-state
+                        //messages (Flightstate / Update / etc.) stay on
+                        //RelayMessageToFlightSceneSameBody — they don't need cadence
+                        //shaping (their baseline cadence is already low: 1500ms / 5000ms).
+                        MessageQueuer.RelayPositionMessage<VesselSrvMsg>(client, posMsg);
+                    }
                     if (client.Subspace == WarpContext.LatestSubspace.Id)
                         VesselDataUpdater.WritePositionDataToFile(messageData);
                     break;
