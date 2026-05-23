@@ -16,6 +16,20 @@ namespace LmpClient.Systems.SettingsSys
         {
             if (!(msg.Data is SettingsReplyMsgData msgData)) return;
 
+            // [diag:settings-sync-race] Entry log paired with the SettingsSynced-state-
+            // transition log at the bottom of this method. v15 cohort hit second-connect
+            // NRE in StartGameNow because ServerParameters was null when game-start ran;
+            // this log lets the next repro confirm whether HandleMessage actually ran for
+            // this connection and (if so) at what NetworkState. Compare entry timestamp
+            // against the StartGameNow log to spot a state-machine race that lets the
+            // outer chain advance past SyncingSettings without HandleMessage completing.
+            // Trimmed to race-relevant fields only (consumer-lens review SHOULD-FIX) —
+            // the PerAgency* tail-fields don't help diagnose this race.
+            LunaLog.Log(
+                "[LMP]: [diag:settings-sync-race] SettingsMessageHandler.HandleMessage ENTRY. " +
+                $"NetworkState={MainSystem.NetworkState}, " +
+                $"GameMode={msgData.GameMode}, GameDifficulty={msgData.GameDifficulty}");
+
             SettingsSystem.ServerSettings.WarpMode = msgData.WarpMode;
             SettingsSystem.ServerSettings.GameMode = msgData.GameMode;
             SettingsSystem.ServerSettings.TerrainQuality = msgData.TerrainQuality;
@@ -111,6 +125,18 @@ namespace LmpClient.Systems.SettingsSys
 
             //Never allow quickload, it's useless in a multiplayer game
             SettingsSystem.ServerSettings.ServerParameters.Flight.CanQuickLoad = false;
+
+            // [diag:settings-sync-race] Exit log — confirms ServerParameters was populated
+            // AND we successfully transitioned NetworkState to SettingsSynced. If the next
+            // repro's KSP.log shows an ENTRY without an EXIT before the StartGameNow abort,
+            // an exception swallowed mid-handler is the upstream race; if it shows neither,
+            // the message was never delivered (NetworkReceiver / Lidgren / queue lifecycle
+            // issue); if it shows both but StartGameNow still aborts, ServerParameters is
+            // being nulled BETWEEN exit and StartGameNow (another OnDisabled fired mid-
+            // connect — investigate NetworkEvent.onNetworkStatusChanged firing).
+            LunaLog.Log(
+                "[LMP]: [diag:settings-sync-race] SettingsMessageHandler.HandleMessage EXIT — " +
+                $"ServerParameters populated. Transitioning to SettingsSynced.");
 
             MainSystem.NetworkState = ClientState.SettingsSynced;
         }

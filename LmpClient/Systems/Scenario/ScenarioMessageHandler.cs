@@ -40,7 +40,37 @@ namespace LmpClient.Systems.Scenario
                 QueueScenarioBytes(data.ScenariosData[i].Module, data.ScenariosData[i].Data, data.ScenariosData[i].NumBytes);
             }
 
-            if (MainSystem.NetworkState < ClientState.ScenariosSynced)
+            // [fix:settings-sync-race] Only advance NetworkState to ScenariosSynced when
+            // we're at SyncingScenarios — i.e. the client explicitly sent a
+            // ScenariosRequest and is waiting for this reply. The original condition was
+            // `< ScenariosSynced` which advanced from ANY earlier state, including
+            // Handshaking and Handshaked.
+            //
+            // v15 broke this. The server's HandshakeSystem now calls
+            // ScenarioSystem.SendScenariosToClient(client, "SCANcontroller",
+            // "DMScienceScenario", "WOLF_ScenarioModule") at handshake completion —
+            // a Path B catch-up that ships ScenarioDataMsgData eagerly while the client
+            // is still at Handshaked. Pre-v15 that call returned empty (no matching
+            // scenarios in CurrentScenarios under gate=on Path B suppression), so the
+            // eager push was a no-op. v15's SeedBaselineIfMissing populates the baseline
+            // on first inbound broadcast, written to disk, and reloaded by every server
+            // restart — so from the first server boot AFTER a DMagic/SCANsat broadcast,
+            // the catch-up actually ships bytes. Those bytes arrive at the client during
+            // handshake, this handler's old `< ScenariosSynced` check fired, NetworkState
+            // jumped Handshaked → ScenariosSynced, skipping SyncingSettings and every
+            // subsequent sync. SettingsRequest never sent, SettingsReply never received,
+            // ServerParameters stayed null, and StartGameNow hit a downstream NRE.
+            //
+            // The fix preserves the original intent (advance ONLY when this is the reply
+            // to a request) and lets the eagerly-pushed catch-up bytes sit in
+            // ScenarioQueue to be drained at game-start time via LoadScenarioDataIntoGame
+            // — same content arrival, just no longer driving the state machine. The
+            // duplicate-application concern (catch-up scenarios + later
+            // SendScenarioModules duplicates) is bounded by KSP's
+            // HighLogic.CurrentGame.scenarios.Add semantics + LoadMissingScenarioDataInto
+            // -Game's existence check; see the integration-logic discussion in the v16
+            // commit body.
+            if (MainSystem.NetworkState == ClientState.SyncingScenarios)
                 MainSystem.NetworkState = ClientState.ScenariosSynced;
         }
 

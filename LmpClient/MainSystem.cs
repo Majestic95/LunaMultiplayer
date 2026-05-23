@@ -389,6 +389,34 @@ namespace LmpClient
 
         private void StartGameNow()
         {
+            // [fix:settings-sync-race] Precondition: ServerParameters must be populated
+            // before we touch HighLogic.CurrentGame. v15 cohort hit a second-connect NRE
+            // in SetParams ("Threw in Main system- update event: NullReferenceException")
+            // because the SettingsMessageHandler.HandleMessage population of ServerParameters
+            // hadn't completed by the time NetworkSystem.NetworkUpdate's LocksSynced case
+            // set StartGame=true. The state machine's SyncingSettings → SettingsSynced
+            // transition is supposed to gate this, but the second-connect-within-the-same-
+            // KSP-session timing was producing a null here regardless. We bail BEFORE
+            // CreateBlankGame so no half-game state lingers, set ForceQuit so the next
+            // Update tick triggers StopGame's clean main-menu return, and surface enough
+            // context (NetworkState/GameMode/GameDifficulty + the matching SettingsMessage
+            // -Handler entry/exit diagnostics on the other side) for a follow-up commit
+            // to pin the upstream race. The player's retry almost always succeeds.
+            if (SettingsSystem.ServerSettings.ServerParameters == null)
+            {
+                LunaLog.LogWarning(
+                    "[LMP]: [fix:settings-sync-race] StartGameNow aborted - ServerParameters is null. " +
+                    "SettingsReply did not populate before StartGameNow ran. " +
+                    $"LmpVersion={LmpVersioning.CurrentVersion}, NetworkState={NetworkState}, " +
+                    $"GameMode={SettingsSystem.ServerSettings.GameMode}, " +
+                    $"GameDifficulty={SettingsSystem.ServerSettings.GameDifficulty}. " +
+                    "Disconnecting cleanly - please reconnect (retry usually succeeds).");
+                NetworkConnection.Disconnect("Settings sync didn't complete - please reconnect");
+                ForceQuit = true;
+                NetworkState = ClientState.Disconnected;
+                return;
+            }
+
             //Create new game object for our LMP session.
             HighLogic.CurrentGame = CreateBlankGame();
 
@@ -445,12 +473,20 @@ namespace LmpClient
         /// </summary>
         public void SetParams(Game currentGame)
         {
-            currentGame.Parameters.Flight = SettingsSystem.ServerSettings.ServerParameters.Flight;
-            currentGame.Parameters.Editor = SettingsSystem.ServerSettings.ServerParameters.Editor;
-            currentGame.Parameters.TrackingStation = SettingsSystem.ServerSettings.ServerParameters.TrackingStation;
-            currentGame.Parameters.SpaceCenter = SettingsSystem.ServerSettings.ServerParameters.SpaceCenter;
-            currentGame.Parameters.Difficulty = SettingsSystem.ServerSettings.ServerParameters.Difficulty;
-            currentGame.Parameters.Career = SettingsSystem.ServerSettings.ServerParameters.Career;
+            // [fix:settings-sync-race] Precondition that StartGameNow is responsible for —
+            // ServerParameters MUST be non-null by the time SetParams is called. The early
+            // null-check at the top of StartGameNow disconnects cleanly before we ever get
+            // here. Refactored to a local var (p) so the assignment block stays terse and
+            // the relationship to the precondition is obvious. If a future StartGameNow
+            // variant ever forgets the precondition, SetParams will NRE on the first line
+            // — same blast radius as before this commit, no worse.
+            var p = SettingsSystem.ServerSettings.ServerParameters;
+            currentGame.Parameters.Flight = p.Flight;
+            currentGame.Parameters.Editor = p.Editor;
+            currentGame.Parameters.TrackingStation = p.TrackingStation;
+            currentGame.Parameters.SpaceCenter = p.SpaceCenter;
+            currentGame.Parameters.Difficulty = p.Difficulty;
+            currentGame.Parameters.Career = p.Career;
         }
 
         public void SetAdvancedParams(Game currentGame)
