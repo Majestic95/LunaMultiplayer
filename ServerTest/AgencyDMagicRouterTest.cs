@@ -5,6 +5,7 @@ using Server.Settings.Structures;
 using Server.System.Agency;
 using System;
 using System.Globalization;
+using System.Linq;
 
 namespace ServerTest
 {
@@ -231,6 +232,92 @@ namespace ServerTest
             var any = AgencyDMagicRouter.UpsertAnomalyEntries(scenario, _alice, _agencyAlice);
             Assert.IsFalse(any);
             Assert.AreEqual(0, _alice.DMagicAnomalies.Count);
+        }
+
+        // -------------------------------------------------------------------
+        // Baseline-seed (catch-up fix 2026-05-22)
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void SeedBaselineIfMissing_FreshUniverse_InsertsStrippedBaseline()
+        {
+            // Mirror of AgencyScanRouterTest.SeedBaselineIfMissing_FreshUniverse...
+            // The DMScienceScenario suffers from the same Path B catch-up bug
+            // as SCANcontroller. Fix mirrors the S2 helper.
+            Server.System.ScenarioStoreSystem.CurrentScenarios.TryRemove("DMScienceScenario", out _);
+
+            var inbound = BuildScenario(
+                asteroidTitles: new[] { "AsteroidA", "AsteroidB" },
+                anomalies: new (int, string, double, double, double)[]
+                {
+                    (5, "MunArch1", 1, 2, 3),
+                });
+
+            AgencyDMagicRouter.SeedBaselineIfMissing(inbound);
+
+            Assert.IsTrue(Server.System.ScenarioStoreSystem.CurrentScenarios.TryGetValue("DMScienceScenario", out var baseline),
+                "Baseline must be inserted on first inbound when CurrentScenarios has no DMScienceScenario key.");
+
+            var asteroid = baseline.GetNode("Asteroid_Science")?.Value;
+            Assert.IsNotNull(asteroid, "Asteroid_Science container retained (empty).");
+            Assert.AreEqual(0, asteroid.GetNodes("DM_Science").Count(),
+                "DM_Science children must be stripped — they belong in per-agency state, not the shared baseline.");
+
+            var anomaly = baseline.GetNode("Anomaly_Records")?.Value;
+            Assert.IsNotNull(anomaly, "Anomaly_Records container retained (empty).");
+            Assert.AreEqual(0, anomaly.GetNodes("DM_Anomaly_List").Count(),
+                "DM_Anomaly_List wrappers must be stripped.");
+        }
+
+        [TestMethod]
+        public void SeedBaselineIfMissing_AlreadyPresent_DoesNotOverwrite()
+        {
+            Server.System.ScenarioStoreSystem.CurrentScenarios.TryRemove("DMScienceScenario", out _);
+            var operatorSeed = new ConfigNode("") { Name = "DMScienceScenario" };
+            operatorSeed.CreateValue(new CfgNodeValue<string, string>("MARKER", "operator-original"));
+            Server.System.ScenarioStoreSystem.CurrentScenarios["DMScienceScenario"] = operatorSeed;
+
+            var inbound = BuildScenario(asteroidTitles: new[] { "AsteroidA" },
+                anomalies: new (int, string, double, double, double)[0]);
+            inbound.CreateValue(new CfgNodeValue<string, string>("MARKER", "from-client"));
+
+            AgencyDMagicRouter.SeedBaselineIfMissing(inbound);
+
+            Assert.IsTrue(Server.System.ScenarioStoreSystem.CurrentScenarios.TryGetValue("DMScienceScenario", out var stored));
+            Assert.AreEqual("operator-original", stored.GetValue("MARKER")?.Value,
+                "Existing baseline must NOT be overwritten — GetOrAdd preserves the original.");
+        }
+
+        [TestMethod]
+        public void BuildStrippedBaseline_StripsAsteroidAndAnomalyChildren()
+        {
+            var inbound = BuildScenario(
+                asteroidTitles: new[] { "AsteroidA", "AsteroidB" },
+                anomalies: new (int, string, double, double, double)[]
+                {
+                    (5, "MunArch1", 1, 2, 3),
+                    (5, "MunArch2", 4, 5, 6),
+                    (8, "MinmusMarker", 7, 8, 9),
+                });
+
+            var baseline = AgencyDMagicRouter.BuildStrippedBaseline(inbound);
+
+            var asteroid = baseline.GetNode("Asteroid_Science")?.Value;
+            Assert.IsNotNull(asteroid);
+            Assert.AreEqual(0, asteroid.GetNodes("DM_Science").Count());
+
+            var anomaly = baseline.GetNode("Anomaly_Records")?.Value;
+            Assert.IsNotNull(anomaly);
+            Assert.AreEqual(0, anomaly.GetNodes("DM_Anomaly_List").Count(),
+                "Both DM_Anomaly_List wrappers (per-body) must be stripped.");
+        }
+
+        [TestMethod]
+        public void SeedBaselineIfMissing_NullInbound_NoOp()
+        {
+            Server.System.ScenarioStoreSystem.CurrentScenarios.TryRemove("DMScienceScenario", out _);
+            AgencyDMagicRouter.SeedBaselineIfMissing(null);
+            Assert.IsFalse(Server.System.ScenarioStoreSystem.CurrentScenarios.ContainsKey("DMScienceScenario"));
         }
 
         // -------------------------------------------------------------------

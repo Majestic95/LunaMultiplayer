@@ -5,6 +5,7 @@ using Server.System.Vessel;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 
 namespace Server.System.Agency
 {
@@ -101,7 +102,131 @@ namespace Server.System.Agency
             // scans). The 30s broadcast cadence × N agencies multiplies fast.
             if (acceptedAny)
                 AgencySystem.SaveAgency(agencyId);
+
+            // [Catch-up-baseline fix 2026-05-22] Seed CurrentScenarios with a
+            // player-progress-stripped baseline on first inbound. Without this,
+            // SendScenariosToClient at HandshakeSystem.cs:173 (and the periodic
+            // SendScenarioModules tick) iterates CurrentScenarios.Keys, finds
+            // no SCANcontroller entry under gate=on, and sends nothing — the
+            // per-agency Coverage + Scanners would be correctly persisted on
+            // disk but never projected back to the client. Reconnect would show
+            // an empty SCANsat map on every session. See SeedBaselineIfMissing
+            // XML for the full rationale + scenarios.
+            //
+            // **Ordering: AFTER SaveAgency, OUTSIDE the agency lock.**
+            // - After SaveAgency: a server crash between Seed and SaveAgency
+            //   would leave the baseline on disk (via the next BackupScenarios
+            //   pass) while per-agency state was never persisted — operator
+            //   observability false-positive that the fix worked when it
+            //   actually didn't.
+            // - Outside the agency lock: ConcurrentDictionary.GetOrAdd is
+            //   atomic + lock-free; serializing the GetOrAdd + ConfigNode.ToString
+            //   round-trip under the agency lock would extend the writer-blocking
+            //   window for every Share* writer queued behind it. Future Path B
+            //   router authors copying this pattern MUST keep this call outside
+            //   the per-agency lock.
+            //
+            // **CONSUMER NOTE for future Path B routers (S5/S6/S7+ slices):**
+            // every router that calls SeedBaselineIfMissing MUST also gain a
+            // paired MockClientTest/AgencyPathBCatchupTest case asserting the
+            // full connect→broadcast→disconnect→reconnect flow. Unit tests on
+            // the helper alone CANNOT detect the catch-up regression — they
+            // pre-populate CurrentScenarios with a baseline, masking the
+            // production gap this entire fix exists to close.
+            //
+            // Concurrent first-broadcasts from two agencies produce functionally
+            // equivalent baselines (root scalars only) so the race outcome
+            // doesn't affect correctness.
+            SeedBaselineIfMissing(scenario);
+
             return true;
+        }
+
+        /// <summary>
+        /// [Catch-up-baseline fix 2026-05-22] If
+        /// <see cref="ScenarioStoreSystem.CurrentScenarios"/> has no
+        /// <c>SCANcontroller</c> entry, insert a stripped baseline derived from
+        /// <paramref name="inbound"/>. The baseline preserves root scalars
+        /// (palette settings, UI flags, <c>SCANResources</c> per Decision §6)
+        /// but removes the player-progress containers' children
+        /// (<c>Progress → Body</c>, <c>Scanners → Vessel</c>) so:
+        /// <list type="bullet">
+        ///   <item>The projector at
+        ///        <see cref="AgencyScenarioProjector.SpliceSCANsatCoverageIntoScenario"/>
+        ///        has a baseline to splice each agency's Coverage / Scanners
+        ///        onto at outbound time.</item>
+        ///   <item>The on-disk backup at
+        ///        <see cref="ScenarioStoreSystem.BackupScenarios"/> carries the
+        ///        baseline only — never per-agency player progress.</item>
+        ///   <item>Cross-leak is impossible — the baseline by construction has
+        ///        no Body / Vessel children.</item>
+        /// </list>
+        ///
+        /// <para><b>Why this exists.</b> The original Path B design assumed an
+        /// "operator-seed baseline" would already exist in
+        /// <see cref="ScenarioStoreSystem.CurrentScenarios"/> under gate=on,
+        /// because <see cref="ScenarioBaseDataUpdater.RawConfigNodeInsertOrUpdate"/>
+        /// short-circuits the <c>AddOrUpdate</c> when the router returns true.
+        /// On a fresh per-agency universe with SCANsat installed, no operator-
+        /// seed exists — SCANsat is not in
+        /// <see cref="ScenarioSystem.GenerateDefaultScenarios"/>, and every
+        /// inbound broadcast goes through this router which suppresses the
+        /// shared-store insert. So <c>CurrentScenarios["SCANcontroller"]</c>
+        /// stays permanently empty, and the catch-up path silently sends
+        /// nothing. This helper closes the loop by populating the baseline
+        /// on first inbound.</para>
+        ///
+        /// <para><b>GetOrAdd semantics.</b> If the key already exists (operator
+        /// pre-seeded <c>Universe/Scenarios/SCANcontroller.txt</c>, OR pre-gate-
+        /// off-era broadcasts accumulated data, OR a concurrent first-broadcast
+        /// from another agency raced this one), the factory never runs and the
+        /// existing entry wins. Existing pre-gate-off data with stale Body /
+        /// Vessel children is handled by the projector's strip-and-splice at
+        /// outbound time, and the upgrade-lens diagnostic
+        /// <see cref="AgencySystem.WarnAboutSharedSCANsatOnUpgrade"/> warns the
+        /// operator about the strip.</para>
+        ///
+        /// <para><b>Internal visibility</b> for direct ServerTest pinning.</para>
+        /// </summary>
+        internal static void SeedBaselineIfMissing(ConfigNode inbound)
+        {
+            if (inbound == null) return;
+            ScenarioStoreSystem.CurrentScenarios.GetOrAdd("SCANcontroller", _ => BuildStrippedBaseline(inbound));
+        }
+
+        /// <summary>
+        /// Builds a baseline <see cref="ConfigNode"/> from <paramref name="inbound"/>
+        /// with all player-progress children removed. Round-trips via
+        /// <see cref="ConfigNode.ToString"/> to fully isolate the result from
+        /// the inbound's tree — no shared sub-node references, safe to store
+        /// in the long-lived <see cref="ScenarioStoreSystem.CurrentScenarios"/>
+        /// dictionary while the inbound is GC'd.
+        ///
+        /// <para>Internal visibility for ServerTest pinning.</para>
+        /// </summary>
+        internal static ConfigNode BuildStrippedBaseline(ConfigNode inbound)
+        {
+            var baseline = new ConfigNode(inbound.ToString()) { Name = "SCANcontroller" };
+
+            // Strip player-progress containers' children — preserve the
+            // containers themselves (the projector's strip-and-splice handles
+            // both present + missing containers, but keeping the empty
+            // container makes the on-disk baseline file more legible to
+            // operators inspecting it).
+            var progress = baseline.GetNode("Progress")?.Value;
+            if (progress != null)
+            {
+                foreach (var body in progress.GetNodes("Body").ToArray())
+                    progress.RemoveNode(body.Value);
+            }
+            var scanners = baseline.GetNode("Scanners")?.Value;
+            if (scanners != null)
+            {
+                foreach (var v in scanners.GetNodes("Vessel").ToArray())
+                    scanners.RemoveNode(v.Value);
+            }
+
+            return baseline;
         }
 
         /// <summary>

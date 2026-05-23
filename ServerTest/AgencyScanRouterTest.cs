@@ -282,6 +282,119 @@ namespace ServerTest
         }
 
         // -------------------------------------------------------------------
+        // Baseline-seed (catch-up fix 2026-05-22)
+        // -------------------------------------------------------------------
+
+        [TestMethod]
+        public void SeedBaselineIfMissing_FreshUniverse_InsertsStrippedBaseline()
+        {
+            // The bug we're fixing: under gate=on, the dispatch in
+            // ScenarioBaseDataUpdater suppresses CurrentScenarios.AddOrUpdate
+            // when the router returns true. On a fresh per-agency universe with
+            // SCANsat installed, CurrentScenarios["SCANcontroller"] never gets
+            // populated by any other path — and SendScenariosToClient at
+            // HandshakeSystem.cs:173 then iterates CurrentScenarios.Keys, finds
+            // nothing, and sends an empty catch-up. The fix populates a
+            // stripped baseline on first inbound.
+            ScenarioStoreSystem.CurrentScenarios.TryRemove("SCANcontroller", out _);
+
+            var inbound = BuildScenario(coverageBodies: new[] { "Kerbin", "Minmus" },
+                                        scannersVesselIds: new Guid[0]);
+            // Add a root scalar that should survive the strip — verifies we keep
+            // the operator-configurable UI state.
+            inbound.CreateValue(new CfgNodeValue<string, string>("mainMapVisible", "True"));
+
+            AgencyScanRouter.SeedBaselineIfMissing(inbound);
+
+            Assert.IsTrue(ScenarioStoreSystem.CurrentScenarios.TryGetValue("SCANcontroller", out var baseline),
+                "Baseline must be inserted on first inbound when CurrentScenarios has no SCANcontroller key — without this the catch-up path sends nothing on reconnect.");
+            Assert.AreEqual("True", baseline.GetValue("mainMapVisible")?.Value,
+                "Root scalar (mainMapVisible) must survive the strip.");
+
+            var progress = baseline.GetNode("Progress")?.Value;
+            Assert.IsNotNull(progress, "Progress container should be retained (empty) so the projector has a sibling to splice into.");
+            Assert.AreEqual(0, progress.GetNodes("Body").Count(),
+                "Body children must be stripped — they belong in per-agency state, not the shared baseline.");
+        }
+
+        [TestMethod]
+        public void SeedBaselineIfMissing_AlreadyPresent_DoesNotOverwrite()
+        {
+            // Operator-seeded baseline OR pre-gate-off-era accumulated state.
+            // GetOrAdd is idempotent — the existing entry wins.
+            ScenarioStoreSystem.CurrentScenarios.TryRemove("SCANcontroller", out _);
+            var operatorSeed = new ConfigNode("") { Name = "SCANcontroller" };
+            operatorSeed.CreateValue(new CfgNodeValue<string, string>("MARKER", "operator-original"));
+            ScenarioStoreSystem.CurrentScenarios["SCANcontroller"] = operatorSeed;
+
+            var inbound = BuildScenario(coverageBodies: new[] { "Kerbin" },
+                                        scannersVesselIds: new Guid[0]);
+            inbound.CreateValue(new CfgNodeValue<string, string>("MARKER", "from-client"));
+
+            AgencyScanRouter.SeedBaselineIfMissing(inbound);
+
+            Assert.IsTrue(ScenarioStoreSystem.CurrentScenarios.TryGetValue("SCANcontroller", out var stored));
+            Assert.AreEqual("operator-original", stored.GetValue("MARKER")?.Value,
+                "Existing baseline must NOT be overwritten — GetOrAdd preserves the original.");
+        }
+
+        [TestMethod]
+        public void BuildStrippedBaseline_StripsBodyAndVesselChildren()
+        {
+            var inbound = BuildScenario(coverageBodies: new[] { "Kerbin", "Mun" },
+                                        scannersVesselIds: new[] { _vesselAlice });
+
+            var baseline = AgencyScanRouter.BuildStrippedBaseline(inbound);
+
+            var progress = baseline.GetNode("Progress")?.Value;
+            Assert.IsNotNull(progress, "Progress container retained (empty).");
+            Assert.AreEqual(0, progress.GetNodes("Body").Count(),
+                "All Body children must be stripped.");
+
+            var scanners = baseline.GetNode("Scanners")?.Value;
+            Assert.IsNotNull(scanners, "Scanners container retained (empty).");
+            Assert.AreEqual(0, scanners.GetNodes("Vessel").Count(),
+                "All Vessel children must be stripped — player-progress data has no place in the shared baseline.");
+        }
+
+        [TestMethod]
+        public void BuildStrippedBaseline_IsolatedFromInboundTree()
+        {
+            // The baseline must be a deep clone, not a shared sub-tree — if the
+            // inbound is later mutated by a different code path, the baseline
+            // in CurrentScenarios must not see those mutations. Verify by
+            // adding a Body to the inbound's Progress container AFTER the
+            // build, and confirming the baseline's Progress stays empty.
+            var inbound = BuildScenario(coverageBodies: new[] { "Kerbin" },
+                                        scannersVesselIds: new Guid[0]);
+
+            var baseline = AgencyScanRouter.BuildStrippedBaseline(inbound);
+
+            // Mutate the inbound after build: add a new Body to its Progress container.
+            var inboundProgress = inbound.GetNode("Progress")?.Value;
+            Assert.IsNotNull(inboundProgress);
+            var injected = new ConfigNode("") { Name = "Body" };
+            injected.CreateValue(new CfgNodeValue<string, string>("Name", "InjectedAfterBuild"));
+            inboundProgress.AddNode(injected);
+
+            // Baseline must NOT see the post-build mutation — that would mean it
+            // shares the inbound's Progress sub-tree (silent reference leak).
+            var baselineProgress = baseline.GetNode("Progress")?.Value;
+            Assert.IsNotNull(baselineProgress);
+            Assert.AreEqual(0, baselineProgress.GetNodes("Body").Count(),
+                "Baseline must be fully isolated from the inbound's tree — round-trip via ToString severs any shared sub-node references.");
+        }
+
+        [TestMethod]
+        public void SeedBaselineIfMissing_NullInbound_NoOp()
+        {
+            ScenarioStoreSystem.CurrentScenarios.TryRemove("SCANcontroller", out _);
+            AgencyScanRouter.SeedBaselineIfMissing(null);
+            Assert.IsFalse(ScenarioStoreSystem.CurrentScenarios.ContainsKey("SCANcontroller"),
+                "Null inbound must not crash and must not insert a phantom key.");
+        }
+
+        // -------------------------------------------------------------------
         // Helpers
         // -------------------------------------------------------------------
 

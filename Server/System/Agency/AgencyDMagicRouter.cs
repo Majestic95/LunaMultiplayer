@@ -3,6 +3,7 @@ using Server.Client;
 using Server.Log;
 using System;
 using System.Globalization;
+using System.Linq;
 
 namespace Server.System.Agency
 {
@@ -106,7 +107,86 @@ namespace Server.System.Agency
             // DMagic-installed servers).
             if (acceptedAny)
                 AgencySystem.SaveAgency(agencyId);
+
+            // [Catch-up-baseline fix 2026-05-22] Same shape as
+            // AgencyScanRouter.SeedBaselineIfMissing — without this, the
+            // catch-up path SendScenariosToClient finds no DMScienceScenario
+            // key in CurrentScenarios under gate=on (router suppresses every
+            // shared-store insert) and silently sends nothing on reconnect.
+            // Per-agency DMagic state would be correctly persisted on disk in
+            // AgencyState.DMagicAsteroidScience + DMagicAnomalies but never
+            // projected back to the client. Same root cause as S2: DMagic's
+            // DMScienceScenario is a mod scenario, never seeded by
+            // ScenarioSystem.GenerateDefaultScenarios at lines 28-38, so no
+            // boot-time path populates CurrentScenarios["DMScienceScenario"].
+            // See SeedBaselineIfMissing XML for the full rationale; same
+            // ordering + lock-discipline + consumer-note as the S2 call site
+            // (see AgencyScanRouter.TryRoute for the canonical comment block).
+            SeedBaselineIfMissing(scenario);
+
             return true;
+        }
+
+        /// <summary>
+        /// [Catch-up-baseline fix 2026-05-22] If
+        /// <see cref="ScenarioStoreSystem.CurrentScenarios"/> has no
+        /// <c>DMScienceScenario</c> entry, insert a stripped baseline derived
+        /// from <paramref name="inbound"/>. The baseline preserves any root
+        /// scalars but strips the player-progress containers' children
+        /// (<c>Asteroid_Science → DM_Science</c>,
+        /// <c>Anomaly_Records → DM_Anomaly_List</c>) so:
+        /// <list type="bullet">
+        ///   <item>The projector at
+        ///        <see cref="AgencyScenarioProjector.SpliceDMagicScienceIntoScenario"/>
+        ///        has a baseline to splice each agency's
+        ///        <see cref="AgencyState.DMagicAsteroidScience"/> +
+        ///        <see cref="AgencyState.DMagicAnomalies"/> onto at outbound
+        ///        time.</item>
+        ///   <item>The on-disk backup at
+        ///        <see cref="ScenarioStoreSystem.BackupScenarios"/> carries the
+        ///        baseline only — never per-agency player progress.</item>
+        ///   <item>Cross-leak is impossible — the baseline by construction has
+        ///        no DM_Science / DM_Anomaly_List children.</item>
+        /// </list>
+        ///
+        /// <para>Mirror of
+        /// <see cref="AgencyScanRouter.SeedBaselineIfMissing"/>. Same Path B
+        /// catch-up problem, same fix shape. See that helper's XML for the
+        /// full rationale + GetOrAdd semantics.</para>
+        ///
+        /// <para><b>Internal visibility</b> for direct ServerTest pinning.</para>
+        /// </summary>
+        internal static void SeedBaselineIfMissing(ConfigNode inbound)
+        {
+            if (inbound == null) return;
+            ScenarioStoreSystem.CurrentScenarios.GetOrAdd("DMScienceScenario", _ => BuildStrippedBaseline(inbound));
+        }
+
+        /// <summary>
+        /// Builds a baseline <see cref="ConfigNode"/> from
+        /// <paramref name="inbound"/> with all player-progress children
+        /// removed. Round-trips via <see cref="ConfigNode.ToString"/> to fully
+        /// isolate the result from the inbound's tree. Internal visibility for
+        /// ServerTest pinning.
+        /// </summary>
+        internal static ConfigNode BuildStrippedBaseline(ConfigNode inbound)
+        {
+            var baseline = new ConfigNode(inbound.ToString()) { Name = "DMScienceScenario" };
+
+            var asteroid = baseline.GetNode("Asteroid_Science")?.Value;
+            if (asteroid != null)
+            {
+                foreach (var entry in asteroid.GetNodes("DM_Science").ToArray())
+                    asteroid.RemoveNode(entry.Value);
+            }
+            var anomaly = baseline.GetNode("Anomaly_Records")?.Value;
+            if (anomaly != null)
+            {
+                foreach (var wrapper in anomaly.GetNodes("DM_Anomaly_List").ToArray())
+                    anomaly.RemoveNode(wrapper.Value);
+            }
+
+            return baseline;
         }
 
         /// <summary>
